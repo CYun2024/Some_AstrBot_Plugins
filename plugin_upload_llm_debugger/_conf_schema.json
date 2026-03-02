@@ -1,0 +1,20 @@
+{
+    "port": {
+        "description": "Web UI 监听端口",
+        "type": "int",
+        "default": 6188,
+        "hint": "访问 http://localhost:6188 查看监控面板"
+    },
+    "password": {
+        "description": "访问密码（留空则不验证）",
+        "type": "string",
+        "default": "llm_debugger",
+        "hint": "设置后需要密码才能访问调试面板，建议设置强密码"
+    },
+    "max_records": {
+        "description": "数据库保留的最大记录数（0为无限）",
+        "type": "int",
+        "default": 500,
+        "hint": "超过此数量将自动清理旧记录"
+    }
+}
