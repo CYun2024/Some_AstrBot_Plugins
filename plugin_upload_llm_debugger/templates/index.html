@@ -50,6 +50,26 @@
             overflow-y: auto;
             padding: 1rem;
         }
+        /* 新增分类过滤器 */
+        .filter-bar {
+            margin-bottom: 1rem;
+            padding: 0.5rem;
+            background: #0f172a;
+            border-radius: 8px;
+        }
+        .filter-bar select {
+            width: 100%;
+            padding: 0.5rem;
+            background: #334155;
+            color: #e2e8f0;
+            border: 1px solid #475569;
+            border-radius: 6px;
+            font-size: 0.875rem;
+            cursor: pointer;
+        }
+        .filter-bar select option {
+            background: #1e293b;
+        }
         .record-item {
             background: #334155;
             border-radius: 8px;
@@ -72,6 +92,8 @@
             align-items: center;
             margin-bottom: 0.25rem;
             font-size: 0.875rem;
+            flex-wrap: wrap;
+            gap: 0.25rem;
         }
         .record-type {
             padding: 0.125rem 0.5rem;
@@ -81,6 +103,16 @@
         }
         .type-request { background: #3b82f6; color: white; }
         .type-response { background: #10b981; color: white; }
+        /* 新增用途标签 */
+        .purpose-tag {
+            font-size: 0.7rem;
+            padding: 0.125rem 0.4rem;
+            border-radius: 12px;
+            background: #475569;
+            color: #cbd5e1;
+            border: 1px solid #64748b;
+            white-space: nowrap;
+        }
         .record-meta {
             font-size: 0.75rem;
             color: #94a3b8;
@@ -160,8 +192,21 @@
     
     <div class="container">
         <div class="sidebar" id="sidebar">
-            <div style="color: #64748b; text-align: center; padding: 2rem;">
-                等待数据...
+            <!-- 分类过滤器 -->
+            <div class="filter-bar">
+                <select id="purpose-filter">
+                    <option value="all">全部记录</option>
+                    <option value="complexity_judge">复杂判断</option>
+                    <option value="followup_judge">追问判断</option>
+                    <option value="solver_call">解题模型</option>
+                    <option value="summarize">精简输出</option>
+                    <option value="persona_restate">人设复述</option>
+                    <option value="apology">道歉消息</option>
+                    <option value="main">主模型（其他）</option>
+                </select>
+            </div>
+            <div id="record-list">
+                <!-- 动态渲染 -->
             </div>
         </div>
         
@@ -176,14 +221,23 @@
     <script>
         let ws;
         let records = [];
-        let selectedId = null;          // 当前选中的记录ID（唯一）
+        let selectedId = null;
+        let currentFilter = 'all';  // 当前选中的分类
+
         const sidebar = document.getElementById('sidebar');
         const mainContent = document.getElementById('main-content');
         const recordCount = document.getElementById('record-count');
         const connStatus = document.getElementById('conn-status');
         const errorToast = document.getElementById('error-toast');
-        
-        // ---------- WebSocket 连接 ----------
+        const purposeFilter = document.getElementById('purpose-filter');
+
+        // 监听过滤器变化
+        purposeFilter.addEventListener('change', (e) => {
+            currentFilter = e.target.value;
+            renderSidebar();
+        });
+
+        // 连接 WebSocket
         function connect() {
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
@@ -201,11 +255,10 @@
                 renderSidebar();
                 recordCount.textContent = `${records.length} 条记录`;
                 
-                // 如果当前有选中的记录，且新消息属于同一 conversation_id，刷新详情
                 if (selectedId) {
                     const selectedRecord = records.find(r => r.id === selectedId);
                     if (selectedRecord && data.conversation_id && data.conversation_id === selectedRecord.conversation_id) {
-                        showDetail(selectedRecord); // 重新渲染当前选中记录的详情（会带上配对信息）
+                        showDetail(selectedRecord);
                     }
                 }
             };
@@ -222,14 +275,30 @@
                 connStatus.style.color = '#ef4444';
             };
         }
-        
-        // ---------- 渲染侧边栏 ----------
+
+        // 获取记录的目的（用于分类）
+        function getPurpose(record) {
+            if (record.source && record.source.purpose) {
+                return record.source.purpose;
+            }
+            // 没有 source.purpose 的记录归为 "main"（主模型调用）
+            return 'main';
+        }
+
+        // 渲染侧边栏（带过滤）
         function renderSidebar() {
-            if (records.length === 0) {
-                sidebar.innerHTML = '<div style="color: #64748b; text-align: center; padding: 2rem;">等待数据...</div>';
+            const filteredRecords = records.filter(record => {
+                if (currentFilter === 'all') return true;
+                return getPurpose(record) === currentFilter;
+            });
+
+            const listEl = document.getElementById('record-list');
+            if (filteredRecords.length === 0) {
+                listEl.innerHTML = '<div style="color: #64748b; text-align: center; padding: 2rem;">没有符合条件的记录</div>';
                 return;
             }
-            sidebar.innerHTML = records.map((record) => {
+
+            listEl.innerHTML = filteredRecords.map((record) => {
                 const isSelected = record.id === selectedId;
                 const type = record.type;
                 const time = new Date(record.timestamp).toLocaleTimeString();
@@ -237,12 +306,24 @@
                 const preview = type === 'request' 
                     ? (record.message?.raw?.substring(0, 30) + '...')
                     : (record.response?.text?.substring(0, 30) + '...');
+                const purpose = getPurpose(record);
+                // 用途显示文本
+                const purposeText = {
+                    'complexity_judge': '复杂判断',
+                    'followup_judge': '追问判断',
+                    'solver_call': '解题模型',
+                    'summarize': '精简',
+                    'persona_restate': '复述',
+                    'apology': '道歉',
+                    'main': '主模型'
+                }[purpose] || purpose;
                 
                 return `
                     <div class="record-item ${type} ${isSelected ? 'active' : ''}" 
                          onclick="selectRecord(${record.id})">
                         <div class="record-header">
                             <span class="record-type type-${type}">${type === 'request' ? '请求' : '响应'}</span>
+                            <span class="purpose-tag">${purposeText}</span>
                             <span style="color: #94a3b8; font-size: 0.75rem;">${time}</span>
                         </div>
                         <div class="record-meta">${sender}: ${preview}</div>
@@ -250,13 +331,9 @@
                 `;
             }).join('');
         }
-        
-        // ---------- 根据ID选中记录（增加防御检查）----------
+
         function selectRecord(id) {
-            if (id === undefined || id === null) {
-                console.warn('selectRecord called with invalid id:', id);
-                return;
-            }
+            if (id === undefined || id === null) return;
             selectedId = Number(id); 
             renderSidebar();
             
@@ -265,19 +342,16 @@
             
             showDetail(current);
         }
-        
-        // ---------- 显示详情（包括可能的配对记录）----------
+
         function showDetail(record) {
             mainContent.innerHTML = '';
 
-            // 显示当前记录
             if (record.type === 'request') {
                 mainContent.innerHTML += renderRequestDetail(record);
             } else {
                 mainContent.innerHTML += renderResponseDetail(record);
             }
 
-            // 尝试显示配对的另一条记录（相同 conversation_id 且不为 null/undefined，且不是同一条记录）
             if (record.conversation_id && record.conversation_id !== 'null') {
                 const pair = records.find(r => 
                     r.conversation_id === record.conversation_id && 
@@ -290,7 +364,6 @@
                         mainContent.innerHTML += renderResponseDetail(pair);
                     }
                 } else {
-                    // 没有配对，显示等待提示
                     mainContent.innerHTML += `
                         <div class="detail-panel" style="opacity: 0.7;">
                             <h3>⏳ 等待配对记录...</h3>
@@ -299,7 +372,6 @@
                     `;
                 }
             } else if (!record.conversation_id) {
-                // conversation_id 为 null，不显示配对
                 mainContent.innerHTML += `
                     <div class="detail-panel" style="opacity: 0.7;">
                         <h3>⚠️ 无法关联对话</h3>
@@ -309,11 +381,10 @@
             }
         }
 
-        // ---------- 渲染请求详情 ----------
         function renderRequestDetail(request) {
             return `
                 <div class="detail-panel">
-                    <h3>📤 LLM 请求详情</h3>
+                    <h3>📤 LLM 请求详情 ${request.source?.purpose ? `(${request.source.purpose})` : ''}</h3>
                     <div style="margin-bottom: 1rem;">
                         <strong style="color: #60a5fa;">发送者:</strong> 
                         ${request.sender.name} (${request.sender.id})
@@ -361,11 +432,10 @@
             `;
         }
 
-        // ---------- 渲染响应详情 ----------
         function renderResponseDetail(response) {
             return `
                 <div class="detail-panel">
-                    <h3>📥 LLM 响应详情</h3>
+                    <h3>📥 LLM 响应详情 ${response.source?.purpose ? `(${response.source.purpose})` : ''}</h3>
                     <div style="margin-bottom: 1rem;">
                         <strong style="color: #60a5fa;">模型:</strong> ${response.response.model || 'Unknown'}
                     </div>
@@ -390,8 +460,7 @@
                 </div>
             `;
         }
-        
-        // ---------- JSON 语法高亮 ----------
+
         function syntaxHighlight(json) {
             json = json.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
             return json.replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g, function (match) {
@@ -410,8 +479,7 @@
                 return '<span class="' + cls + '">' + match + '</span>';
             });
         }
-        
-        // ---------- HTML 转义 ----------
+
         function escapeHtml(text) {
             if (!text) return '';
             return String(text)
@@ -421,8 +489,8 @@
                 .replace(/"/g, "&quot;")
                 .replace(/'/g, "&#039;");
         }
-        
-        // 启动 WebSocket
+
+        // 启动
         connect();
     </script>
 </body>

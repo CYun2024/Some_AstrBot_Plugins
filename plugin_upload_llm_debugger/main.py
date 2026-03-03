@@ -1,15 +1,22 @@
+"""
+LLM Debugger 插件 - 修复版
+修复接口对齐问题，确保其他插件能够正确上报调用记录
+
+版本: 1.2.0
+作者: 韶虹CYun
+"""
+
 import os
 import json
 import asyncio
 import traceback
 from datetime import datetime
-from typing import Dict, Any, Set
+from typing import Dict, Any, Set, Optional
 
 from astrbot.api.star import Star, Context, register
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api import logger
 
-# 兼容 Provider 导入（仅用于类型提示，非必需）
 try:
     from astrbot.api.provider import ProviderRequest, LLMResponse
 except ImportError:
@@ -17,11 +24,10 @@ except ImportError:
     LLMResponse = None
 
 
-@register("llm_debugger", "韶虹CYun", "LLM 调用监控调试器（带WebUI）", "1.0.0")
+@register("llm_debugger", "韶虹CYun", "LLM 调用监控调试器（带WebUI）", "1.2.0")
 class LLMDebugger(Star):
-    """LLM 调用监控调试器（带WebUI）"""
+    """LLM 调用监控调试器（带WebUI）- 修复版"""
 
-    # 默认配置（与 _conf_schema.json 保持一致）
     DEFAULT_PORT = 6188
     DEFAULT_PASSWORD = "llm_debugger1357"
     DEFAULT_MAX_RECORDS = 500
@@ -32,9 +38,33 @@ class LLMDebugger(Star):
         self.db = None
         self.web_server = None
         self.connected_clients: Set = set()
+        self._shutdown_event = None
+        
+        # 将自身注册到context，方便其他插件获取
+        self._register_to_context()
+    
+    def _register_to_context(self):
+        """将debugger实例注册到context，方便其他插件获取"""
+        try:
+            # 方式1: 尝试设置到context的自定义属性
+            if not hasattr(self.context, '_plugin_instances'):
+                self.context._plugin_instances = {}
+            self.context._plugin_instances['llm_debugger'] = self
+            logger.info("[LLMDebugger] 已注册到 context._plugin_instances")
+        except Exception as e:
+            logger.debug(f"[LLMDebugger] 注册到 _plugin_instances 失败: {e}")
+        
+        try:
+            # 方式2: 尝试设置到context的star_registry（如果存在）
+            if hasattr(self.context, 'star_registry'):
+                if isinstance(self.context.star_registry, dict):
+                    self.context.star_registry['llm_debugger'] = self
+                    logger.info("[LLMDebugger] 已注册到 context.star_registry")
+        except Exception as e:
+            logger.debug(f"[LLMDebugger] 注册到 star_registry 失败: {e}")
 
     async def initialize(self):
-        """初始化数据库和 Web 服务器"""
+        """初始化插件"""
         try:
             import aiosqlite
             from quart import Quart, render_template, websocket, request, session, redirect, abort, render_template_string, jsonify
@@ -45,7 +75,6 @@ class LLMDebugger(Star):
             logger.error(f"[LLMDebugger] 缺少依赖库: {e}。请安装: pip install aiosqlite quart quart-cors")
             return
 
-        # 读取插件配置
         plugin_config = self.context.get_config("llm_debugger") or {}
         port = plugin_config.get("port", self.DEFAULT_PORT)
         password = plugin_config.get("password", self.DEFAULT_PASSWORD)
@@ -53,7 +82,7 @@ class LLMDebugger(Star):
 
         logger.info(f"[LLMDebugger] 配置加载: port={port}, password={'已设置' if password else '未设置'}, max_records={max_records}")
 
-        # 准备数据目录
+        # 数据目录
         data_dir = "/AstrBot/data"
         if not os.path.exists(data_dir):
             data_dir = os.path.join(os.path.dirname(__file__), "data")
@@ -61,92 +90,94 @@ class LLMDebugger(Star):
         os.makedirs(db_dir, exist_ok=True)
         db_path = os.path.join(db_dir, "logs.db")
 
-        # 数据库类（修改 get_recent_records 以包含 id）
-        class Database:
-            def __init__(self, db_path: str, max_records: int = 5000):
-                self.db_path = db_path
-                self.max_records = max_records
-
-            async def init(self):
-                os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
-                async with aiosqlite.connect(self.db_path) as db:
-                    await db.execute('''
-                        CREATE TABLE IF NOT EXISTS llm_records (
-                            id INTEGER PRIMARY KEY AUTOINCREMENT,
-                            timestamp TEXT, type TEXT, conversation_id TEXT,
-                            sender_id TEXT, sender_name TEXT, data TEXT,
-                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                        )
-                    ''')
-                    await db.execute('CREATE INDEX IF NOT EXISTS idx_timestamp ON llm_records(timestamp DESC)')
-                    await db.commit()
-
-            async def save_record(self, data: Dict[str, Any]) -> int:
-                # 在保存前确保 data 完全可序列化
-                safe_data = self._make_serializable(data)
-                async with aiosqlite.connect(self.db_path) as db:
-                    cursor = await db.execute(
-                        '''INSERT INTO llm_records (timestamp, type, conversation_id, sender_id, sender_name, data) 
-                           VALUES (?, ?, ?, ?, ?, ?)''',
-                        (safe_data.get('timestamp'), safe_data.get('type'), safe_data.get('conversation_id'),
-                         safe_data.get('sender', {}).get('id'), safe_data.get('sender', {}).get('name'),
-                         json.dumps(safe_data, ensure_ascii=False))
-                    )
-                    await db.commit()
-                    if self.max_records > 0:
-                        await self._cleanup(db)
-                    return cursor.lastrowid
-
-            def _make_serializable(self, obj):
-                """递归将对象转换为 JSON 可序列化的基本类型"""
-                if obj is None or isinstance(obj, (str, int, float, bool)):
-                    return obj
-                if isinstance(obj, (list, tuple, set)):
-                    return [self._make_serializable(item) for item in obj]
-                if isinstance(obj, dict):
-                    return {key: self._make_serializable(value) for key, value in obj.items()}
-                # 处理常见复杂对象
-                if hasattr(obj, 'model_dump'):  # Pydantic v2
-                    return self._make_serializable(obj.model_dump())
-                if hasattr(obj, 'dict'):        # Pydantic v1
-                    return self._make_serializable(obj.dict())
-                if hasattr(obj, '__dict__'):     # 普通对象
-                    return self._make_serializable(obj.__dict__)
-                # 兜底：转换为字符串
-                return str(obj)
-
-            async def _cleanup(self, db):
-                cursor = await db.execute('SELECT COUNT(*) FROM llm_records')
-                count = (await cursor.fetchone())[0]
-                if count > self.max_records:
-                    to_delete = count - self.max_records
-                    await db.execute('DELETE FROM llm_records WHERE id IN (SELECT id FROM llm_records ORDER BY timestamp ASC LIMIT ?)', (to_delete,))
-                    await db.commit()
-
-            async def get_recent_records(self, limit: int = 100):
-                async with aiosqlite.connect(self.db_path) as db:
-                    db.row_factory = aiosqlite.Row
-                    # 同时查询 id 和 data，确保返回的数据中包含 id 字段
-                    cursor = await db.execute('SELECT id, data FROM llm_records ORDER BY timestamp DESC LIMIT ?', (limit,))
-                    rows = await cursor.fetchall()
-                    result = []
-                    for row in rows:
-                        data = json.loads(row['data'])
-                        # 如果 data 中没有 id（旧记录），则使用数据库的 id
-                        if 'id' not in data:
-                            data['id'] = row['id']
-                        result.append(data)
-                    return result
-
+        # 初始化数据库
         self.db = Database(db_path, max_records)
         await self.db.init()
 
-        # 启动 Web 服务器
+        # 启动Web服务器
+        self._shutdown_event = asyncio.Event()
         self.web_server = asyncio.create_task(self._start_web_server(port, password))
         logger.info(f"[LLMDebugger] WebUI 已启动: http://0.0.0.0:{port} (密码: {'已启用' if password else '无'})")
 
+    # ========== 公共方法：供其他插件手动记录 LLM 调用 ==========
+    async def record_llm_call(self, data: dict):
+        """
+        供其他插件调用的公共方法，用于记录 LLM 请求或响应
+        
+        Args:
+            data: 包含以下字段的字典:
+                - phase: "request" 或 "response"
+                - provider_id: 提供商ID
+                - model: 模型名称
+                - prompt: 请求的提示词（请求阶段）
+                - images: 图片列表（请求阶段）
+                - response: 响应文本（响应阶段）
+                - usage: 用量信息（响应阶段）
+                - source: 来源信息，如 {"plugin": "complex_solver", "purpose": "complexity_judge"}
+                - sender: 发送者信息（可选）
+                - conversation_id: 会话ID（可选）
+                - timestamp: 时间戳（可选，默认自动生成）
+                - system_prompt: 系统提示词（可选）
+                - contexts: 上下文列表（可选）
+        """
+        if not self.db:
+            logger.debug("[LLMDebugger] 数据库未初始化，无法记录")
+            return
+
+        try:
+            phase = data.get("phase")
+            if phase not in ("request", "response"):
+                logger.warning(f"[LLMDebugger] 忽略无效 phase: {phase}")
+                return
+
+            # 构建记录数据
+            record_data = {
+                "timestamp": data.get("timestamp", datetime.now().isoformat()),
+                "type": phase,
+                "conversation_id": data.get("conversation_id"),
+                "sender": data.get("sender", {}),
+                "source": data.get("source", {}),
+            }
+
+            if phase == "request":
+                record_data.update({
+                    "message": {
+                        "raw": data.get("prompt", ""),
+                        "formatted_prompt": data.get("prompt", ""),
+                        "image_urls": data.get("images", []),
+                    },
+                    "llm_config": {
+                        "model": data.get("model"),
+                        "system_prompt": data.get("system_prompt", ""),
+                        "contexts": data.get("contexts", []),
+                        "contexts_count": len(data.get("contexts", [])),
+                    }
+                })
+            else:  # response
+                record_data.update({
+                    "response": {
+                        "text": data.get("response", ""),
+                        "model": data.get("model"),
+                        "raw": data.get("raw_response"),
+                    },
+                    "usage": data.get("usage"),
+                })
+
+            # 保存并广播
+            safe_data = self._make_serializable(record_data)
+            record_id = await self.db.save_record(safe_data)
+            safe_data["id"] = record_id
+            await self._broadcast(safe_data)
+            
+            source_info = data.get('source', {})
+            logger.debug(f"[LLMDebugger] 已记录 {phase} 来自 {source_info.get('plugin', 'unknown')}/{source_info.get('purpose', 'unknown')}")
+
+        except Exception as e:
+            logger.error(f"[LLMDebugger] record_llm_call 失败: {e}\n{traceback.format_exc()}")
+
+    # ========== Web服务器 ==========
     async def _start_web_server(self, port: int, password: str):
-        """创建并运行 Quart 应用（增强错误处理）"""
+        """启动Web服务器"""
         from quart import Quart, render_template, websocket, request, session, redirect, abort, render_template_string, jsonify
         from quart_cors import cors
         import functools
@@ -166,7 +197,6 @@ class LLMDebugger(Star):
             logger.error(f"[LLMDebugger] 未捕获的异常: {e}\n{traceback.format_exc()}")
             return "Internal Server Error", 500
 
-        # 认证辅助函数（略，与之前相同）...
         def check_auth():
             if not password:
                 return True
@@ -257,70 +287,29 @@ button{width:100%;padding:0.75rem;background:#3b82f6;color:white;border:none;bor
                 self.unregister_ws_client(ws_obj)
 
         try:
-            await app.run_task(host='0.0.0.0', port=port, debug=False)
+            await app.run_task(
+                host='0.0.0.0',
+                port=port,
+                debug=False,
+                shutdown_trigger=self._shutdown_event.wait
+            )
         except Exception as e:
-            logger.error(f"[LLMDebugger] Web 服务器启动失败: {e}\n{traceback.format_exc()}")
+            logger.error(f"[LLMDebugger] Web 服务器运行失败: {e}\n{traceback.format_exc()}")
 
-    # ---------- 辅助函数：将数据递归转换为可 JSON 序列化的格式 ----------
-    def _make_serializable(self, obj):
-        """递归将对象转换为 JSON 可序列化的基本类型"""
-        if obj is None or isinstance(obj, (str, int, float, bool)):
-            return obj
-        if isinstance(obj, (list, tuple, set)):
-            return [self._make_serializable(item) for item in obj]
-        if isinstance(obj, dict):
-            return {key: self._make_serializable(value) for key, value in obj.items()}
-        # 处理常见复杂对象
-        if hasattr(obj, 'model_dump'):  # Pydantic v2
-            return self._make_serializable(obj.model_dump())
-        if hasattr(obj, 'dict'):        # Pydantic v1
-            return self._make_serializable(obj.dict())
-        if hasattr(obj, '__dict__'):     # 普通对象
-            return self._make_serializable(obj.__dict__)
-        # 兜底：转换为字符串
-        return str(obj)
-
+    # ========== 事件监听 ==========
     @filter.on_llm_request()
     async def on_llm_request(self, event: AstrMessageEvent, req):
-        """记录 LLM 请求（增强数据提取）"""
+        """监听LLM请求"""
         if not self.db:
             return
         try:
-            logger.debug(f"[LLMDebugger] on_llm_request 触发，req 类型: {type(req)}")
-            logger.debug(f"req dir: {dir(req)}")
-
-            # 尝试提取 conversation_id
-            conv_id = getattr(req, 'conversation_id', None)
-            if conv_id is None:
-                conv_id = getattr(req, 'session_id', None) or getattr(req, 'id', None)
-
-            # 提取 prompt
-            prompt = getattr(req, 'prompt', '')
-            if not prompt:
-                if hasattr(req, 'get_prompt') and callable(req.get_prompt):
-                    prompt = req.get_prompt()
-                else:
-                    prompt = event.message_str
-
-            # 提取 contexts（可能是对话历史）
-            contexts = getattr(req, 'contexts', [])
-            if not contexts and hasattr(req, 'get_contexts') and callable(req.get_contexts):
-                contexts = req.get_contexts()
-
-            # 提取 system_prompt
-            system_prompt = getattr(req, 'system_prompt', '')
-            if not system_prompt and hasattr(req, 'get_system_prompt') and callable(req.get_system_prompt):
-                system_prompt = req.get_system_prompt()
-
-            # 提取 model
+            conv_id = getattr(req, 'conversation_id', None) or getattr(req, 'session_id', None) or getattr(req, 'id', None)
+            prompt = getattr(req, 'prompt', '') or event.message_str
+            contexts = getattr(req, 'contexts', []) or (req.get_contexts() if hasattr(req, 'get_contexts') and callable(req.get_contexts) else [])
+            system_prompt = getattr(req, 'system_prompt', '') or (req.get_system_prompt() if hasattr(req, 'get_system_prompt') and callable(req.get_system_prompt) else '')
             model = getattr(req, 'model', 'default')
+            image_urls = getattr(req, 'image_urls', []) or (req.get_image_urls() if hasattr(req, 'get_image_urls') and callable(req.get_image_urls) else [])
 
-            # 提取 image_urls
-            image_urls = getattr(req, 'image_urls', [])
-            if not image_urls and hasattr(req, 'get_image_urls') and callable(req.get_image_urls):
-                image_urls = req.get_image_urls()
-
-            # 构建数据字典，并确保所有字段可序列化
             data = {
                 "timestamp": datetime.now().isoformat(),
                 "type": "request",
@@ -340,64 +329,35 @@ button{width:100%;padding:0.75rem;background:#3b82f6;color:white;border:none;bor
                     "model": model,
                     "system_prompt": system_prompt,
                     "contexts_count": len(contexts),
-                    "contexts": self._make_serializable(contexts)  # 转换 contexts
+                    "contexts": self._make_serializable(contexts)
                 }
             }
 
-            # 最后确保整个 data 可序列化
             safe_data = self._make_serializable(data)
             record_id = await self.db.save_record(safe_data)
             safe_data["id"] = record_id
             await self._broadcast(safe_data)
-            logger.info(f"[LLMDebugger] 已记录请求 {conv_id}")
+            logger.debug(f"[LLMDebugger] 已记录请求 {conv_id}")
         except Exception as e:
-            logger.error(f"[LLMDebugger] 记录请求失败: {e}")
-            logger.error(traceback.format_exc())
+            logger.error(f"[LLMDebugger] 记录请求失败: {e}\n{traceback.format_exc()}")
 
     @filter.on_llm_response()
     async def on_llm_response(self, event: AstrMessageEvent, resp):
-        """记录 LLM 响应（增强数据提取）"""
+        """监听LLM响应"""
         if not self.db:
             return
         try:
-            logger.debug(f"[LLMDebugger] on_llm_response 触发，resp 类型: {type(resp)}")
-            logger.debug(f"resp dir: {dir(resp)}")
-
-            # 提取 conversation_id
-            conv_id = getattr(resp, 'conversation_id', None)
-            if conv_id is None:
-                conv_id = getattr(resp, 'session_id', None) or getattr(resp, 'id', None)
-
-            # 提取 completion_text
-            text = getattr(resp, 'completion_text', '')
-            if not text:
-                text = getattr(resp, 'content', '') or getattr(resp, 'message', '') or getattr(resp, 'text', '')
-                if not text:
-                    if isinstance(resp, str):
-                        text = resp
-                    else:
-                        text = str(resp)
-
-            # 提取 model
+            conv_id = getattr(resp, 'conversation_id', None) or getattr(resp, 'session_id', None) or getattr(resp, 'id', None)
+            text = getattr(resp, 'completion_text', '') or getattr(resp, 'content', '') or getattr(resp, 'message', '') or getattr(resp, 'text', '') or (resp if isinstance(resp, str) else str(resp))
             model = getattr(resp, 'model', None)
+            usage = getattr(resp, 'usage', None) or (resp.get_usage() if hasattr(resp, 'get_usage') and callable(resp.get_usage) else None)
+            raw = getattr(resp, 'raw_completion', None) or (resp.get_raw() if hasattr(resp, 'get_raw') and callable(resp.get_raw) else None)
 
-            # 提取 usage
-            usage = getattr(resp, 'usage', None)
-            if usage is None and hasattr(resp, 'get_usage') and callable(resp.get_usage):
-                usage = resp.get_usage()
-            # 转换 usage 为可序列化格式
             if usage is not None:
                 usage = self._make_serializable(usage)
-
-            # 提取 raw_completion
-            raw = getattr(resp, 'raw_completion', None)
-            if raw is None and hasattr(resp, 'get_raw') and callable(resp.get_raw):
-                raw = resp.get_raw()
-            # 转换 raw 为可序列化格式
             if raw is not None:
                 raw = self._make_serializable(raw)
 
-            # 构建数据字典
             data = {
                 "timestamp": datetime.now().isoformat(),
                 "type": "response",
@@ -411,18 +371,33 @@ button{width:100%;padding:0.75rem;background:#3b82f6;color:white;border:none;bor
                 "usage": usage
             }
 
-            # 确保整个 data 可序列化
             safe_data = self._make_serializable(data)
             record_id = await self.db.save_record(safe_data)
             safe_data["id"] = record_id
             await self._broadcast(safe_data)
-            logger.info(f"[LLMDebugger] 已记录响应 {conv_id}")
+            logger.debug(f"[LLMDebugger] 已记录响应 {conv_id}")
         except Exception as e:
-            logger.error(f"[LLMDebugger] 记录响应失败: {e}")
-            logger.error(traceback.format_exc())
+            logger.error(f"[LLMDebugger] 记录响应失败: {e}\n{traceback.format_exc()}")
+
+    # ========== 工具方法 ==========
+    def _make_serializable(self, obj):
+        """将对象转换为可序列化的格式"""
+        if obj is None or isinstance(obj, (str, int, float, bool)):
+            return obj
+        if isinstance(obj, (list, tuple, set)):
+            return [self._make_serializable(item) for item in obj]
+        if isinstance(obj, dict):
+            return {key: self._make_serializable(value) for key, value in obj.items()}
+        if hasattr(obj, 'model_dump'):
+            return self._make_serializable(obj.model_dump())
+        if hasattr(obj, 'dict'):
+            return self._make_serializable(obj.dict())
+        if hasattr(obj, '__dict__'):
+            return self._make_serializable(obj.__dict__)
+        return str(obj)
 
     async def _broadcast(self, data: Dict[str, Any]):
-        """广播到 WebSocket 客户端"""
+        """广播消息到所有WebSocket客户端"""
         if not self.connected_clients:
             return
         message = json.dumps(data, ensure_ascii=False, default=str)
@@ -435,22 +410,110 @@ button{width:100%;padding:0.75rem;background:#3b82f6;color:white;border:none;bor
         self.connected_clients -= disconnected
 
     def register_ws_client(self, ws):
+        """注册WebSocket客户端"""
         self.connected_clients.add(ws)
 
     def unregister_ws_client(self, ws):
+        """注销WebSocket客户端"""
         self.connected_clients.discard(ws)
 
     async def get_recent_records(self, limit=100):
+        """获取最近的记录"""
         if self.db:
             return await self.db.get_recent_records(limit)
         return []
 
     async def terminate(self):
-        """插件卸载时清理"""
+        """插件卸载"""
+        logger.info("[LLMDebugger] 正在停止 Web 服务器...")
+        if self._shutdown_event:
+            self._shutdown_event.set()
         if self.web_server:
-            self.web_server.cancel()
             try:
-                await self.web_server
-            except asyncio.CancelledError:
+                await asyncio.wait_for(self.web_server, timeout=5.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
                 pass
+        self.connected_clients.clear()
         logger.info("[LLMDebugger] 已停止")
+
+
+# ========== 数据库类 ==========
+class Database:
+    """数据库管理类"""
+    
+    def __init__(self, db_path: str, max_records: int = 5000):
+        self.db_path = db_path
+        self.max_records = max_records
+
+    async def init(self):
+        """初始化数据库"""
+        import aiosqlite
+        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS llm_records (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT, type TEXT, conversation_id TEXT,
+                    sender_id TEXT, sender_name TEXT, data TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_timestamp ON llm_records(timestamp DESC)')
+            await db.commit()
+
+    async def save_record(self, data: Dict[str, Any]) -> int:
+        """保存记录"""
+        import aiosqlite
+        safe_data = self._make_serializable(data)
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(
+                '''INSERT INTO llm_records (timestamp, type, conversation_id, sender_id, sender_name, data) 
+                   VALUES (?, ?, ?, ?, ?, ?)''',
+                (safe_data.get('timestamp'), safe_data.get('type'), safe_data.get('conversation_id'),
+                 safe_data.get('sender', {}).get('id'), safe_data.get('sender', {}).get('name'),
+                 json.dumps(safe_data, ensure_ascii=False))
+            )
+            await db.commit()
+            if self.max_records > 0:
+                await self._cleanup(db)
+            return cursor.lastrowid
+
+    def _make_serializable(self, obj):
+        """序列化对象"""
+        if obj is None or isinstance(obj, (str, int, float, bool)):
+            return obj
+        if isinstance(obj, (list, tuple, set)):
+            return [self._make_serializable(item) for item in obj]
+        if isinstance(obj, dict):
+            return {key: self._make_serializable(value) for key, value in obj.items()}
+        if hasattr(obj, 'model_dump'):
+            return self._make_serializable(obj.model_dump())
+        if hasattr(obj, 'dict'):
+            return self._make_serializable(obj.dict())
+        if hasattr(obj, '__dict__'):
+            return self._make_serializable(obj.__dict__)
+        return str(obj)
+
+    async def _cleanup(self, db):
+        """清理旧记录"""
+        cursor = await db.execute('SELECT COUNT(*) FROM llm_records')
+        count = (await cursor.fetchone())[0]
+        if count > self.max_records:
+            to_delete = count - self.max_records
+            await db.execute('DELETE FROM llm_records WHERE id IN (SELECT id FROM llm_records ORDER BY timestamp ASC LIMIT ?)', (to_delete,))
+            await db.commit()
+
+    async def get_recent_records(self, limit: int = 100):
+        """获取最近记录"""
+        import aiosqlite
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute('SELECT id, data FROM llm_records ORDER BY timestamp DESC LIMIT ?', (limit,))
+            rows = await cursor.fetchall()
+            result = []
+            for row in rows:
+                data = json.loads(row['data'])
+                if 'id' not in data:
+                    data['id'] = row['id']
+                result.append(data)
+            return result

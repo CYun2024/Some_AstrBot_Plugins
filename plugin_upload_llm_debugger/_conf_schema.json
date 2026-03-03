@@ -8,7 +8,7 @@
     "password": {
         "description": "访问密码（留空则不验证）",
         "type": "string",
-        "default": "llm_debugger",
+        "default": "llm_debugger1357",
         "hint": "设置后需要密码才能访问调试面板，建议设置强密码"
     },
     "max_records": {
