@@ -6,3 +6,5 @@
 2. LLM_debugger,创建一个web服务以监听主api的调用，可能Bug有点多
    
 3. 修改了astrbot_plugin_angel_heart的前台文件，新增了@到上下文中
+
+4. complex_solver,让模型在解决复杂问题时选择调用另一个专用模型（尽量是多模态的）
