@@ -13,29 +13,37 @@ from .utils import make_serializable, truncate_text
 
 class DebuggerReporter:
     """LLM Debugger 上报器"""
-    
+
     def __init__(self, context: Context):
         self.context = context
         self._debugger_instance = None
         self._debugger_checked = False
-    
+
     def _get_debugger(self):
         """获取 LLM Debugger 实例（带缓存）"""
         if self._debugger_checked:
             return self._debugger_instance
-        
+
         self._debugger_checked = True
         try:
             # 尝试通过多种方式获取 debugger
             debugger = None
-            
+
             # 方式1: 通过 get_registered_star
             try:
                 debugger = self.context.get_registered_star("llm_debugger")
             except Exception:
                 pass
-            
-            # 方式2: 通过 provider 或 star 列表查找
+
+            # 方式2: 通过 _plugin_instances（LLMDebugger注册的位置）
+            if not debugger:
+                try:
+                    if hasattr(self.context, '_plugin_instances'):
+                        debugger = self.context._plugin_instances.get('llm_debugger')
+                except Exception:
+                    pass
+
+            # 方式3: 通过 provider 或 star 列表查找
             if not debugger:
                 try:
                     stars = getattr(self.context, '_stars', {}) or {}
@@ -45,8 +53,8 @@ class DebuggerReporter:
                             break
                 except Exception:
                     pass
-            
-            # 方式3: 通过 context 的 star_map 查找
+
+            # 方式4: 通过 context 的 star_map 查找
             if not debugger:
                 try:
                     star_map = getattr(self.context, 'star_map', {}) or {}
@@ -56,7 +64,7 @@ class DebuggerReporter:
                             break
                 except Exception:
                     pass
-            
+
             if debugger and hasattr(debugger, 'record_llm_call'):
                 self._debugger_instance = debugger
                 logger.info(f"[DebuggerReporter] 成功连接到 LLM Debugger")
@@ -64,11 +72,11 @@ class DebuggerReporter:
             else:
                 logger.debug(f"[DebuggerReporter] 未找到 LLM Debugger 或缺少 record_llm_call 方法")
                 return None
-                
+
         except Exception as e:
             logger.debug(f"[DebuggerReporter] 获取 LLM Debugger 失败: {e}")
             return None
-    
+
     async def report_request(
         self,
         provider_id: str,
@@ -85,26 +93,31 @@ class DebuggerReporter:
         debugger = self._get_debugger()
         if not debugger:
             return
-        
+
         try:
+            # 截断过长的prompt避免数据库问题
+            prompt_truncated = truncate_text(prompt, 8000) if len(prompt) > 8000 else prompt
+            system_truncated = truncate_text(system_prompt, 2000) if len(system_prompt) > 2000 else system_prompt
+
             data = {
                 "phase": "request",
                 "provider_id": provider_id,
                 "model": model or "unknown",
-                "prompt": prompt,
+                "prompt": prompt_truncated,
                 "images": images or [],
                 "source": {"plugin": "complex_solver", "purpose": purpose},
-                "sender": sender_info,
-                "conversation_id": conv_id,
+                "sender": sender_info or {},
+                "conversation_id": conv_id or "",
                 "timestamp": datetime.now().isoformat(),
-                "system_prompt": system_prompt,
+                "system_prompt": system_truncated,
                 "contexts": contexts or []
             }
+
             await debugger.record_llm_call(data)
             logger.debug(f"[DebuggerReporter] 已上报请求: {purpose}")
         except Exception as e:
             logger.debug(f"[DebuggerReporter] 上报请求失败: {e}")
-    
+
     async def report_response(
         self,
         provider_id: str,
@@ -119,24 +132,28 @@ class DebuggerReporter:
         debugger = self._get_debugger()
         if not debugger:
             return
-        
+
         try:
+            # 截断过长的response避免数据库问题
+            response_truncated = truncate_text(response, 8000) if len(response) > 8000 else response
+
             data = {
                 "phase": "response",
                 "provider_id": provider_id,
                 "model": model or "unknown",
-                "response": response,
+                "response": response_truncated,
                 "source": {"plugin": "complex_solver", "purpose": purpose},
-                "sender": sender_info,
-                "conversation_id": conv_id,
+                "sender": sender_info or {},
+                "conversation_id": conv_id or "",
                 "timestamp": datetime.now().isoformat(),
                 "usage": make_serializable(usage) if usage else None
             }
+
             await debugger.record_llm_call(data)
             logger.debug(f"[DebuggerReporter] 已上报响应: {purpose}")
         except Exception as e:
             logger.debug(f"[DebuggerReporter] 上报响应失败: {e}")
-    
+
     async def report_complexity_judge(
         self,
         provider_id: str,
@@ -155,7 +172,7 @@ class DebuggerReporter:
 用户问题：{question}
 
 请只输出"COMPLEX"或"SIMPLE"，不要输出其他内容。"""
-        
+
         await self.report_request(
             provider_id=provider_id,
             model=model,
@@ -165,7 +182,7 @@ class DebuggerReporter:
             sender_info=sender_info,
             conv_id=conv_id
         )
-        
+
         await self.report_response(
             provider_id=provider_id,
             model=model,
@@ -174,7 +191,7 @@ class DebuggerReporter:
             sender_info=sender_info,
             conv_id=conv_id
         )
-    
+
     async def report_followup_judge(
         self,
         provider_id: str,
@@ -197,7 +214,7 @@ class DebuggerReporter:
 新消息：{question}
 
 请只输出"FOLLOWUP"或"NEW"。"""
-        
+
         await self.report_request(
             provider_id=provider_id,
             model=model,
@@ -207,7 +224,7 @@ class DebuggerReporter:
             sender_info=sender_info,
             conv_id=conv_id
         )
-        
+
         await self.report_response(
             provider_id=provider_id,
             model=model,

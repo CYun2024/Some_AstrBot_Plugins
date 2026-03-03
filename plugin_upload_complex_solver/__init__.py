@@ -2,7 +2,7 @@
 Complex Solver Plugin for AstrBot
 多模型协作求解插件，支持双模型并行、@提及、人设复述等功能
 
-版本: 3.1.0
+版本: 3.1.1
 作者: CYun2024
 仓库: https://github.com/CYun2024/astrbot_plugin_complex_solver
 """
@@ -14,7 +14,7 @@ ComplexSolverPlugin = register(
     name="complex_solver",
     author="CYun2024",
     desc="多模型协作求解插件，支持双模型并行、@提及、人设复述/精简模型直接用人设输出",
-    version="3.1.0",
+    version="3.1.1",
     repo="https://github.com/CYun2024/astrbot_plugin_complex_solver"
 )(_ComplexSolverPlugin)
 

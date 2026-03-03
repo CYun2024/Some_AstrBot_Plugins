@@ -25,6 +25,19 @@
     "description": "解题模型2名称（可选）",
     "hint": "第二个解题模型的具体模型ID"
   },
+  "vision_provider": {
+    "type": "string",
+    "default": "",
+    "description": "视觉模型提供商ID",
+    "hint": "用于识别图片内容的多模态模型（如GPT-4V、Claude 3等）",
+    "_special": "select_provider"
+  },
+  "vision_model": {
+    "type": "string",
+    "default": "",
+    "description": "视觉模型名称（可选）",
+    "hint": "多模态视觉模型的具体模型ID，留空使用提供商默认模型"
+  },
   "summarize_provider": {
     "type": "string",
     "default": "",
@@ -56,6 +69,18 @@
     "description": "启用 LaTeX 公式渲染",
     "hint": "开启后会将数学公式渲染为图片显示"
   },
+  "enable_whole_render": {
+    "type": "bool",
+    "default": true,
+    "description": "使用整段文本渲染",
+    "hint": "开启后当关闭人设复述时，会将整个回答渲染为一张图片（适合包含长公式的答案）"
+  },
+  "enable_vision": {
+    "type": "bool",
+    "default": true,
+    "description": "启用图片识别功能",
+    "hint": "开启后当用户发送图片时，会使用视觉模型识别图片内容"
+  },
   "enable_context": {
     "type": "bool",
     "default": true,
@@ -79,5 +104,23 @@
     "default": 9,
     "description": "最大等待时间（分钟）",
     "hint": "解题模型最大总等待时间，默认9分钟"
+  },
+  "bot_names": {
+    "type": "list",
+    "default": ["韶梦", "shaomeng"],
+    "description": "Bot名称列表",
+    "hint": "当消息中包含这些名字时才会触发复杂问题判断（防止群聊误触发）"
+  },
+  "strict_trigger": {
+    "type": "bool",
+    "default": true,
+    "description": "严格触发模式",
+    "hint": "开启后只在私聊、@Bot或提到Bot名字时才触发复杂问题判断，防止群聊误触发"
+  },
+  "debug_mode": {
+    "type": "bool",
+    "default": false,
+    "description": "调试模式",
+    "hint": "开启后会输出详细的调试日志，用于排查问题"
   }
 }
