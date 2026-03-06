@@ -1,0 +1,210 @@
+{
+    "core_settings": {
+        "description": "核心设置",
+        "hint": "插件的核心功能开关与基本配置",
+        "type": "object",
+        "items": {
+            "enable": {
+                "description": "启用插件",
+                "hint": "总开关，关闭后插件完全停止工作",
+                "type": "bool",
+                "default": true
+            },
+            "trigger_words": {
+                "description": "触发词",
+                "hint": "消息中包含这些词时会触发回复，英文逗号分隔",
+                "type": "string",
+                "default": "bot,机器人,机巧猫"
+            },
+            "admin_user_id": {
+                "description": "管理员QQ号",
+                "hint": "管理员的消息会在上下文中特殊标注",
+                "type": "string",
+                "default": ""
+            },
+            "bot_name": {
+                "description": "Bot名字",
+                "hint": "用于识别@bot和消息中包含bot名字的情况",
+                "type": "string",
+                "default": "机巧猫"
+            },
+            "bot_qq_id": {
+                "description": "Bot的QQ号",
+                "hint": "用于识别@bot",
+                "type": "string",
+                "default": ""
+            }
+        }
+    },
+    "model_settings": {
+        "description": "模型配置",
+        "hint": "配置不同功能使用的模型",
+        "type": "object",
+        "items": {
+            "main_llm_provider": {
+                "description": "主LLM提供商ID",
+                "hint": "用于正常回复的模型，留空使用默认",
+                "type": "string",
+                "_special": "select_provider",
+                "default": ""
+            },
+            "model_a_provider": {
+                "description": "模型A提供商ID",
+                "hint": "用于总结上下文和判定主动回复的模型，留空使用默认",
+                "type": "string",
+                "_special": "select_provider",
+                "default": ""
+            },
+            "model_b_provider": {
+                "description": "模型B提供商ID",
+                "hint": "用于分析用户画像的模型，留空使用默认",
+                "type": "string",
+                "_special": "select_provider",
+                "default": ""
+            },
+            "vision_provider": {
+                "description": "识图模型提供商ID",
+                "hint": "用于识别图片内容的模型，留空使用默认",
+                "type": "string",
+                "_special": "select_provider",
+                "default": ""
+            },
+            "vision_prompt": {
+                "description": "识图提示词",
+                "hint": "发送给识图模型的提示词",
+                "type": "string",
+                "default": "请用中文详细描述这张图片的内容。"
+            }
+        }
+    },
+    "context_settings": {
+        "description": "上下文配置",
+        "hint": "配置上下文存储和总结相关参数",
+        "type": "object",
+        "items": {
+            "max_context_messages": {
+                "description": "主LLM上下文条数",
+                "hint": "主LLM回复时附带的上下文消息数量",
+                "type": "int",
+                "default": 100
+            },
+            "model_a_context_messages": {
+                "description": "模型A上下文条数",
+                "hint": "模型A总结时附带的上下文消息数量",
+                "type": "int",
+                "default": 150
+            },
+            "summary_interval": {
+                "description": "总结间隔",
+                "hint": "每多少条消息触发一次上下文总结",
+                "type": "int",
+                "default": 10
+            },
+            "context_max_age_days": {
+                "description": "上下文最大保留天数",
+                "hint": "超过这个天数的历史消息会被清理",
+                "type": "int",
+                "default": 7
+            }
+        }
+    },
+    "active_reply_settings": {
+        "description": "主动回复配置",
+        "hint": "配置主动回复的触发条件",
+        "type": "object",
+        "items": {
+            "enable": {
+                "description": "启用主动回复",
+                "hint": "开启后模型A会判定是否需要主动回复",
+                "type": "bool",
+                "default": true
+            },
+            "trigger_keyword": {
+                "description": "主动回复触发标记",
+                "hint": "模型A输出此标记时表示需要主动回复",
+                "type": "string",
+                "default": "[ACTIVE_REPLY]"
+            },
+            "strict_mode": {
+                "description": "严格模式",
+                "hint": "开启后主动回复判定更加严格",
+                "type": "bool",
+                "default": true
+            },
+            "avoid_controversial": {
+                "description": "避免争议话题",
+                "hint": "开启后不参与有争议的话题",
+                "type": "bool",
+                "default": true
+            }
+        }
+    },
+    "user_profile_settings": {
+        "description": "用户画像配置",
+        "hint": "配置用户画像相关功能",
+        "type": "object",
+        "items": {
+            "enable": {
+                "description": "启用用户画像",
+                "hint": "开启后AI会维护用户画像",
+                "type": "bool",
+                "default": true
+            },
+            "daily_update_hour": {
+                "description": "每日更新时间",
+                "hint": "每天几点触发用户画像更新（0-23）",
+                "type": "int",
+                "default": 6
+            },
+            "max_daily_messages": {
+                "description": "每日最大分析消息数",
+                "hint": "每天最多分析多少条用户消息",
+                "type": "int",
+                "default": 500
+            },
+            "nickname_check_groups": {
+                "description": "昵称检查消息组数",
+                "hint": "检查新昵称时拉取的消息组数量",
+                "type": "int",
+                "default": 20
+            },
+            "messages_per_group": {
+                "description": "每组消息数",
+                "hint": "每个消息组包含的消息数量",
+                "type": "int",
+                "default": 5
+            }
+        }
+    },
+    "timeouts": {
+        "description": "超时设置",
+        "hint": "各类模型调用的超时时间",
+        "type": "object",
+        "items": {
+            "vision_sec": {
+                "description": "识图超时(秒)",
+                "hint": "图片识别模型的超时时间",
+                "type": "float",
+                "default": 30.0
+            },
+            "model_a_sec": {
+                "description": "模型A超时(秒)",
+                "hint": "上下文总结模型的超时时间",
+                "type": "float",
+                "default": 45.0
+            },
+            "model_b_sec": {
+                "description": "模型B超时(秒)",
+                "hint": "用户画像分析模型的超时时间",
+                "type": "float",
+                "default": 60.0
+            },
+            "main_llm_sec": {
+                "description": "主LLM超时(秒)",
+                "hint": "主回复模型的超时时间",
+                "type": "float",
+                "default": 60.0
+            }
+        }
+    }
+}

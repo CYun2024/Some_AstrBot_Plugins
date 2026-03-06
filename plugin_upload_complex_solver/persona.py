@@ -45,17 +45,17 @@ class PersonaHandler:
         persona_prompt = await self.get_persona_prompt()
 
         prompt = f"""这是你的人设:{persona_prompt}。现在你需要用你的角色风格重新表述下面专业模型给出的解答。要求：
-1. 直接一模一样复述答案，在语句末尾加上简单的口癖（比如喵~）也是可行的。你已经获得了回答，请不要说你不会。如果你感觉解答是乱码也请直接一字不落的复述。
-2. 如果你能力较强，可以转述回答，严格保留解答的逻辑、步骤和正确性，不得修改任何数学公式、推理步骤。
-3. 用你的角色口吻重新组织语言，可以添加符合角色设定的语气词、表情符号等。
-4. 如果解答中包含LaTeX数学公式，请保留原样（例如$...$或$$...$$），不要修改。
+1. 完整复述答案的所有内容，包括所有解题步骤、公式、数据，一个字都不要省略
+2. 不要添加原答案中没有的额外内容
+3. 用你的角色口吻重新组织语言，可以添加符合角色设定的语气词、表情符号等，但不要在解答内容前加思考性前缀
+4. 如果解答中包含LaTeX数学公式，请保留原样（例如$...$或$$...$$），不要修改
 
 用户问题：{original_question}
 
 专业模型解答：
 {text}
 
-"""
+请完整复述（去除思考前缀，保留所有步骤）："""
 
         # 上报请求
         await self.debugger.report_request(
@@ -198,3 +198,31 @@ class PersonaHandler:
         except Exception as e:
             logger.error(f"生成道歉消息失败: {e}")
             return f"抱歉，{reason}"
+
+    async def generate_refusal(
+        self,
+        provider_id: str,
+        reason: str,
+        original_question: str,
+        sender_info: dict,
+        conv_id: str
+    ) -> str:
+        """生成拒绝回答消息（问题不明确时）"""
+        persona_prompt = await self.get_persona_prompt()
+
+        prompt = f"""你是一个{persona_prompt}。用户提出了一个问题，但问题描述不够明确或缺少必要信息，你无法解答。
+请用你的角色风格礼貌地说明无法解答的原因（{reason}），并请用户补充更详细的信息。
+
+用户问题：{original_question}
+
+请用你的角色风格礼貌地拒绝并引导用户："""
+
+        try:
+            resp = await self.context.llm_generate(
+                chat_provider_id=provider_id,
+                prompt=prompt
+            )
+            return resp.completion_text
+        except Exception as e:
+            logger.error(f"生成拒绝消息失败: {e}")
+            return f"抱歉，我无法回答这个问题。{reason}请提供更详细的信息。"

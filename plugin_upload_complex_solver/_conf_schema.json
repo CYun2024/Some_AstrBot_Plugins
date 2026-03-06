@@ -1,61 +1,58 @@
 {
+  "judge_provider": {
+    "type": "string",
+    "default": "",
+    "description": "判断模型提供商ID（快速轻量模型）",
+    "hint": "用于意图识别、乱码检测，只需provider ID",
+    "_special": "select_provider"
+  },
+  "vision_ocr_provider": {
+    "type": "string",
+    "default": "",
+    "description": "OCR专用模型提供商ID（文字提取专用）",
+    "hint": "专门用于提取图片中的文字内容，高精度OCR",
+    "_special": "select_provider"
+  },
+  "vision_scene_provider_1": {
+    "type": "string",
+    "default": "",
+    "description": "多模态识图模型1（主模型）提供商ID",
+    "hint": "主视觉模型，用于场景理解、物体识别，或OCR失败时兜底",
+    "_special": "select_provider"
+  },
+  "vision_scene_provider_2": {
+    "type": "string",
+    "default": "",
+    "description": "多模态识图模型2（备用）提供商ID",
+    "hint": "当多模态模型1超时/失败时使用",
+    "_special": "select_provider"
+  },
   "solver_provider": {
     "type": "string",
     "default": "",
     "description": "解题模型1提供商ID",
-    "hint": "第一个解题模型提供商",
+    "hint": "处理复杂问题的第一个模型",
     "_special": "select_provider"
-  },
-  "solver_model": {
-    "type": "string",
-    "default": "",
-    "description": "解题模型1名称（可选）",
-    "hint": "第一个解题模型的具体模型ID"
   },
   "solver_provider_2": {
     "type": "string",
     "default": "",
     "description": "解题模型2提供商ID",
-    "hint": "第二个解题模型提供商（双模型并行）",
+    "hint": "第二个解题模型（双模型并行）",
     "_special": "select_provider"
-  },
-  "solver_model_2": {
-    "type": "string",
-    "default": "",
-    "description": "解题模型2名称（可选）",
-    "hint": "第二个解题模型的具体模型ID"
-  },
-  "vision_provider": {
-    "type": "string",
-    "default": "",
-    "description": "视觉模型提供商ID",
-    "hint": "用于识别图片内容的多模态模型（如GPT-4V、Claude 3等）",
-    "_special": "select_provider"
-  },
-  "vision_model": {
-    "type": "string",
-    "default": "",
-    "description": "视觉模型名称（可选）",
-    "hint": "多模态视觉模型的具体模型ID，留空使用提供商默认模型"
   },
   "summarize_provider": {
     "type": "string",
     "default": "",
     "description": "精简模型提供商ID",
-    "hint": "用于精简解题输出的模型（留空则使用解题模型1）",
+    "hint": "用于精炼所有输出（留空使用解题模型1）",
     "_special": "select_provider"
-  },
-  "summarize_model": {
-    "type": "string",
-    "default": "",
-    "description": "精简模型名称（可选）",
-    "hint": "精简模型的具体模型ID"
   },
   "enable_persona_restate": {
     "type": "bool",
     "default": true,
     "description": "启用人设复述",
-    "hint": "开启后主LLM会用人设重新表述答案；关闭则直接让精简模型用人设输出"
+    "hint": "开启后精简模型会用人设风格输出"
   },
   "enable_at_mention": {
     "type": "bool",
@@ -71,21 +68,15 @@
   },
   "enable_whole_render": {
     "type": "bool",
-    "default": true,
+    "default": false,
     "description": "使用整段文本渲染",
-    "hint": "开启后当关闭人设复述时，会将整个回答渲染为一张图片（适合包含长公式的答案）"
-  },
-  "enable_vision": {
-    "type": "bool",
-    "default": true,
-    "description": "启用图片识别功能",
-    "hint": "开启后当用户发送图片时，会使用视觉模型识别图片内容"
+    "hint": "开启后会将整个回答渲染为一张图片"
   },
   "enable_context": {
     "type": "bool",
     "default": true,
     "description": "启用上下文记忆",
-    "hint": "是否记住之前的复杂问题对话上下文"
+    "hint": "是否保存对话历史"
   },
   "context_timeout": {
     "type": "int",
@@ -93,34 +84,28 @@
     "description": "上下文超时时间（秒）",
     "hint": "追问的有效时间范围"
   },
-  "enable_summarize": {
-    "type": "bool",
-    "default": true,
-    "description": "精简解题输出",
-    "hint": "开启后会调用精简模型对原始输出进行精简"
-  },
   "max_wait_minutes": {
     "type": "int",
     "default": 9,
     "description": "最大等待时间（分钟）",
-    "hint": "解题模型最大总等待时间，默认9分钟"
+    "hint": "解题模型最大总等待时间"
   },
   "bot_names": {
     "type": "list",
     "default": ["韶梦", "shaomeng"],
     "description": "Bot名称列表",
-    "hint": "当消息中包含这些名字时才会触发复杂问题判断（防止群聊误触发）"
+    "hint": "当消息中包含这些名字时才会触发处理"
   },
   "strict_trigger": {
     "type": "bool",
     "default": true,
     "description": "严格触发模式",
-    "hint": "开启后只在私聊、@Bot或提到Bot名字时才触发复杂问题判断，防止群聊误触发"
+    "hint": "开启后只在私聊、@Bot或提到Bot名字时才触发"
   },
   "debug_mode": {
     "type": "bool",
     "default": false,
     "description": "调试模式",
-    "hint": "开启后会输出详细的调试日志，用于排查问题"
+    "hint": "开启后会输出详细的调试日志"
   }
 }

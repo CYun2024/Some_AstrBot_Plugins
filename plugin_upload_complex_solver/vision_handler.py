@@ -1,8 +1,8 @@
 """
-视觉识别模块
-处理图片内容的识别，使用多模态模型分析图片
+视觉识别模块 - 3模型架构：OCR专用 + 多模态主备
 """
-from typing import Optional, List, Dict, Any
+import asyncio
+from typing import Optional, List
 
 from astrbot.api import logger
 from astrbot.api.star import Context
@@ -11,137 +11,172 @@ from .debugger_reporter import DebuggerReporter
 
 
 class VisionHandler:
-    """视觉处理器 - 用于识别图片内容"""
-    
+    """视觉处理器 - OCR专用 + 多模态主备"""
+
     def __init__(
         self,
         context: Context,
         debugger: DebuggerReporter,
-        vision_provider: str,
-        vision_model: Optional[str] = None
+        ocr_provider: Optional[str],
+        scene_provider_1: Optional[str],
+        scene_provider_2: Optional[str],
+        timeout: int = 90
     ):
         self.context = context
         self.debugger = debugger
-        self.vision_provider = vision_provider
-        self.vision_model = vision_model
-    
-    async def analyze_images(
-        self,
-        images: List[str],
-        user_question: str,
-        sender_info: dict,
-        conv_id: str
-    ) -> str:
-        """
-        分析图片内容并返回描述
-        
-        Args:
-            images: 图片URL列表
-            user_question: 用户的问题（用于上下文理解）
-            sender_info: 发送者信息
-            conv_id: 会话ID
-            
-        Returns:
-            图片内容描述文本
-        """
-        if not self.vision_provider:
-            logger.warning("[VisionHandler] 未配置视觉模型，跳过图片识别")
-            return ""
-        
-        if not images:
-            logger.debug("[VisionHandler] 图片列表为空，跳过识别")
-            return ""
-        
-        # 构建提示词
-        prompt = f"""请详细描述这张图片的内容。用户的问题是："{user_question}"
+        self.ocr_provider = ocr_provider
+        self.scene_provider_1 = scene_provider_1
+        self.scene_provider_2 = scene_provider_2
+        self.timeout = timeout
 
-请根据用户的问题，有针对性地描述图片中的关键信息：
-- 如果是数学题，请描述题目内容、公式、图表等
-- 如果是物理/化学题，请描述实验装置、图表、数据等
-- 如果是其他类型的问题，请描述与问题相关的视觉信息
+    def is_ocr_configured(self) -> bool:
+        """检查是否配置了OCR专用模型"""
+        return bool(self.ocr_provider)
 
-请用中文详细描述，确保解题模型能够理解图片内容。"""
-        
-        # 【调试信息】开始视觉识别流程
-        logger.info(f"[VisionHandler] 开始视觉识别流程")
-        logger.info(f"[VisionHandler] 视觉模型提供商: {self.vision_provider}")
-        logger.info(f"[VisionHandler] 视觉模型名称: {self.vision_model or 'default'}")
-        logger.info(f"[VisionHandler] 图片数量: {len(images)}")
-        logger.debug(f"[VisionHandler] 发送者: {sender_info.get('name', 'Unknown')}({sender_info.get('id', 'N/A')})")
-        logger.debug(f"[VisionHandler] 会话ID: {conv_id}")
-        
-        # 【调试信息】打印模型看到的具体内容
-        logger.info(f"[VisionHandler] ===== 视觉模型输入内容 =====")
-        logger.info(f"[VisionHandler] Prompt内容: {prompt}")
-        for idx, img_url in enumerate(images, 1):
-            # 截断过长的URL避免日志臃肿
-            display_url = img_url[:100] + "..." if len(img_url) > 100 else img_url
-            logger.info(f"[VisionHandler] 图片 {idx} URL: {display_url}")
-        logger.info(f"[VisionHandler] ===== 视觉模型输入结束 =====")
-        
-        try:
-            logger.info(f"[VisionHandler] 开始调用视觉模型 API...")
-            
-            # 上报请求
-            await self.debugger.report_request(
-                provider_id=self.vision_provider,
-                model=self.vision_model or "unknown",
-                prompt=prompt,
+    def is_scene_configured(self) -> bool:
+        """检查是否配置了至少一个多模态模型"""
+        return bool(self.scene_provider_1) or bool(self.scene_provider_2)
+
+    async def ocr_extract(self, images: List[str], user_question: str, 
+                         sender_info: dict, conv_id: str) -> str:
+        """
+        OCR专用模型提取文字
+        """
+        if not self.is_ocr_configured():
+            logger.warning("[VisionHandler] OCR专用模型未配置")
+            return ""
+
+        prompt = f"""请精确识别图片中的文字内容。
+要求：
+1. 只输出图片中的文字，不要描述图片
+2. 保持原文的排版和格式
+3. 如果包含公式，请用LaTeX格式标注
+4. 如果看不清或没有文字，回复"【无文字内容】"
+
+用户问题: "{user_question}"
+
+请只输出识别到的文字："""
+
+        return await self._call_vision_model(
+            provider_id=self.ocr_provider,
+            images=images,
+            prompt=prompt,
+            purpose="ocr_extraction",
+            sender_info=sender_info,
+            conv_id=conv_id
+        )
+
+    async def scene_analyze(self, images: List[str], user_question: str,
+                           sender_info: dict, conv_id: str) -> str:
+        """
+        多模态场景理解（带主备切换）
+        """
+        if not self.is_scene_configured():
+            logger.warning("[VisionHandler] 多模态模型未配置")
+            return ""
+
+        prompt = f"""请描述这张图片的内容。
+
+用户问题: "{user_question}"
+
+请根据用户问题有针对性地描述：
+- 如果是问"有什么"，请列出图片中的主要物体
+- 如果是问"这是什么"，请识别并解释
+- 如果是OCR失败转过来的，请尽可能猜测文字内容
+
+请用中文详细描述："""
+
+        # 先尝试主模型
+        if self.scene_provider_1:
+            logger.info(f"[VisionHandler] 尝试多模态主模型: {self.scene_provider_1}")
+            result = await self._call_vision_model(
+                provider_id=self.scene_provider_1,
                 images=images,
-                purpose="vision_analysis",
+                prompt=prompt,
+                purpose="scene_analysis_primary",
                 sender_info=sender_info,
-                conv_id=conv_id,
-                system_prompt="你是一个视觉分析助手，擅长准确描述图片中的文字、公式、图表等内容。",
-                contexts=[]
+                conv_id=conv_id
             )
             
-            # 调用视觉模型
+            if result and not result.startswith("["):
+                logger.info("[VisionHandler] 多模态主模型成功")
+                return result
+            
+            logger.warning(f"[VisionHandler] 主模型失败: {result[:100]}...")
+        
+        # 主模型失败，尝试备用模型
+        if self.scene_provider_2:
+            logger.info(f"[VisionHandler] 切换到多模态备用模型: {self.scene_provider_2}")
+            result = await self._call_vision_model(
+                provider_id=self.scene_provider_2,
+                images=images,
+                prompt=prompt,
+                purpose="scene_analysis_backup",
+                sender_info=sender_info,
+                conv_id=conv_id
+            )
+            
+            if result and not result.startswith("["):
+                logger.info("[VisionHandler] 多模态备用模型成功")
+                return f"[已切换至备用视觉模型]\n{result}"
+            
+            logger.error(f"[VisionHandler] 备用模型也失败: {result[:100]}...")
+            return f"[视觉识别失败] 主备多模态模型均不可用。错误: {result}"
+        
+        return "[视觉识别失败] 未配置可用的多模态模型"
+
+    async def _call_vision_model(self, provider_id: str, images: List[str],
+                                prompt: str, purpose: str, sender_info: dict,
+                                conv_id: str) -> str:
+        """通用视觉模型调用"""
+        
+        try:
             kwargs = {
-                "chat_provider_id": self.vision_provider,
+                "chat_provider_id": provider_id,
                 "prompt": prompt,
                 "image_urls": images
             }
-            if self.vision_model:
-                kwargs["model"] = self.vision_model
+
+            await self.debugger.report_request(
+                provider_id=provider_id,
+                model="default",
+                prompt=prompt,
+                images=images,
+                purpose=purpose,
+                sender_info=sender_info,
+                conv_id=conv_id,
+                system_prompt="你是一个视觉分析助手。",
+                contexts=[]
+            )
+
+            logger.debug(f"[VisionHandler] 调用 {provider_id}，超时: {self.timeout}s")
+            start_time = asyncio.get_event_loop().time()
             
-            logger.debug(f"[VisionHandler] API调用参数: {kwargs}")
-            resp = await self.context.llm_generate(**kwargs)
+            resp = await asyncio.wait_for(
+                self.context.llm_generate(**kwargs),
+                timeout=self.timeout
+            )
+            
+            elapsed = asyncio.get_event_loop().time() - start_time
             result = resp.completion_text.strip()
             
-            # 【调试信息】记录模型返回结果
-            logger.info(f"[VisionHandler] 视觉模型调用完成")
-            logger.info(f"[VisionHandler] 返回结果长度: {len(result)} 字符")
-            logger.info(f"[VisionHandler] 实际使用模型: {getattr(resp, 'model', self.vision_model or 'unknown')}")
-            
-            # 【调试信息】打印返回内容预览（前200字符）
-            preview = result[:200] + "..." if len(result) > 200 else result
-            logger.info(f"[VisionHandler] 返回内容预览: {preview}")
-            
-            # 上报响应
+            logger.info(f"[VisionHandler] {provider_id} 完成，耗时: {elapsed:.1f}s, 返回长度: {len(result)}")
+
             await self.debugger.report_response(
-                provider_id=self.vision_provider,
-                model=getattr(resp, 'model', self.vision_model or 'unknown'),
+                provider_id=provider_id,
+                model=getattr(resp, 'model', 'unknown'),
                 response=result,
-                purpose="vision_analysis",
+                purpose=purpose,
                 sender_info=sender_info,
                 conv_id=conv_id,
                 usage=getattr(resp, 'usage', None)
             )
-            
-            if not result:
-                logger.warning(f"[VisionHandler] 视觉模型返回空结果")
-                return "[图片识别返回空结果]"
-            
-            logger.info(f"[VisionHandler] 图片识别成功完成")
+
             return result
-            
+
+        except asyncio.TimeoutError:
+            logger.error(f"[VisionHandler] {provider_id} 超时({self.timeout}s)")
+            return f"[视觉模型超时: {provider_id}]"
         except Exception as e:
-            logger.error(f"[VisionHandler] 图片识别失败: {e}")
-            logger.error(f"[VisionHandler] 异常详情: {str(e)}")
-            import traceback
-            logger.debug(f"[VisionHandler] 异常堆栈: {traceback.format_exc()}")
-            return f"[图片识别失败: {str(e)}]"
-    
-    def is_configured(self) -> bool:
-        """检查是否配置了视觉模型"""
-        return bool(self.vision_provider)
+            logger.error(f"[VisionHandler] {provider_id} 异常: {e}")
+            return f"[视觉模型错误: {str(e)}]"
