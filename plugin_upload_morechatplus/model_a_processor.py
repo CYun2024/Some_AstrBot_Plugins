@@ -1,4 +1,4 @@
-"""模型A处理器 - 上下文总结与主动回复判定"""
+"""模型A处理器 - 上下文总结与主动回复判定（支持备用模型）"""
 
 import asyncio
 import json
@@ -14,6 +14,7 @@ from astrbot.api.provider import Provider
 from .context_manager import ContextManager
 from .database import DatabaseManager
 from .plugin_config import PluginConfig
+from .model_utils import call_model_with_fallback, ModelCallResult
 
 
 @dataclass
@@ -25,6 +26,8 @@ class SummaryResult:
     should_reply: bool
     reply_target_msg_id: str = ""
     reply_suggestion: str = ""
+    used_fallback: bool = False  # 新增：是否使用了备用模型
+    provider_id: str = ""  # 新增：实际使用的模型ID
 
 
 class ModelAProcessor:
@@ -50,63 +53,45 @@ class ModelAProcessor:
             await self.debugger.safe_record_llm_call(data)
 
     async def process_context(self, origin: str) -> Optional[SummaryResult]:
-        """处理上下文，生成总结和回复建议"""
+        """处理上下文，生成总结和回复建议（支持故障转移）"""
         try:
             context_text = self.context_manager.get_context_for_model_a(origin)
             prompt = self._build_summary_prompt(context_text)
 
-            provider_id = self.config.models.model_a_provider
-            if provider_id:
-                provider = self.context.get_provider_by_id(provider_id)
-            else:
-                provider = self.context.get_using_provider()
+            primary_id = self.config.models.model_a_provider
+            fallback_id = self.config.models.model_a_fallback_provider
 
-            if not provider:
-                logger.warning("[MoreChatPlus] 模型A提供商不可用")
-                return None
-
-            logger.info(f"[MoreChatPlus] 调用模型A进行上下文总结 | origin={origin}")
-
-            conv_id = uuid.uuid4().hex
-            model_name = getattr(provider, 'model', 'model_a')
-
-            # 上报请求
-            await self._record_llm_call({
-                "phase": "request",
-                "provider_id": provider_id or "default",
-                "model": model_name,
-                "prompt": prompt,
-                "source": {"plugin": "morechatplus", "purpose": "model_a_summary"},
-                "conversation_id": conv_id,
-                "timestamp": time.time()
-            })
-
-            response = await asyncio.wait_for(
-                provider.text_chat(
-                    prompt=prompt,
-                    session_id=conv_id,
-                    persist=False,
-                ),
-                timeout=self.config.timeouts.model_a_sec,
+            logger.info(
+                f"[MoreChatPlus] 调用模型A进行上下文总结 | origin={origin} | "
+                f"主模型={primary_id or 'default'} | 备用={fallback_id or '无'}"
             )
 
-            result_text = response.completion_text or ""
+            # 使用新的故障转移调用方法
+            result = await call_model_with_fallback(
+                context=self.context,
+                config=self.config,
+                primary_provider_id=primary_id,
+                fallback_provider_id=fallback_id,
+                prompt=prompt,
+                timeout_sec=self.config.timeouts.model_a_sec,
+                record_callback=self._record_llm_call,
+                purpose="model_a_summary"
+            )
 
-            # 上报响应
-            await self._record_llm_call({
-                "phase": "response",
-                "provider_id": provider_id or "default",
-                "model": model_name,
-                "response": result_text,
-                "usage": getattr(response, 'usage', None),
-                "source": {"plugin": "morechatplus", "purpose": "model_a_summary"},
-                "conversation_id": conv_id,
-                "timestamp": time.time()
-            })
+            if not result.success:
+                logger.error(f"[MoreChatPlus] 模型A调用失败: {result.error}")
+                return None
 
-            result = self._parse_summary_response(result_text)
+            if result.is_fallback:
+                logger.info(f"[MoreChatPlus] 模型A已切换到备用模型: {result.provider_id}")
 
-            if result:
+            parsed = self._parse_summary_response(result.text)
+
+            if parsed:
+                # 记录使用的模型信息
+                parsed.used_fallback = result.is_fallback
+                parsed.provider_id = result.provider_id
+
                 messages = self.db.get_messages(origin, limit=self.config.context.summary_interval)
                 if len(messages) >= 2:
                     start_msg_id = messages[-1].message_id
@@ -116,32 +101,21 @@ class ModelAProcessor:
                         origin=origin,
                         start_msg_id=start_msg_id,
                         end_msg_id=end_msg_id,
-                        summary=result.summary,
-                        topic_analysis=result.topic_analysis,
-                        suggestions=result.suggestions,
-                        should_reply=result.should_reply,
+                        summary=parsed.summary,
+                        topic_analysis=parsed.topic_analysis,
+                        suggestions=parsed.suggestions,
+                        should_reply=parsed.should_reply,
                     )
 
                 logger.info(
                     f"[MoreChatPlus] 模型A总结完成 | origin={origin} "
-                    f"should_reply={result.should_reply}"
+                    f"should_reply={parsed.should_reply} "
+                    f"provider={parsed.provider_id} "
+                    f"fallback={parsed.used_fallback}"
                 )
 
-            return result
+            return parsed
 
-        except asyncio.TimeoutError:
-            logger.error("[MoreChatPlus] 模型A调用超时")
-            # 上报超时错误
-            await self._record_llm_call({
-                "phase": "response",
-                "provider_id": self.config.models.model_a_provider or "default",
-                "model": "model_a",
-                "response": "[模型A调用超时]",
-                "source": {"plugin": "morechatplus", "purpose": "model_a_timeout"},
-                "conversation_id": conv_id if 'conv_id' in locals() else "timeout",
-                "timestamp": time.time()
-            })
-            return None
         except Exception as e:
             logger.error(f"[MoreChatPlus] 模型A处理失败: {e}")
             return None
@@ -284,52 +258,24 @@ class ModelAProcessor:
 理由: (简要说明)
 """
 
-            provider_id = self.config.models.model_a_provider
-            if provider_id:
-                provider = self.context.get_provider_by_id(provider_id)
-            else:
-                provider = self.context.get_using_provider()
+            primary_id = self.config.models.model_a_provider
+            fallback_id = self.config.models.model_a_fallback_provider
 
-            if not provider:
-                return None
-
-            conv_id = uuid.uuid4().hex
-            model_name = getattr(provider, 'model', 'model_a')
-
-            # 上报请求
-            await self._record_llm_call({
-                "phase": "request",
-                "provider_id": provider_id or "default",
-                "model": model_name,
-                "prompt": prompt,
-                "source": {"plugin": "morechatplus", "purpose": "nickname_check"},
-                "conversation_id": conv_id,
-                "timestamp": time.time()
-            })
-
-            response = await asyncio.wait_for(
-                provider.text_chat(
-                    prompt=prompt,
-                    session_id=conv_id,
-                    persist=False,
-                ),
-                timeout=self.config.timeouts.model_a_sec,
+            result = await call_model_with_fallback(
+                context=self.context,
+                config=self.config,
+                primary_provider_id=primary_id,
+                fallback_provider_id=fallback_id,
+                prompt=prompt,
+                timeout_sec=self.config.timeouts.model_a_sec,
+                record_callback=self._record_llm_call,
+                purpose="nickname_check"
             )
 
-            text = response.completion_text or ""
+            if not result.success:
+                return None
 
-            # 上报响应
-            await self._record_llm_call({
-                "phase": "response",
-                "provider_id": provider_id or "default",
-                "model": model_name,
-                "response": text,
-                "usage": getattr(response, 'usage', None),
-                "source": {"plugin": "morechatplus", "purpose": "nickname_check"},
-                "conversation_id": conv_id,
-                "timestamp": time.time()
-            })
-
+            text = result.text
             match = re.search(r'最可能用户ID[：:]\s*(\d+)', text)
             if match:
                 user_id = match.group(1)

@@ -39,7 +39,7 @@ class ContextManager:
         image_urls: List[str] = None,
         is_admin: bool = False,
         reply_to: str = "",
-        count_towards_summary: bool = True,  # 新增：是否计入总结计数
+        count_towards_summary: bool = True,
     ) -> MessageRecord:
         """添加消息到上下文"""
         timestamp = time.time()
@@ -122,13 +122,13 @@ class ContextManager:
             # 管理员标记
             admin_mark = "[管理员]" if msg.is_admin else ""
 
-            # 构建消息头
-            header = f"[{msg.nickname}|{msg.user_id}(user_id)|{time_str}]:(#msg{msg.message_id}){admin_mark}"
+            # 构建消息头 - 修改：显示 msg 编号格式
+            header = f"[{msg.nickname}|{msg.user_id}(user_id)|{time_str}]:(msg:{msg.message_id}){admin_mark}"
 
-            # 引用信息
+            # 引用信息 - 修改：只显示引用ID，不包含内容
             reply_part = ""
             if msg.reply_to:
-                reply_part = f" <引用信息: #msg{msg.reply_to}>"
+                reply_part = f" <引用:{msg.reply_to}>"
 
             # 内容
             content = msg.content
@@ -165,11 +165,12 @@ class ContextManager:
         time_str = datetime.fromtimestamp(msg.timestamp).strftime("%H:%M:%S")
         admin_mark = "[管理员]" if msg.is_admin else ""
 
-        header = f"[{msg.nickname}|{msg.user_id}(user_id)|{time_str}]:(#msg{msg.message_id}){admin_mark}"
+        # 修改：显示 msg 编号格式
+        header = f"[{msg.nickname}|{msg.user_id}(user_id)|{time_str}]:(msg:{msg.message_id}){admin_mark}"
 
         reply_part = ""
         if msg.reply_to:
-            reply_part = f" <引用信息: #msg{msg.reply_to}>"
+            reply_part = f" <引用:{msg.reply_to}>"
 
         formatted = f"{header}{reply_part} {msg.content}"
 
@@ -243,11 +244,12 @@ class ContextManager:
         time_str = datetime.fromtimestamp(msg.timestamp).strftime("%H:%M:%S")
         admin_mark = "[管理员]" if msg.is_admin else ""
 
-        header = f"[{msg.nickname}|{msg.user_id}(user_id)|{time_str}]:(#msg{msg.message_id}){admin_mark}"
+        # 修改：显示 msg 编号格式
+        header = f"[{msg.nickname}|{msg.user_id}(user_id)|{time_str}]:(msg:{msg.message_id}){admin_mark}"
 
         reply_part = ""
         if msg.reply_to:
-            reply_part = f" <引用信息: #msg{msg.reply_to}>"
+            reply_part = f" <引用:{msg.reply_to}>"
 
         return f"{header}{reply_part} {msg.content}"
 
@@ -257,13 +259,17 @@ class ContextManager:
             "你现在处于一个QQ群聊中。",
             "",
             "## 消息格式说明",
-            "每条消息的格式为：[昵称|user_id|时间]:(消息ID)[管理员标记] <引用信息> 内容",
-            "例如：[虹猫猫|28196593|19:20:05]:(#msg267518526) <引用信息: #msg267518526> [at:机巧猫] 可爱喵~",
+            "每条消息的格式为：[昵称|user_id|时间]:(msg:消息ID)[管理员标记] <引用:消息ID> 内容",
+            "例如：[猫猫|128319593(user_id)|19:20:05]:(msg:267518526) <引用:977370735> [at:小死神] 可爱喵~",
             "",
             "## 可用标签",
             "- [at:QQ号] - 表示@某人",
-            "- [image:ID] - 表示图片",
-            "- <引用信息: 消息ID> - 表示回复了某条消息",
+            "- [image:序号:图片ID] - 表示图片（如 [image:1:img_abc123]）",
+            "- <引用:消息ID> - 表示回复了某条消息",
+            "",
+            "## 可用工具",
+            "- morechatplus_get_message(message_id) - 获取指定消息的完整内容",
+            "- morechatplus_get_image_vision(image_id) - 获取图片的识图结果",
             "",
         ]
 

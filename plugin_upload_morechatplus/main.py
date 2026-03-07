@@ -4,7 +4,7 @@ QQ群聊增强插件，提供：
 - 上下文管理和总结
 - 用户画像维护
 - 主动回复判定
-- 图片识别
+- 图片识别和缓存
 - 艾特功能
 """
 
@@ -19,7 +19,8 @@ from pathlib import Path
 from typing import List, Optional
 
 from astrbot.api import logger, star, llm_tool
-from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.event import AstrMessageEvent
+from astrbot.api.event import filter
 from astrbot.api.message_components import At, Image, Plain, Reply
 from astrbot.api.platform import MessageType
 from astrbot.api.provider import Provider, ProviderRequest
@@ -28,9 +29,11 @@ from astrbot.core.utils.io import download_image_by_url
 
 from .context_manager import ContextManager
 from .database import DatabaseManager
+from .image_cache import ImageCacheManager
 from .message_utils import (
     build_message_chain,
     clean_message_for_sending,
+    convert_at_tags_to_components,
     final_cleanup_chain,
     format_context_message,
     parse_at_tags,
@@ -58,6 +61,12 @@ class MoreChatPlusPlugin(star.Star):
         )
         self.db = DatabaseManager(plugin_data_dir / "chat_data.db")
 
+        # 初始化图片缓存
+        self.image_cache = ImageCacheManager(
+            plugin_data_dir / "image_cache.db",
+            max_cache_size=1000  # 可配置
+        )
+
         # 不再缓存debugger实例，改为动态获取以确保可靠
         self._debugger = None
         self._debugger_last_try = 0
@@ -65,7 +74,7 @@ class MoreChatPlusPlugin(star.Star):
         # 初始化管理器
         self.context_manager = ContextManager(self.db, self.config)
         self.user_profile_manager = UserProfileManager(
-            self.db, self.config, context, debugger=self  # 传入self，内部会调用我们的safe_record
+            self.db, self.config, context, debugger=self
         )
         self.model_a_processor = ModelAProcessor(
             self.db, self.context_manager, self.config, context, debugger=self
@@ -77,8 +86,6 @@ class MoreChatPlusPlugin(star.Star):
         )
 
         # 缓存
-        self._image_cache: dict = {}
-        self._vision_cache: dict = {}
         self._pending_active_replies: dict = {}
 
         logger.info("[MoreChatPlus] 插件初始化完成")
@@ -86,11 +93,9 @@ class MoreChatPlusPlugin(star.Star):
     def _get_llm_debugger(self):
         """动态获取 LLM Debugger 实例（带缓存刷新机制）"""
         now = time.time()
-        # 每5秒才重新尝试获取，避免频繁调用
         if self._debugger is None and now - self._debugger_last_try > 5:
             self._debugger_last_try = now
             try:
-                # 尝试从context获取
                 if hasattr(self.context, '_plugin_instances'):
                     self._debugger = self.context._plugin_instances.get('llm_debugger')
                 if not self._debugger and hasattr(self.context, 'star_registry'):
@@ -109,25 +114,19 @@ class MoreChatPlusPlugin(star.Star):
             return
 
         try:
-            # 确保必要字段存在
             if "timestamp" not in data:
                 data["timestamp"] = time.time()
             if "source" not in data:
                 data["source"] = {"plugin": "morechatplus", "purpose": "unknown"}
 
-            # 调用debugger的记录方法
             if hasattr(debugger, 'record_llm_call'):
                 await debugger.record_llm_call(data)
-            else:
-                logger.debug("[MoreChatPlus] Debugger没有record_llm_call方法")
         except Exception as e:
-            # 上报失败不影响主业务
             logger.debug(f"[MoreChatPlus] 上报LLM调用失败: {e}")
 
     @filter.on_astrbot_loaded()
     async def on_astrbot_loaded(self) -> None:
         """AstrBot加载完成时初始化"""
-        # 延迟获取debugger，确保其他插件已加载
         await asyncio.sleep(1)
         self._get_llm_debugger()
 
@@ -140,6 +139,36 @@ class MoreChatPlusPlugin(star.Star):
             )
         else:
             logger.info("[MoreChatPlus] 插件已禁用")
+
+    @filter.on_decorating_result()
+    async def on_decorating_result(self, event: AstrMessageEvent):
+        """在消息发送前处理 [at:QQ号] 标签"""
+        if not self.config.core.enable:
+            return
+
+        try:
+            # 获取消息链
+            message_chain = event.get_messages()
+            if not message_chain:
+                return
+
+            # 处理消息链中的 [at:QQ号] 标签
+            new_chain = []
+            for comp in message_chain:
+                if isinstance(comp, Plain):
+                    # 转换 [at:QQ号] 标签为 At 组件
+                    converted = convert_at_tags_to_components(comp.text)
+                    new_chain.extend(converted)
+                else:
+                    new_chain.append(comp)
+
+            # 更新消息链
+            if new_chain:
+                event.message_obj.message = new_chain
+                logger.debug(f"[MoreChatPlus] 已处理消息链中的at标签")
+
+        except Exception as e:
+            logger.debug(f"[MoreChatPlus] 处理at标签失败: {e}")
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.ALL)
     @filter.event_message_type(filter.EventMessageType.ALL)
@@ -164,7 +193,7 @@ class MoreChatPlusPlugin(star.Star):
             logger.warning("[MoreChatPlus] 提取消息信息失败")
             return
 
-        message_id, user_id, nickname, content, has_image, image_urls, reply_to = msg_info
+        message_id, user_id, nickname, content, has_image, image_urls, reply_to, image_ids = msg_info
         origin = event.unified_msg_origin
 
         logger.info(f"[MoreChatPlus] 来源={origin}, 用户={nickname}({user_id}), 内容={content[:50]}...")
@@ -198,9 +227,8 @@ class MoreChatPlusPlugin(star.Star):
         # 检查是否需要识图
         vision_result = None
         if should_reply and has_image:
-            vision_result = await self._process_vision(image_urls, event)
+            vision_result = await self._process_vision(image_urls, image_ids, event)
             if vision_result:
-                self._vision_cache[message_id] = vision_result
                 logger.info(f"[MoreChatPlus] 识图完成，结果长度={len(vision_result)}")
 
         # 触发上下文总结
@@ -247,7 +275,7 @@ class MoreChatPlusPlugin(star.Star):
         self,
         event: AstrMessageEvent,
     ) -> Optional[tuple]:
-        """提取消息信息"""
+        """提取消息信息（修改后：分离引用内容和实际内容）"""
         try:
             message_id = str(event.message_obj.message_id or "")
             user_id = str(event.get_sender_id() or "")
@@ -256,6 +284,7 @@ class MoreChatPlusPlugin(star.Star):
             content_parts = []
             has_image = False
             image_urls = []
+            image_ids = []
             reply_to = ""
 
             for comp in event.get_messages():
@@ -266,16 +295,25 @@ class MoreChatPlusPlugin(star.Star):
                     url = str(comp.url or comp.file or "").strip()
                     if url:
                         image_urls.append(url)
-                    content_parts.append(f"[image:{len(image_urls)}]")
+                        # 获取或创建图片缓存
+                        local_path = await self._resolve_image_to_local(url)
+                        if local_path:
+                            img_id, exists = self.image_cache.get_or_create_cache(url, local_path)
+                            image_ids.append(img_id)
+                            if exists:
+                                logger.debug(f"[MoreChatPlus] 图片缓存命中: {img_id}")
+                        content_parts.append(f"[image:{len(image_urls)}:{img_id if image_ids else 'unknown'}]")
+                    else:
+                        content_parts.append(f"[image:{len(image_urls)}:unknown]")
                 elif isinstance(comp, Reply):
                     reply_to = str(comp.id or "")
-                    reply_text = (comp.message_str or "").strip()[:50]
-                    content_parts.append(f"[引用:{reply_to}] {reply_text}")
+                    # 修改：只保留引用ID，不包含引用内容
+                    content_parts.append(f"<引用:{reply_to}>")
                 elif isinstance(comp, At):
                     content_parts.append(f"[at:{comp.qq}]")
 
             content = " ".join(content_parts)
-            return message_id, user_id, nickname, content, has_image, image_urls, reply_to
+            return message_id, user_id, nickname, content, has_image, image_urls, reply_to, image_ids
 
         except Exception as e:
             logger.error(f"[MoreChatPlus] 提取消息信息失败: {e}")
@@ -284,11 +322,19 @@ class MoreChatPlusPlugin(star.Star):
     async def _process_vision(
         self,
         image_urls: List[str],
+        image_ids: List[str],
         event: AstrMessageEvent,
     ) -> str:
-        """处理图片识别，带完整上报"""
+        """处理图片识别，带缓存和完整上报"""
         if not image_urls:
             return ""
+
+        # 优先使用图片ID获取缓存的识图结果
+        for img_id in image_ids:
+            cached_result = self.image_cache.get_vision_result(img_id)
+            if cached_result:
+                logger.info(f"[MoreChatPlus] 使用缓存的识图结果: {img_id}")
+                return cached_result
 
         provider_id = self.config.models.vision_provider
         provider = None
@@ -338,6 +384,10 @@ class MoreChatPlusPlugin(star.Star):
             result = response.completion_text or ""
             logger.info(f"[MoreChatPlus] 识图结果: {result[:100]}...")
 
+            # 保存识图结果到缓存
+            if image_ids:
+                self.image_cache.set_vision_result(image_ids[0], result)
+
             # 上报响应
             await self.safe_record_llm_call({
                 "phase": "response",
@@ -354,7 +404,6 @@ class MoreChatPlusPlugin(star.Star):
 
         except asyncio.TimeoutError:
             logger.error("[MoreChatPlus] 识图超时")
-            # 上报错误
             await self.safe_record_llm_call({
                 "phase": "response",
                 "provider_id": provider_id or "default",
@@ -367,7 +416,6 @@ class MoreChatPlusPlugin(star.Star):
             return ""
         except Exception as e:
             logger.error(f"[MoreChatPlus] 识图失败: {e}")
-            # 上报错误
             await self.safe_record_llm_call({
                 "phase": "response",
                 "provider_id": provider_id or "default",
@@ -412,7 +460,6 @@ class MoreChatPlusPlugin(star.Star):
         try:
             logger.info(f"[MoreChatPlus] 触发上下文总结 | origin={origin}")
 
-            # 调用模型A（内部已上报，但我们也在这里包装一层确保）
             result = await self.model_a_processor.process_context(origin)
 
             if result:
@@ -489,6 +536,8 @@ class MoreChatPlusPlugin(star.Star):
 
         return enhanced_prompt
 
+    # ==================== LLM 工具函数 ====================
+
     @llm_tool(name="morechatplus_get_message")
     async def tool_get_message(self, event: AstrMessageEvent, message_id: str):
         """获取指定消息"""
@@ -513,6 +562,39 @@ class MoreChatPlusPlugin(star.Star):
     async def tool_add_nickname(self, event: AstrMessageEvent, user_id: str, nickname: str):
         """添加用户昵称"""
         return await self.chat_tools.add_user_nickname(event, user_id, nickname)
+
+    @llm_tool(name="morechatplus_get_image_vision")
+    async def tool_get_image_vision(self, event: AstrMessageEvent, image_id: str):
+        """获取图片的识图结果"""
+        if not self.image_cache:
+            return json.dumps({
+                "status": "error",
+                "message": "图片缓存未启用"
+            }, ensure_ascii=False)
+
+        result = self.image_cache.get_vision_result(image_id)
+        if result:
+            return json.dumps({
+                "status": "success",
+                "image_id": image_id,
+                "vision_result": result
+            }, ensure_ascii=False, indent=2)
+        
+        # 尝试通过URL查找
+        lookup_id = self.image_cache.lookup_by_url(image_id)
+        if lookup_id:
+            result = self.image_cache.get_vision_result(lookup_id)
+            if result:
+                return json.dumps({
+                    "status": "success",
+                    "image_id": lookup_id,
+                    "vision_result": result
+                }, ensure_ascii=False, indent=2)
+
+        return json.dumps({
+            "status": "not_found",
+            "message": f"未找到图片 {image_id} 的识图结果，该图片可能未被识别过"
+        }, ensure_ascii=False)
 
     async def terminate(self) -> None:
         """插件终止"""

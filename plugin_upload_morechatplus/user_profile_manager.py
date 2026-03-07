@@ -1,9 +1,10 @@
-"""用户画像管理模块"""
+"""用户画像管理模块（支持模型B备用）"""
 
 import asyncio
 import json
 import re
 import time
+import uuid
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 
@@ -11,6 +12,7 @@ from astrbot.api import logger
 
 from .database import DatabaseManager, UserProfile
 from .plugin_config import PluginConfig
+from .model_utils import call_model_with_fallback, ModelCallResult
 
 
 class UserProfileManager:
@@ -164,29 +166,22 @@ class UserProfileManager:
             profile.nicknames = json.dumps(list(existing_nicknames), ensure_ascii=False)
 
             self.db.save_user_profile(profile)
-            logger.info(f"[MoreChatPlus] 更新用户画像: {user_id} @ {origin}")
+
+            # 记录使用的模型信息
+            provider_info = f" (via {analysis.get('_provider', 'unknown')})" if analysis.get('_provider') else ""
+            fallback_info = " [备用]" if analysis.get('_used_fallback') else ""
+            logger.info(f"[MoreChatPlus] 更新用户画像: {user_id} @ {origin}{provider_info}{fallback_info}")
 
     async def _call_model_b_for_profile(
         self,
         user_id: str,
         messages_str: str,
     ) -> Optional[Dict]:
-        """调用模型B分析用户（带完整上报）"""
-        conv_id = uuid.uuid4().hex
-        provider = None
-        provider_id = self.config.models.model_b_provider
+        """调用模型B分析用户（支持故障转移）"""
+        primary_id = self.config.models.model_b_provider
+        fallback_id = self.config.models.model_b_fallback_provider
 
-        try:
-            if provider_id:
-                provider = self.context.get_provider_by_id(provider_id)
-            else:
-                provider = self.context.get_using_provider()
-
-            if not provider:
-                logger.warning("[MoreChatPlus] 模型B提供商不可用")
-                return None
-
-            prompt = f"""请分析以下用户的聊天记录，提取用户画像信息。
+        prompt = f"""请分析以下用户的聊天记录，提取用户画像信息。
 
 用户ID: {user_id}
 
@@ -204,57 +199,41 @@ class UserProfileManager:
 注：792398771是bot自己的QQ号
 只输出JSON，不要其他内容。"""
 
-            model_name = getattr(provider, 'model', 'model_b')
+        logger.info(
+            f"[MoreChatPlus] 调用模型B分析用户画像 | 用户={user_id} | "
+            f"主模型={primary_id or 'default'} | 备用={fallback_id or '无'}"
+        )
 
-            # 上报请求
-            await self._record_llm_call({
-                "phase": "request",
-                "provider_id": provider_id or "default",
-                "model": model_name,
-                "prompt": prompt,
-                "source": {"plugin": "morechatplus", "purpose": "model_b_profile"},
-                "conversation_id": conv_id,
-                "timestamp": time.time()
-            })
+        result = await call_model_with_fallback(
+            context=self.context,
+            config=self.config,
+            primary_provider_id=primary_id,
+            fallback_provider_id=fallback_id,
+            prompt=prompt,
+            timeout_sec=self.config.timeouts.model_b_sec,
+            record_callback=self._record_llm_call,
+            purpose="model_b_profile"
+        )
 
-            response = await provider.text_chat(
-                prompt=prompt,
-                session_id=conv_id,
-                persist=False,
-            )
+        if not result.success:
+            logger.error(f"[MoreChatPlus] 模型B调用失败: {result.error}")
+            return None
 
-            text = response.completion_text or ""
+        if result.is_fallback:
+            logger.info(f"[MoreChatPlus] 模型B已切换到备用模型: {result.provider_id}")
 
-            # 上报响应
-            await self._record_llm_call({
-                "phase": "response",
-                "provider_id": provider_id or "default",
-                "model": model_name,
-                "response": text,
-                "usage": getattr(response, 'usage', None),
-                "source": {"plugin": "morechatplus", "purpose": "model_b_profile"},
-                "conversation_id": conv_id,
-                "timestamp": time.time()
-            })
-
-            json_match = re.search(r'\{[\s\S]*\}', text)
+        try:
+            json_match = re.search(r'\{[\s\S]*\}', result.text)
             if json_match:
-                return json.loads(json_match.group())
-            return None
+                analysis = json.loads(json_match.group())
+                # 添加元数据供上层记录
+                analysis['_provider'] = result.provider_id
+                analysis['_used_fallback'] = result.is_fallback
+                return analysis
+        except json.JSONDecodeError as e:
+            logger.error(f"[MoreChatPlus] 解析模型B响应失败: {e}, 响应: {result.text[:200]}")
 
-        except Exception as e:
-            logger.error(f"[MoreChatPlus] 调用模型B失败: {e}")
-            # 上报错误
-            await self._record_llm_call({
-                "phase": "response",
-                "provider_id": provider_id or "default",
-                "model": getattr(provider, 'model', 'model_b') if provider else "unknown",
-                "response": f"[模型B错误: {str(e)}]",
-                "source": {"plugin": "morechatplus", "purpose": "model_b_error"},
-                "conversation_id": conv_id,
-                "timestamp": time.time()
-            })
-            return None
+        return None
 
     def get_or_create_profile(
         self,

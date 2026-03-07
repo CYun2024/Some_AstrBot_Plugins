@@ -22,6 +22,29 @@
             align-items: center;
         }
         .header h1 { font-size: 1.25rem; color: #60a5fa; }
+        .header-nav {
+            display: flex;
+            gap: 1rem;
+        }
+        .nav-btn {
+            background: transparent;
+            border: 1px solid #475569;
+            color: #94a3b8;
+            padding: 0.5rem 1rem;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: all 0.2s;
+            font-size: 0.875rem;
+        }
+        .nav-btn:hover {
+            background: #334155;
+            color: #e2e8f0;
+        }
+        .nav-btn.active {
+            background: #3b82f6;
+            border-color: #3b82f6;
+            color: white;
+        }
         .status {
             display: flex;
             align-items: center;
@@ -44,13 +67,15 @@
             grid-template-columns: 350px 1fr;
             height: calc(100vh - 60px);
         }
+        .container.full-width {
+            grid-template-columns: 1fr;
+        }
         .sidebar {
             background: #1e293b;
             border-right: 1px solid #334155;
             overflow-y: auto;
             padding: 1rem;
         }
-        /* 新增分类过滤器 */
         .filter-bar {
             margin-bottom: 1rem;
             padding: 0.5rem;
@@ -66,9 +91,6 @@
             border-radius: 6px;
             font-size: 0.875rem;
             cursor: pointer;
-        }
-        .filter-bar select option {
-            background: #1e293b;
         }
         .record-item {
             background: #334155;
@@ -103,7 +125,6 @@
         }
         .type-request { background: #3b82f6; color: white; }
         .type-response { background: #10b981; color: white; }
-        /* 新增用途标签 */
         .purpose-tag {
             font-size: 0.7rem;
             padding: 0.125rem 0.4rem;
@@ -137,7 +158,12 @@
             font-size: 0.875rem;
             text-transform: uppercase;
             letter-spacing: 0.05em;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
         }
+
+        /* 可折叠JSON查看器 */
         .json-viewer {
             background: #020617;
             border: 1px solid #334155;
@@ -145,19 +171,137 @@
             padding: 1rem;
             font-family: 'Consolas', 'Monaco', monospace;
             font-size: 0.875rem;
-            line-height: 1.5;
+            line-height: 1.6;
             overflow-x: auto;
-            white-space: pre-wrap;
-            word-break: break-all;
-            max-height: 400px;
+            max-height: 600px;
             overflow-y: auto;
         }
-        .string { color: #a5f3fc; }
-        .number { color: #fca5a5; }
-        .boolean { color: #fdba74; }
-        .null { color: #94a3b8; }
-        .key { color: #93c5fd; }
-        
+
+        .json-toggle {
+            display: inline-flex;
+            width: 1rem;
+            height: 1rem;
+            cursor: pointer;
+            align-items: center;
+            justify-content: center;
+            color: #64748b;
+            font-size: 0.75rem;
+            margin-right: 0.25rem;
+            user-select: none;
+        }
+
+        .json-toggle:hover { color: #e2e8f0; }
+        .json-toggle.collapsed::before { content: "▶"; }
+        .json-toggle.expanded::before { content: "▼"; }
+        .json-toggle.leaf::before { content: ""; }
+
+        .json-content.collapsed { display: none; }
+
+        .json-line {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: flex-start;
+            min-height: 1.5rem;
+            margin-left: 1.5rem;
+        }
+
+        .json-collapsed-preview {
+            color: #64748b;
+            font-style: italic;
+            margin-left: 0.25rem;
+        }
+
+        .json-key { color: #93c5fd; margin-right: 0.5rem; }
+        .json-string { color: #a5f3fc; }
+        .json-number { color: #fca5a5; }
+        .json-boolean { color: #fdba74; }
+        .json-null { color: #94a3b8; }
+        .json-bracket { color: #64748b; }
+
+        /* 可折叠区块 */
+        .collapsible-section {
+            border: 1px solid #334155;
+            border-radius: 8px;
+            margin-bottom: 1rem;
+            overflow: hidden;
+        }
+
+        .collapsible-header {
+            background: #0f172a;
+            padding: 0.75rem 1rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            cursor: pointer;
+            user-select: none;
+            transition: background 0.2s;
+        }
+
+        .collapsible-header:hover { background: #1e293b; }
+        .collapsible-header.collapsed .collapsible-icon { transform: rotate(-90deg); }
+
+        .collapsible-title {
+            font-weight: 600;
+            color: #60a5fa;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .collapsible-icon {
+            transition: transform 0.3s;
+            color: #64748b;
+        }
+
+        .collapsible-content {
+            padding: 1rem;
+            background: #1e293b;
+            max-height: 500px;
+            overflow-y: auto;
+            transition: max-height 0.3s ease-out;
+        }
+
+        .collapsible-content.collapsed {
+            max-height: 0;
+            padding: 0 1rem;
+            overflow: hidden;
+        }
+
+        /* 长文本折叠 */
+        .text-preview {
+            max-height: 100px;
+            overflow: hidden;
+            position: relative;
+            background: #334155;
+            padding: 0.75rem;
+            border-radius: 6px;
+            border-left: 3px solid #3b82f6;
+        }
+
+        .text-preview.expanded { max-height: none; }
+
+        .text-fade {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            height: 30px;
+            background: linear-gradient(transparent, #334155);
+            pointer-events: none;
+        }
+
+        .text-preview.expanded .text-fade { display: none; }
+
+        .expand-text-btn {
+            margin-top: 0.5rem;
+            color: #60a5fa;
+            cursor: pointer;
+            font-size: 0.75rem;
+            display: inline-block;
+        }
+
+        .expand-text-btn:hover { text-decoration: underline; }
+
         .empty-state {
             display: flex;
             flex-direction: column;
@@ -176,129 +320,305 @@
             border-radius: 8px;
             display: none;
         }
+
+        /* MoreChatPlus 数据查看样式 */
+        .mcp-section {
+            display: none;
+        }
+        .mcp-section.active {
+            display: block;
+        }
+        .mcp-stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+            margin-bottom: 2rem;
+        }
+        .stat-card {
+            background: #1e293b;
+            border: 1px solid #334155;
+            border-radius: 12px;
+            padding: 1.5rem;
+            text-align: center;
+        }
+        .stat-value {
+            font-size: 2rem;
+            font-weight: bold;
+            color: #60a5fa;
+            margin-bottom: 0.5rem;
+        }
+        .stat-label {
+            font-size: 0.875rem;
+            color: #94a3b8;
+        }
+        .mcp-controls {
+            background: #1e293b;
+            border-radius: 8px;
+            padding: 1rem;
+            margin-bottom: 1rem;
+            display: flex;
+            gap: 1rem;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+        .mcp-controls select, .mcp-controls button {
+            padding: 0.5rem 1rem;
+            background: #334155;
+            border: 1px solid #475569;
+            color: #e2e8f0;
+            border-radius: 6px;
+            cursor: pointer;
+        }
+        .mcp-controls button {
+            background: #3b82f6;
+            border-color: #3b82f6;
+        }
+        .mcp-controls button:hover {
+            background: #2563eb;
+        }
+        .data-table {
+            width: 100%;
+            border-collapse: collapse;
+            background: #1e293b;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        .data-table th, .data-table td {
+            padding: 0.75rem;
+            text-align: left;
+            border-bottom: 1px solid #334155;
+            font-size: 0.875rem;
+        }
+        .data-table th {
+            background: #0f172a;
+            color: #60a5fa;
+            font-weight: 600;
+        }
+        .data-table tr:hover {
+            background: #334155;
+        }
+        .tab-buttons {
+            display: flex;
+            gap: 0.5rem;
+            margin-bottom: 1rem;
+        }
+        .tab-btn {
+            padding: 0.5rem 1rem;
+            background: #334155;
+            border: 1px solid #475569;
+            color: #94a3b8;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.875rem;
+        }
+        .tab-btn.active {
+            background: #3b82f6;
+            color: white;
+            border-color: #3b82f6;
+        }
+        .pagination {
+            display: flex;
+            gap: 0.5rem;
+            margin-top: 1rem;
+            justify-content: center;
+        }
+        .pagination button {
+            padding: 0.5rem 1rem;
+            background: #334155;
+            border: 1px solid #475569;
+            color: #e2e8f0;
+            border-radius: 6px;
+            cursor: pointer;
+        }
+        .pagination button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        .loading {
+            text-align: center;
+            padding: 2rem;
+            color: #94a3b8;
+        }
     </style>
+    <base target="_blank">
 </head>
 <body>
     <div class="header">
         <h1>🔍 LLM Debugger</h1>
+        <div class="header-nav">
+            <button class="nav-btn active" onclick="showTab('debugger')">调试器</button>
+            <button class="nav-btn" onclick="showTab('morechatplus')">MoreChatPlus数据</button>
+        </div>
         <div class="status">
             <div class="status-dot"></div>
             <span id="conn-status">已连接</span>
             <span id="record-count" style="margin-left: 1rem; color: #94a3b8;">0 条记录</span>
         </div>
     </div>
-    
+
     <div class="connection-lost" id="error-toast">连接断开，正在重连...</div>
-    
-    <div class="container">
-        <div class="sidebar" id="sidebar">
-            <!-- 分类过滤器 -->
-            <div class="filter-bar">
-                <select id="purpose-filter">
-                    <option value="all">全部记录</option>
-                    <option value="complexity_judge">复杂判断</option>
-                    <option value="followup_judge">追问判断</option>
-                    <option value="solver_call">解题模型</option>
-                    <option value="summarize">精简输出</option>
-                    <option value="persona_restate">人设复述</option>
-                    <option value="apology">道歉消息</option>
-                    <option value="main">主模型（其他）</option>
-                </select>
+
+    <!-- 调试器界面 -->
+    <div id="debugger-section" class="mcp-section active">
+        <div class="container">
+            <div class="sidebar" id="sidebar">
+                <div class="filter-bar">
+                    <select id="purpose-filter">
+                        <option value="all">全部记录</option>
+                        <option value="complexity_judge">复杂判断</option>
+                        <option value="followup_judge">追问判断</option>
+                        <option value="solver_call">解题模型</option>
+                        <option value="summarize">精简输出</option>
+                        <option value="persona_restate">人设复述</option>
+                        <option value="apology">道歉消息</option>
+                        <option value="model_a_summary">模型A总结</option>
+                        <option value="model_b_profile">模型B画像</option>
+                        <option value="vision">识图</option>
+                        <option value="nickname_check">昵称检查</option>
+                        <option value="main">主模型（其他）</option>
+                    </select>
+                </div>
+                <div id="record-list"></div>
             </div>
-            <div id="record-list">
-                <!-- 动态渲染 -->
+
+            <div class="main-content" id="main-content">
+                <div class="empty-state">
+                    <div style="font-size: 3rem; margin-bottom: 1rem;">📭</div>
+                    <div>选择左侧记录查看详情</div>
+                </div>
             </div>
         </div>
-        
-        <div class="main-content" id="main-content">
-            <div class="empty-state">
-                <div style="font-size: 3rem; margin-bottom: 1rem;">📭</div>
-                <div>选择左侧记录查看详情</div>
+    </div>
+
+    <!-- MoreChatPlus 数据界面 -->
+    <div id="morechatplus-section" class="mcp-section">
+        <div class="container full-width">
+            <div class="main-content">
+                <div class="tab-buttons">
+                    <button class="tab-btn active" onclick="showMcpTab('stats')">统计概览</button>
+                    <button class="tab-btn" onclick="showMcpTab('messages')">消息记录</button>
+                    <button class="tab-btn" onclick="showMcpTab('profiles')">用户画像</button>
+                    <button class="tab-btn" onclick="showMcpTab('summaries')">上下文总结</button>
+                </div>
+
+                <div id="mcp-stats" class="mcp-tab-content active">
+                    <div class="mcp-stats" id="stats-container">
+                        <div class="stat-card">
+                            <div class="stat-value" id="stat-messages">-</div>
+                            <div class="stat-label">总消息数</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-value" id="stat-profiles">-</div>
+                            <div class="stat-label">用户画像数</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-value" id="stat-summaries">-</div>
+                            <div class="stat-label">总结记录数</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-value" id="stat-origins">-</div>
+                            <div class="stat-label">群聊数量</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="mcp-messages" class="mcp-tab-content" style="display:none;">
+                    <div class="mcp-controls">
+                        <select id="mcp-origin-select"><option value="">全部来源</option></select>
+                        <button onclick="loadMessages()">刷新</button>
+                    </div>
+                    <div id="messages-container"><div class="loading">加载中...</div></div>
+                    <div class="pagination">
+                        <button onclick="changePage(-1)" id="msg-prev">上一页</button>
+                        <span id="msg-page-info">第 1 页</span>
+                        <button onclick="changePage(1)" id="msg-next">下一页</button>
+                    </div>
+                </div>
+
+                <div id="mcp-profiles" class="mcp-tab-content" style="display:none;">
+                    <div class="mcp-controls">
+                        <select id="profile-origin-select"><option value="">全部来源</option></select>
+                        <button onclick="loadProfiles()">刷新</button>
+                    </div>
+                    <div id="profiles-container"><div class="loading">加载中...</div></div>
+                </div>
+
+                <div id="mcp-summaries" class="mcp-tab-content" style="display:none;">
+                    <div class="mcp-controls">
+                        <select id="summary-origin-select"><option value="">全部来源</option></select>
+                        <button onclick="loadSummaries()">刷新</button>
+                    </div>
+                    <div id="summaries-container"><div class="loading">加载中...</div></div>
+                </div>
             </div>
         </div>
     </div>
 
     <script>
-        let ws;
-        let records = [];
-        let selectedId = null;
-        let currentFilter = 'all';  // 当前选中的分类
+        // ===== 调试器核心功能 =====
+        let ws, records = [], selectedId = null, currentFilter = 'all';
+        const mcpPageSize = 20;
+        let mcpPage = 0, mcpOrigins = [];
 
-        const sidebar = document.getElementById('sidebar');
-        const mainContent = document.getElementById('main-content');
-        const recordCount = document.getElementById('record-count');
-        const connStatus = document.getElementById('conn-status');
-        const errorToast = document.getElementById('error-toast');
-        const purposeFilter = document.getElementById('purpose-filter');
-
-        // 监听过滤器变化
-        purposeFilter.addEventListener('change', (e) => {
-            currentFilter = e.target.value;
-            renderSidebar();
-        });
-
-        // 连接 WebSocket
         function connect() {
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
-            
+
             ws.onopen = () => {
-                connStatus.textContent = '已连接';
-                connStatus.style.color = '#10b981';
-                errorToast.style.display = 'none';
+                document.getElementById('conn-status').textContent = '已连接';
+                document.getElementById('conn-status').style.color = '#10b981';
+                document.getElementById('error-toast').style.display = 'none';
             };
-            
+
             ws.onmessage = (event) => {
                 const data = JSON.parse(event.data);
                 records.unshift(data);
                 if (records.length > 200) records.pop();
                 renderSidebar();
-                recordCount.textContent = `${records.length} 条记录`;
-                
+                document.getElementById('record-count').textContent = `${records.length} 条记录`;
+
                 if (selectedId) {
                     const selectedRecord = records.find(r => r.id === selectedId);
-                    if (selectedRecord && data.conversation_id && data.conversation_id === selectedRecord.conversation_id) {
+                    if (selectedRecord && data.conversation_id === selectedRecord.conversation_id) {
                         showDetail(selectedRecord);
                     }
                 }
             };
-            
+
             ws.onclose = () => {
-                connStatus.textContent = '断开';
-                connStatus.style.color = '#ef4444';
-                errorToast.style.display = 'block';
+                document.getElementById('conn-status').textContent = '断开';
+                document.getElementById('conn-status').style.color = '#ef4444';
+                document.getElementById('error-toast').style.display = 'block';
                 setTimeout(connect, 3000);
             };
-            
+
             ws.onerror = () => {
-                connStatus.textContent = '错误';
-                connStatus.style.color = '#ef4444';
+                document.getElementById('conn-status').textContent = '错误';
+                document.getElementById('conn-status').style.color = '#ef4444';
             };
         }
 
-        // 获取记录的目的（用于分类）
         function getPurpose(record) {
-            if (record.source && record.source.purpose) {
-                return record.source.purpose;
-            }
-            // 没有 source.purpose 的记录归为 "main"（主模型调用）
-            return 'main';
+            return record.source?.purpose || 'main';
         }
 
-        // 渲染侧边栏（带过滤）
         function renderSidebar() {
-            const filteredRecords = records.filter(record => {
-                if (currentFilter === 'all') return true;
-                return getPurpose(record) === currentFilter;
-            });
-
+            const filtered = records.filter(r => currentFilter === 'all' || getPurpose(r) === currentFilter);
             const listEl = document.getElementById('record-list');
-            if (filteredRecords.length === 0) {
+
+            if (filtered.length === 0) {
                 listEl.innerHTML = '<div style="color: #64748b; text-align: center; padding: 2rem;">没有符合条件的记录</div>';
                 return;
             }
 
-            listEl.innerHTML = filteredRecords.map((record) => {
+            const purposeMap = {
+                'complexity_judge': '复杂判断', 'followup_judge': '追问判断', 'solver_call': '解题模型',
+                'summarize': '精简', 'persona_restate': '复述', 'apology': '道歉',
+                'model_a_summary': '模型A总结', 'model_b_profile': '模型B画像',
+                'vision': '识图', 'nickname_check': '昵称检查', 'main': '主模型'
+            };
+
+            listEl.innerHTML = filtered.map(record => {
                 const isSelected = record.id === selectedId;
                 const type = record.type;
                 const time = new Date(record.timestamp).toLocaleTimeString();
@@ -306,44 +626,29 @@
                 const preview = type === 'request' 
                     ? (record.message?.raw?.substring(0, 30) + '...')
                     : (record.response?.text?.substring(0, 30) + '...');
-                const purpose = getPurpose(record);
-                // 用途显示文本
-                const purposeText = {
-                    'complexity_judge': '复杂判断',
-                    'followup_judge': '追问判断',
-                    'solver_call': '解题模型',
-                    'summarize': '精简',
-                    'persona_restate': '复述',
-                    'apology': '道歉',
-                    'main': '主模型'
-                }[purpose] || purpose;
-                
-                return `
-                    <div class="record-item ${type} ${isSelected ? 'active' : ''}" 
-                         onclick="selectRecord(${record.id})">
-                        <div class="record-header">
-                            <span class="record-type type-${type}">${type === 'request' ? '请求' : '响应'}</span>
-                            <span class="purpose-tag">${purposeText}</span>
-                            <span style="color: #94a3b8; font-size: 0.75rem;">${time}</span>
-                        </div>
-                        <div class="record-meta">${sender}: ${preview}</div>
+                const purposeText = purposeMap[getPurpose(record)] || getPurpose(record);
+
+                return `<div class="record-item ${type} ${isSelected ? 'active' : ''}" onclick="selectRecord(${record.id})">
+                    <div class="record-header">
+                        <span class="record-type type-${type}">${type === 'request' ? '请求' : '响应'}</span>
+                        <span class="purpose-tag">${purposeText}</span>
+                        <span style="color: #94a3b8; font-size: 0.75rem;">${time}</span>
                     </div>
-                `;
+                    <div class="record-meta">${sender}: ${preview}</div>
+                </div>`;
             }).join('');
         }
 
         function selectRecord(id) {
-            if (id === undefined || id === null) return;
-            selectedId = Number(id); 
+            if (id == null) return;
+            selectedId = Number(id);
             renderSidebar();
-            
             const current = records.find(r => r.id === selectedId);
-            if (!current) return;
-            
-            showDetail(current);
+            if (current) showDetail(current);
         }
 
         function showDetail(record) {
+            const mainContent = document.getElementById('main-content');
             mainContent.innerHTML = '';
 
             if (record.type === 'request') {
@@ -353,131 +658,146 @@
             }
 
             if (record.conversation_id && record.conversation_id !== 'null') {
-                const pair = records.find(r => 
-                    r.conversation_id === record.conversation_id && 
-                    r.id !== record.id
-                );
+                const pair = records.find(r => r.conversation_id === record.conversation_id && r.id !== record.id);
                 if (pair) {
-                    if (pair.type === 'request') {
-                        mainContent.innerHTML += renderRequestDetail(pair);
-                    } else {
-                        mainContent.innerHTML += renderResponseDetail(pair);
-                    }
+                    mainContent.innerHTML += pair.type === 'request' ? renderRequestDetail(pair) : renderResponseDetail(pair);
                 } else {
-                    mainContent.innerHTML += `
-                        <div class="detail-panel" style="opacity: 0.7;">
-                            <h3>⏳ 等待配对记录...</h3>
-                            <div style="color: #94a3b8;">暂无对应的 ${record.type === 'request' ? '响应' : '请求'}</div>
-                        </div>
-                    `;
+                    mainContent.innerHTML += `<div class="detail-panel" style="opacity: 0.7;">
+                        <h3>⏳ 等待配对记录...</h3>
+                        <div style="color: #94a3b8;">暂无对应的 ${record.type === 'request' ? '响应' : '请求'}</div>
+                    </div>`;
                 }
-            } else if (!record.conversation_id) {
-                mainContent.innerHTML += `
-                    <div class="detail-panel" style="opacity: 0.7;">
-                        <h3>⚠️ 无法关联对话</h3>
-                        <div style="color: #94a3b8;">该记录没有有效的 conversation_id，无法显示配对信息</div>
-                    </div>
-                `;
             }
         }
 
-        function renderRequestDetail(request) {
-            return `
-                <div class="detail-panel">
-                    <h3>📤 LLM 请求详情 ${request.source?.purpose ? `(${request.source.purpose})` : ''}</h3>
-                    <div style="margin-bottom: 1rem;">
-                        <strong style="color: #60a5fa;">发送者:</strong> 
-                        ${request.sender.name} (${request.sender.id})
-                    </div>
-                    <div style="margin-bottom: 1rem;">
-                        <strong style="color: #60a5fa;">平台:</strong> 
-                        ${request.sender.platform} 
-                        ${request.sender.group_id ? `| 群组: ${request.sender.group_id}` : ''}
-                    </div>
-                    <div style="margin-bottom: 1rem;">
-                        <strong style="color: #60a5fa;">原始消息:</strong>
-                        <div style="background: #334155; padding: 0.75rem; border-radius: 6px; margin-top: 0.5rem;">
-                            ${escapeHtml(request.message.raw)}
-                        </div>
-                    </div>
-                    <div style="margin-bottom: 1rem;">
-                        <strong style="color: #60a5fa;">格式化 Prompt:</strong>
-                        <div style="background: #334155; padding: 0.75rem; border-radius: 6px; margin-top: 0.5rem; font-family: monospace;">
-                            ${escapeHtml(request.message.formatted_prompt)}
-                        </div>
-                    </div>
-                    <div style="margin-bottom: 1rem;">
-                        <strong style="color: #60a5fa;">模型:</strong> ${request.llm_config.model}
-                    </div>
-                    <div style="margin-bottom: 1rem;">
-                        <strong style="color: #60a5fa;">上下文轮数:</strong> ${request.llm_config.contexts_count}
-                    </div>
-                    ${request.llm_config.contexts && request.llm_config.contexts.length > 0 ? `
-                    <div style="margin-bottom: 1rem;">
-                        <strong style="color: #60a5fa;">上下文历史:</strong>
-                        <div class="json-viewer">${syntaxHighlight(JSON.stringify(request.llm_config.contexts, null, 2))}</div>
-                    </div>
-                    ` : ''}
-                    <div>
-                        <strong style="color: #60a5fa;">System Prompt:</strong>
-                        <div class="json-viewer">${escapeHtml(request.llm_config.system_prompt || '')}</div>
-                    </div>
-                    ${request.tools && request.tools.length > 0 ? `
-                    <div style="margin-top: 1rem;">
-                        <strong style="color: #60a5fa;">可用工具:</strong>
-                        <div class="json-viewer">${syntaxHighlight(JSON.stringify(request.tools, null, 2))}</div>
-                    </div>
-                    ` : ''}
-                </div>
-            `;
+        // ===== 可折叠渲染函数 =====
+        function renderJsonTree(obj, level = 0) {
+            if (obj === null) return '<span class="json-null">null</span>';
+            if (obj === undefined) return '<span class="json-null">undefined</span>';
+
+            const type = typeof obj;
+
+            if (type === 'string') {
+                const display = obj.length > 100 ? escapeHtml(obj.substring(0, 100)) + '...' : escapeHtml(obj);
+                return `<span class="json-string">"${display}"${obj.length > 100 ? ` <span style="color: #64748b;">(${obj.length} 字符)</span>` : ''}</span>`;
+            }
+            if (type === 'number') return `<span class="json-number">${obj}</span>`;
+            if (type === 'boolean') return `<span class="json-boolean">${obj}</span>`;
+
+            if (Array.isArray(obj)) {
+                if (obj.length === 0) return '<span class="json-bracket">[]</span>';
+                const id = 'json-' + Math.random().toString(36).substr(2, 9);
+                const isLarge = obj.length > 3 || level > 2;
+
+                let html = `<span class="json-toggle ${isLarge ? 'collapsed' : 'expanded'}" onclick="toggleJsonNode(event, '${id}')"></span>`;
+                html += `<span class="json-bracket">[</span>`;
+                html += `<span class="json-collapsed-preview" id="${id}-preview"> ${obj.length} 项</span>`;
+                html += `<div class="json-content ${isLarge ? 'collapsed' : ''}" id="${id}">`;
+
+                obj.forEach((item, index) => {
+                    html += `<div class="json-line">${renderJsonTree(item, level + 1)}${index < obj.length - 1 ? '<span class="json-bracket">,</span>' : ''}</div>`;
+                });
+
+                html += '</div><span class="json-bracket">]</span>';
+                return html;
+            }
+
+            if (type === 'object') {
+                const keys = Object.keys(obj);
+                if (keys.length === 0) return '<span class="json-bracket">{}</span>';
+
+                const id = 'json-' + Math.random().toString(36).substr(2, 9);
+                const isLarge = keys.length > 3 || level > 1;
+
+                let html = `<span class="json-toggle ${isLarge ? 'collapsed' : 'expanded'}" onclick="toggleJsonNode(event, '${id}')"></span>`;
+                html += `<span class="json-bracket">{</span>`;
+                html += `<span class="json-collapsed-preview" id="${id}-preview"> ${keys.length} 个属性</span>`;
+                html += `<div class="json-content ${isLarge ? 'collapsed' : ''}" id="${id}">`;
+
+                keys.forEach((k, index) => {
+                    html += `<div class="json-line"><span class="json-key">"${escapeHtml(k)}"</span>: ${renderJsonTree(obj[k], level + 1)}${index < keys.length - 1 ? '<span class="json-bracket">,</span>' : ''}</div>`;
+                });
+
+                html += '</div><span class="json-bracket">}</span>';
+                return html;
+            }
+
+            return escapeHtml(String(obj));
         }
 
-        function renderResponseDetail(response) {
-            return `
-                <div class="detail-panel">
-                    <h3>📥 LLM 响应详情 ${response.source?.purpose ? `(${response.source.purpose})` : ''}</h3>
-                    <div style="margin-bottom: 1rem;">
-                        <strong style="color: #60a5fa;">模型:</strong> ${response.response.model || 'Unknown'}
-                    </div>
-                    <div style="margin-bottom: 1rem;">
-                        <strong style="color: #60a5fa;">回复内容:</strong>
-                        <div style="background: #065f46; padding: 0.75rem; border-radius: 6px; margin-top: 0.5rem; border-left: 3px solid #10b981;">
-                            ${escapeHtml(response.response.text)}
-                        </div>
-                    </div>
-                    ${response.usage ? `
-                    <div style="margin-bottom: 1rem;">
-                        <strong style="color: #60a5fa;">Token 用量:</strong>
-                        <div class="json-viewer">${syntaxHighlight(JSON.stringify(response.usage, null, 2))}</div>
-                    </div>
-                    ` : ''}
-                    ${response.response.raw ? `
-                    <div>
-                        <strong style="color: #60a5fa;">原始响应:</strong>
-                        <div class="json-viewer">${syntaxHighlight(JSON.stringify(response.response.raw, null, 2))}</div>
-                    </div>
-                    ` : ''}
-                </div>
-            `;
+        function toggleJsonNode(event, id) {
+            event.stopPropagation();
+            const content = document.getElementById(id);
+            const preview = document.getElementById(id + '-preview');
+            const toggle = event.target;
+
+            if (content.classList.contains('collapsed')) {
+                content.classList.remove('collapsed');
+                preview.style.display = 'none';
+                toggle.classList.remove('collapsed');
+                toggle.classList.add('expanded');
+            } else {
+                content.classList.add('collapsed');
+                preview.style.display = 'inline';
+                toggle.classList.remove('expanded');
+                toggle.classList.add('collapsed');
+            }
         }
 
-        function syntaxHighlight(json) {
-            json = json.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-            return json.replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g, function (match) {
-                let cls = 'number';
-                if (/^"/.test(match)) {
-                    if (/:$/.test(match)) {
-                        cls = 'key';
-                    } else {
-                        cls = 'string';
-                    }
-                } else if (/true|false/.test(match)) {
-                    cls = 'boolean';
-                } else if (/null/.test(match)) {
-                    cls = 'null';
-                }
-                return '<span class="' + cls + '">' + match + '</span>';
-            });
+        function renderCollapsibleSection(title, content, defaultCollapsed) {
+            const id = 'section-' + Math.random().toString(36).substr(2, 9);
+            return `<div class="collapsible-section">
+                <div class="collapsible-header ${defaultCollapsed ? 'collapsed' : ''}" onclick="toggleSection('${id}')">
+                    <span class="collapsible-title">
+                        <span class="collapsible-icon">▼</span>
+                        ${title}
+                    </span>
+                    <span style="color: #64748b; font-size: 0.75rem;">点击${defaultCollapsed ? '展开' : '折叠'}</span>
+                </div>
+                <div class="collapsible-content ${defaultCollapsed ? 'collapsed' : ''}" id="${id}">${content}</div>
+            </div>`;
+        }
+
+        function renderCollapsibleText(text, label, maxLength = 100, type = 'normal') {
+            if (!text) return '<div style="color: #64748b;">(空)</div>';
+
+            const isLong = text.length > maxLength;
+            if (!isLong) {
+                const bgColor = type === 'response' ? '#065f46' : '#334155';
+                const borderColor = type === 'response' ? '#10b981' : '#3b82f6';
+                return `<div style="background: ${bgColor}; padding: 0.75rem; border-radius: 6px; border-left: 3px solid ${borderColor}; white-space: pre-wrap; word-break: break-word;">${escapeHtml(text)}</div>`;
+            }
+
+            const id = 'text-' + Math.random().toString(36).substr(2, 9);
+            return `<div class="text-preview" id="${id}"><div>${escapeHtml(text)}</div><div class="text-fade"></div></div>
+                <span class="expand-text-btn" onclick="toggleTextExpand('${id}', this)">展开全部 (${text.length} 字符)</span>`;
+        }
+
+        function toggleSection(id) {
+            const content = document.getElementById(id);
+            const header = content.previousElementSibling;
+            const isCollapsed = content.classList.contains('collapsed');
+
+            if (isCollapsed) {
+                content.classList.remove('collapsed');
+                header.classList.remove('collapsed');
+            } else {
+                content.classList.add('collapsed');
+                header.classList.add('collapsed');
+            }
+        }
+
+        function toggleTextExpand(id, btn) {
+            const preview = document.getElementById(id);
+            const isExpanded = preview.classList.contains('expanded');
+
+            if (isExpanded) {
+                preview.classList.remove('expanded');
+                btn.textContent = btn.textContent.replace('收起', '展开全部');
+            } else {
+                preview.classList.add('expanded');
+                btn.textContent = btn.textContent.replace('展开全部', '收起');
+            }
         }
 
         function escapeHtml(text) {
@@ -489,6 +809,222 @@
                 .replace(/"/g, "&quot;")
                 .replace(/'/g, "&#039;");
         }
+
+        // ===== 详情渲染 =====
+        function renderRequestDetail(request) {
+            const purpose = request.source?.purpose || 'main';
+            const contexts = request.llm_config?.contexts || [];
+            const hasLargeContexts = contexts.length > 5;
+            const systemPrompt = request.llm_config?.system_prompt || '';
+            const hasLongSystemPrompt = systemPrompt.length > 200;
+
+            let html = `<div class="detail-panel">
+                <h3>📤 LLM 请求详情 (${purpose})</h3>
+                <div style="margin-bottom: 1rem;"><strong style="color: #60a5fa;">发送者:</strong> ${request.sender.name} (${request.sender.id})</div>
+                <div style="margin-bottom: 1rem;"><strong style="color: #60a5fa;">平台:</strong> ${request.sender.platform} ${request.sender.group_id ? `| 群组: ${request.sender.group_id}` : ''}</div>
+                <div style="margin-bottom: 1rem;"><strong style="color: #60a5fa;">原始消息:</strong> ${renderCollapsibleText(request.message?.raw || '', '原始消息')}</div>
+                <div style="margin-bottom: 1rem;"><strong style="color: #60a5fa;">格式化 Prompt:</strong> ${renderCollapsibleText(request.message?.formatted_prompt || '', 'Prompt', 150)}</div>
+                <div style="margin-bottom: 1rem;"><strong style="color: #60a5fa;">模型:</strong> ${request.llm_config.model}</div>
+                <div style="margin-bottom: 1rem;"><strong style="color: #60a5fa;">上下文轮数:</strong> ${contexts.length}</div>`;
+
+            if (contexts.length > 0) {
+                html += renderCollapsibleSection('上下文历史', '<div class="json-viewer">' + renderJsonTree(contexts) + '</div>', hasLargeContexts);
+            }
+
+            if (systemPrompt) {
+                html += renderCollapsibleSection('System Prompt', renderCollapsibleText(systemPrompt, '', 200), hasLongSystemPrompt);
+            }
+
+            if (request.message?.image_urls?.length > 0) {
+                html += `<div><strong style="color: #60a5fa;">图片URL:</strong><div class="json-viewer">${request.message.image_urls.map(url => escapeHtml(url)).join('<br>')}</div></div>`;
+            }
+
+            html += '</div>';
+            return html;
+        }
+
+        function renderResponseDetail(response) {
+            const purpose = response.source?.purpose || 'main';
+            const raw = response.response?.raw;
+            const hasRaw = raw && (typeof raw === 'object' ? Object.keys(raw).length > 0 : String(raw).length > 0);
+
+            let html = `<div class="detail-panel">
+                <h3>📥 LLM 响应详情 (${purpose})</h3>
+                <div style="margin-bottom: 1rem;"><strong style="color: #60a5fa;">模型:</strong> ${response.response.model || 'Unknown'}</div>
+                <div style="margin-bottom: 1rem;"><strong style="color: #60a5fa;">回复内容:</strong> ${renderCollapsibleText(response.response.text || '', '回复内容', 200, 'response')}</div>`;
+
+            if (response.usage) {
+                html += renderCollapsibleSection('Token 用量', '<div class="json-viewer">' + renderJsonTree(response.usage) + '</div>', false);
+            }
+
+            if (hasRaw) {
+                html += renderCollapsibleSection('原始响应', '<div class="json-viewer">' + renderJsonTree(raw) + '</div>', true);
+            }
+
+            html += '</div>';
+            return html;
+        }
+
+        // ===== MoreChatPlus 数据功能 =====
+        function showTab(tab) {
+            document.querySelectorAll('.nav-btn').forEach(btn => btn.classList.remove('active'));
+            event.target.classList.add('active');
+            document.getElementById('debugger-section').classList.remove('active');
+            document.getElementById('morechatplus-section').classList.remove('active');
+
+            if (tab === 'debugger') {
+                document.getElementById('debugger-section').classList.add('active');
+            } else {
+                document.getElementById('morechatplus-section').classList.add('active');
+                loadMcpStats();
+                loadMcpOrigins();
+            }
+        }
+
+        function showMcpTab(tab) {
+            document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+            event.target.classList.add('active');
+            document.querySelectorAll('.mcp-tab-content').forEach(el => el.style.display = 'none');
+            document.getElementById('mcp-' + tab).style.display = 'block';
+
+            if (tab === 'stats') loadMcpStats();
+            else if (tab === 'messages') loadMessages();
+            else if (tab === 'profiles') loadProfiles();
+            else if (tab === 'summaries') loadSummaries();
+        }
+
+        async function loadMcpStats() {
+            try {
+                const res = await fetch('/api/morechatplus/stats');
+                const data = await res.json();
+                if (data.error) return;
+                document.getElementById('stat-messages').textContent = data.total_messages || 0;
+                document.getElementById('stat-profiles').textContent = data.total_profiles || 0;
+                document.getElementById('stat-summaries').textContent = data.total_summaries || 0;
+                document.getElementById('stat-origins').textContent = data.total_origins || 0;
+            } catch (e) {
+                console.error('加载统计失败:', e);
+            }
+        }
+
+        async function loadMcpOrigins() {
+            try {
+                const res = await fetch('/api/morechatplus/origins');
+                const data = await res.json();
+                mcpOrigins = data.origins || [];
+                ['mcp-origin-select', 'profile-origin-select', 'summary-origin-select'].forEach(id => {
+                    const select = document.getElementById(id);
+                    select.innerHTML = '<option value="">全部来源</option>';
+                    mcpOrigins.forEach(origin => {
+                        const option = document.createElement('option');
+                        option.value = origin;
+                        option.textContent = origin;
+                        select.appendChild(option);
+                    });
+                });
+            } catch (e) {
+                console.error('加载来源失败:', e);
+            }
+        }
+
+        async function loadMessages() {
+            const container = document.getElementById('messages-container');
+            container.innerHTML = '<div class="loading">加载中...</div>';
+            const origin = document.getElementById('mcp-origin-select').value;
+
+            try {
+                const res = await fetch(`/api/morechatplus/messages?limit=${mcpPageSize}&offset=${mcpPage * mcpPageSize}&origin=${origin}`);
+                const data = await res.json();
+
+                if (data.error) {
+                    container.innerHTML = `<div style="color: #ef4444;">错误: ${data.error}</div>`;
+                    return;
+                }
+
+                if (data.messages.length === 0) {
+                    container.innerHTML = '<div style="text-align: center; color: #64748b;">暂无数据</div>';
+                    return;
+                }
+
+                let html = '<table class="data-table"><thead><tr><th>ID</th><th>时间</th><th>来源</th><th>用户</th><th>昵称</th><th>内容</th></tr></thead><tbody>';
+                data.messages.forEach(msg => {
+                    const time = new Date(msg.timestamp * 1000).toLocaleString();
+                    const content = escapeHtml(msg.content || '').substring(0, 100);
+                    html += `<tr><td>${msg.id}</td><td>${time}</td><td>${escapeHtml(msg.origin || '')}</td><td>${msg.user_id}</td><td>${escapeHtml(msg.nickname || '')}</td><td>${content}${msg.content?.length > 100 ? '...' : ''}</td></tr>`;
+                });
+                html += '</tbody></table>';
+                container.innerHTML = html;
+
+                document.getElementById('msg-page-info').textContent = `第 ${mcpPage + 1} 页`;
+                document.getElementById('msg-prev').disabled = mcpPage === 0;
+                document.getElementById('msg-next').disabled = data.messages.length < mcpPageSize;
+            } catch (e) {
+                container.innerHTML = `<div style="color: #ef4444;">加载失败: ${e.message}</div>`;
+            }
+        }
+
+        async function loadProfiles() {
+            const container = document.getElementById('profiles-container');
+            container.innerHTML = '<div class="loading">加载中...</div>';
+            const origin = document.getElementById('profile-origin-select').value;
+
+            try {
+                const res = await fetch(`/api/morechatplus/profiles?origin=${origin}`);
+                const data = await res.json();
+
+                if (data.error || data.profiles.length === 0) {
+                    container.innerHTML = `<div style="text-align: center; color: #64748b;">${data.error || '暂无数据'}</div>`;
+                    return;
+                }
+
+                let html = '<table class="data-table"><thead><tr><th>用户ID</th><th>来源</th><th>昵称</th><th>性格</th><th>兴趣</th><th>关系</th></tr></thead><tbody>';
+                data.profiles.forEach(profile => {
+                    const nicknames = JSON.parse(profile.nicknames || '[]').join(', ');
+                    html += `<tr><td>${profile.user_id}</td><td>${escapeHtml(profile.origin || '')}</td><td>${escapeHtml(nicknames)}</td><td>${escapeHtml(profile.personality_traits || '')}</td><td>${escapeHtml(profile.interests || '')}</td><td>${escapeHtml(profile.relationship_with_bot || '')}</td></tr>`;
+                });
+                html += '</tbody></table>';
+                container.innerHTML = html;
+            } catch (e) {
+                container.innerHTML = `<div style="color: #ef4444;">加载失败: ${e.message}</div>`;
+            }
+        }
+
+        async function loadSummaries() {
+            const container = document.getElementById('summaries-container');
+            container.innerHTML = '<div class="loading">加载中...</div>';
+            const origin = document.getElementById('summary-origin-select').value;
+
+            try {
+                const res = await fetch(`/api/morechatplus/summaries?origin=${origin}`);
+                const data = await res.json();
+
+                if (data.error || data.summaries.length === 0) {
+                    container.innerHTML = `<div style="text-align: center; color: #64748b;">${data.error || '暂无数据'}</div>`;
+                    return;
+                }
+
+                let html = '<table class="data-table"><thead><tr><th>ID</th><th>时间</th><th>来源</th><th>总结</th><th>话题分析</th><th>建议</th><th>是否回复</th></tr></thead><tbody>';
+                data.summaries.forEach(summary => {
+                    const time = new Date(summary.timestamp * 1000).toLocaleString();
+                    html += `<tr><td>${summary.id}</td><td>${time}</td><td>${escapeHtml(summary.origin || '')}</td><td>${escapeHtml(summary.summary || '').substring(0, 50)}...</td><td>${escapeHtml(summary.topic_analysis || '').substring(0, 50)}...</td><td>${escapeHtml(summary.suggestions || '').substring(0, 50)}...</td><td>${summary.should_reply ? '是' : '否'}</td></tr>`;
+                });
+                html += '</tbody></table>';
+                container.innerHTML = html;
+            } catch (e) {
+                container.innerHTML = `<div style="color: #ef4444;">加载失败: ${e.message}</div>`;
+            }
+        }
+
+        function changePage(delta) {
+            mcpPage += delta;
+            if (mcpPage < 0) mcpPage = 0;
+            loadMessages();
+        }
+
+        document.getElementById('purpose-filter').addEventListener('change', (e) => {
+            currentFilter = e.target.value;
+            renderSidebar();
+        });
 
         // 启动
         connect();

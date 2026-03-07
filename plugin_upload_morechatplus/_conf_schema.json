@@ -55,9 +55,23 @@
                 "_special": "select_provider",
                 "default": ""
             },
+            "model_a_fallback_provider": {
+                "description": "模型A备用提供商ID",
+                "hint": "当模型A主模型失败时使用的备用模型，留空表示不使用备用",
+                "type": "string",
+                "_special": "select_provider",
+                "default": ""
+            },
             "model_b_provider": {
                 "description": "模型B提供商ID",
                 "hint": "用于分析用户画像的模型，留空使用默认",
+                "type": "string",
+                "_special": "select_provider",
+                "default": ""
+            },
+            "model_b_fallback_provider": {
+                "description": "模型B备用提供商ID",
+                "hint": "当模型B主模型失败时使用的备用模型，留空表示不使用备用",
                 "type": "string",
                 "_special": "select_provider",
                 "default": ""
@@ -173,6 +187,31 @@
                 "hint": "每个消息组包含的消息数量",
                 "type": "int",
                 "default": 5
+            }
+        }
+    },
+    "image_cache_settings": {
+        "description": "图片缓存配置",
+        "hint": "配置图片缓存和识图结果缓存",
+        "type": "object",
+        "items": {
+            "enable": {
+                "description": "启用图片缓存",
+                "hint": "开启后会缓存图片和识图结果，避免重复识图",
+                "type": "bool",
+                "default": true
+            },
+            "max_cache_size": {
+                "description": "最大缓存图片数量",
+                "hint": "最多缓存多少张图片，超出后会按使用频率清理",
+                "type": "int",
+                "default": 1000
+            },
+            "enable_vision_cache": {
+                "description": "缓存识图结果",
+                "hint": "开启后会缓存识图结果，相同图片不会重复识图",
+                "type": "bool",
+                "default": true
             }
         }
     },

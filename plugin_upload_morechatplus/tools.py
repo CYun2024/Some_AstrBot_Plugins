@@ -10,10 +10,11 @@ from astrbot.api.event import AstrMessageEvent
 class ChatTools:
     """聊天工具集"""
 
-    def __init__(self, db, context_manager, user_profile_manager) -> None:
+    def __init__(self, db, context_manager, user_profile_manager, image_cache=None) -> None:
         self.db = db
         self.context_manager = context_manager
         self.user_profile_manager = user_profile_manager
+        self.image_cache = image_cache
 
     async def get_message_content(
         self,
@@ -135,8 +136,9 @@ class ChatTools:
             from datetime import datetime
             time_str = datetime.fromtimestamp(msg.timestamp).strftime("%H:%M:%S")
             admin_mark = "[管理员]" if msg.is_admin else ""
+            # 修改：显示 msg:ID 格式
             formatted.append(
-                f"[{msg.nickname}|{msg.user_id}|{time_str}]:(#msg{msg.message_id}){admin_mark} {msg.content}"
+                f"[{msg.nickname}|{msg.user_id}|{time_str}]:(msg:{msg.message_id}){admin_mark} {msg.content}"
             )
 
         return json.dumps({
@@ -171,3 +173,60 @@ class ChatTools:
                 "status": "error",
                 "message": "添加昵称失败"
             }, ensure_ascii=False)
+
+    async def get_image_vision_result(
+        self,
+        event: AstrMessageEvent,
+        image_id: str,
+    ) -> str:
+        """获取图片的识图结果
+
+        Args:
+            image_id: 图片ID（如 img_abc123 或 url_hash）
+        """
+        if not self.image_cache:
+            return json.dumps({
+                "status": "error",
+                "message": "图片缓存未启用"
+            }, ensure_ascii=False)
+
+        result = self.image_cache.get_vision_result(image_id)
+        if result:
+            return json.dumps({
+                "status": "success",
+                "image_id": image_id,
+                "vision_result": result
+            }, ensure_ascii=False, indent=2)
+        else:
+            # 尝试通过URL查找
+            lookup_id = self.image_cache.lookup_by_url(image_id)
+            if lookup_id:
+                result = self.image_cache.get_vision_result(lookup_id)
+                if result:
+                    return json.dumps({
+                        "status": "success",
+                        "image_id": lookup_id,
+                        "vision_result": result
+                    }, ensure_ascii=False, indent=2)
+
+            return json.dumps({
+                "status": "not_found",
+                "message": f"未找到图片 {image_id} 的识图结果，该图片可能未被识别过"
+            }, ensure_ascii=False)
+
+    async def get_image_cache_stats(
+        self,
+        event: AstrMessageEvent,
+    ) -> str:
+        """获取图片缓存统计信息"""
+        if not self.image_cache:
+            return json.dumps({
+                "status": "error",
+                "message": "图片缓存未启用"
+            }, ensure_ascii=False)
+
+        stats = self.image_cache.get_cache_stats()
+        return json.dumps({
+            "status": "success",
+            "stats": stats
+        }, ensure_ascii=False, indent=2)

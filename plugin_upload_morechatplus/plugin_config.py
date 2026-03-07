@@ -74,7 +74,9 @@ class ModelSettings:
     """模型配置"""
     main_llm_provider: str = ""
     model_a_provider: str = ""
+    model_a_fallback_provider: str = ""
     model_b_provider: str = ""
+    model_b_fallback_provider: str = ""
     vision_provider: str = ""
     vision_prompt: str = "请用中文详细描述这张图片的内容。"
 
@@ -108,6 +110,14 @@ class UserProfileSettings:
 
 
 @dataclass(frozen=True)
+class ImageCacheSettings:
+    """图片缓存配置"""
+    enable: bool = True
+    max_cache_size: int = 1000  # 最大缓存图片数量
+    enable_vision_cache: bool = True  # 是否缓存识图结果
+
+
+@dataclass(frozen=True)
 class TimeoutSettings:
     """超时设置"""
     vision_sec: float = 30.0
@@ -124,6 +134,7 @@ class PluginConfig:
     context: ContextSettings = field(default_factory=ContextSettings)
     active_reply: ActiveReplySettings = field(default_factory=ActiveReplySettings)
     user_profile: UserProfileSettings = field(default_factory=UserProfileSettings)
+    image_cache: ImageCacheSettings = field(default_factory=ImageCacheSettings)
     timeouts: TimeoutSettings = field(default_factory=TimeoutSettings)
 
 
@@ -146,7 +157,9 @@ def parse_plugin_config(raw: dict[str, Any] | None) -> PluginConfig:
     models = ModelSettings(
         main_llm_provider=_to_str(models_raw.get("main_llm_provider"), ""),
         model_a_provider=_to_str(models_raw.get("model_a_provider"), ""),
+        model_a_fallback_provider=_to_str(models_raw.get("model_a_fallback_provider"), ""),
         model_b_provider=_to_str(models_raw.get("model_b_provider"), ""),
+        model_b_fallback_provider=_to_str(models_raw.get("model_b_fallback_provider"), ""),
         vision_provider=_to_str(models_raw.get("vision_provider"), ""),
         vision_prompt=_to_str(
             models_raw.get("vision_prompt"), 
@@ -182,6 +195,14 @@ def parse_plugin_config(raw: dict[str, Any] | None) -> PluginConfig:
         messages_per_group=_to_int(user_profile_raw.get("messages_per_group"), 5, 1, 20),
     )
 
+    # 图片缓存配置
+    image_cache_raw = raw.get("image_cache_settings", {})
+    image_cache = ImageCacheSettings(
+        enable=_to_bool(image_cache_raw.get("enable"), True),
+        max_cache_size=_to_int(image_cache_raw.get("max_cache_size"), 1000, 100, 5000),
+        enable_vision_cache=_to_bool(image_cache_raw.get("enable_vision_cache"), True),
+    )
+
     # 超时设置
     timeouts_raw = raw.get("timeouts", {})
     timeouts = TimeoutSettings(
@@ -197,5 +218,6 @@ def parse_plugin_config(raw: dict[str, Any] | None) -> PluginConfig:
         context=context,
         active_reply=active_reply,
         user_profile=user_profile,
+        image_cache=image_cache,
         timeouts=timeouts,
     )
