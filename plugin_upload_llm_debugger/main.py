@@ -1,8 +1,7 @@
 """
-LLM Debugger 插件 - 修复版
-修复接口对齐问题，确保其他插件能够正确上报调用记录
+LLM Debugger
 
-版本: 1.2.0
+版本: 1.3.1
 作者: 韶虹CYun
 """
 
@@ -10,8 +9,9 @@ import os
 import json
 import asyncio
 import traceback
+import time
 from datetime import datetime
-from typing import Dict, Any, Set, Optional
+from typing import Dict, Any, Set, Optional, Tuple
 
 from astrbot.api.star import Star, Context, register
 from astrbot.api.event import filter, AstrMessageEvent
@@ -24,9 +24,9 @@ except ImportError:
     LLMResponse = None
 
 
-@register("llm_debugger", "韶虹CYun", "LLM 调用监控调试器（带WebUI）", "1.2.0")
+@register("llm_debugger", "韶虹CYun", "LLM 调用监控调试器（带WebUI）", "1.3.1")
 class LLMDebugger(Star):
-    """LLM 调用监控调试器（带WebUI）- 修复版"""
+    """LLM 调用监控调试器（带WebUI）- 修复版，添加去重缓存及可靠关闭"""
 
     DEFAULT_PORT = 6188
     DEFAULT_PASSWORD = "llm_debugger1357"
@@ -39,6 +39,10 @@ class LLMDebugger(Star):
         self.web_server = None
         self.connected_clients: Set = set()
         self._shutdown_event = None
+        self._server_stopped = asyncio.Event()  # 标记服务器完全停止
+        # 去重缓存：记录 (conversation_id, type) -> timestamp
+        self._processed_ids: Dict[Tuple[Optional[str], str], float] = {}
+        self._cleanup_task = None
         
         # 将自身注册到context，方便其他插件获取
         self._register_to_context()
@@ -46,7 +50,6 @@ class LLMDebugger(Star):
     def _register_to_context(self):
         """将debugger实例注册到context，方便其他插件获取"""
         try:
-            # 方式1: 尝试设置到context的自定义属性
             if not hasattr(self.context, '_plugin_instances'):
                 self.context._plugin_instances = {}
             self.context._plugin_instances['llm_debugger'] = self
@@ -55,7 +58,6 @@ class LLMDebugger(Star):
             logger.debug(f"[LLMDebugger] 注册到 _plugin_instances 失败: {e}")
         
         try:
-            # 方式2: 尝试设置到context的star_registry（如果存在）
             if hasattr(self.context, 'star_registry'):
                 if isinstance(self.context.star_registry, dict):
                     self.context.star_registry['llm_debugger'] = self
@@ -94,10 +96,29 @@ class LLMDebugger(Star):
         self.db = Database(db_path, max_records)
         await self.db.init()
 
+        # 启动缓存清理任务
+        self._cleanup_task = asyncio.create_task(self._cleanup_cache())
+
+        # 重置服务器停止事件
+        self._server_stopped.clear()
+
         # 启动Web服务器
         self._shutdown_event = asyncio.Event()
         self.web_server = asyncio.create_task(self._start_web_server(port, password))
         logger.info(f"[LLMDebugger] WebUI 已启动: http://0.0.0.0:{port} (密码: {'已启用' if password else '无'})")
+
+    async def _cleanup_cache(self):
+        """定期清理去重缓存（超过1小时的记录）"""
+        while True:
+            await asyncio.sleep(3600)  # 每小时清理一次
+            try:
+                now = time.time()
+                to_remove = [key for key, ts in self._processed_ids.items() if now - ts > 3600]
+                for key in to_remove:
+                    del self._processed_ids[key]
+                logger.debug(f"[LLMDebugger] 清理了 {len(to_remove)} 条去重缓存记录")
+            except Exception as e:
+                logger.error(f"[LLMDebugger] 清理缓存失败: {e}")
 
     # ========== 公共方法：供其他插件手动记录 LLM 调用 ==========
     async def record_llm_call(self, data: dict):
@@ -169,6 +190,11 @@ class LLMDebugger(Star):
             safe_data["id"] = record_id
             await self._broadcast(safe_data)
             
+            # 记录到去重缓存
+            conv_id = data.get("conversation_id")
+            cache_key = (conv_id, phase)
+            self._processed_ids[cache_key] = time.time()
+            
             source_info = data.get('source', {})
             logger.debug(f"[LLMDebugger] 已记录 {phase} 来自 {source_info.get('plugin', 'unknown')}/{source_info.get('purpose', 'unknown')}")
 
@@ -177,11 +203,12 @@ class LLMDebugger(Star):
 
     # ========== Web服务器 ==========
     async def _start_web_server(self, port: int, password: str):
-        """启动Web服务器"""
+        """启动Web服务器（增强关闭可靠性，优化404日志）"""
         from quart import Quart, render_template, websocket, request, session, redirect, abort, render_template_string, jsonify
         from quart_cors import cors
         import functools
         import base64
+        from werkzeug.exceptions import NotFound  # 导入NotFound异常
 
         template_dir = os.path.join(os.path.dirname(__file__), 'templates')
         if not os.path.isdir(template_dir):
@@ -194,6 +221,12 @@ class LLMDebugger(Star):
 
         @app.errorhandler(Exception)
         async def handle_exception(e):
+            """统一异常处理：404记录为debug并返回404，其他记录为error"""
+            if isinstance(e, NotFound):
+                # 记录404请求的路径，方便排查
+                path = request.path
+                logger.debug(f"[LLMDebugger] 404 Not Found: {path} - {e}")
+                return "Not Found", 404
             logger.error(f"[LLMDebugger] 未捕获的异常: {e}\n{traceback.format_exc()}")
             return "Internal Server Error", 500
 
@@ -293,8 +326,14 @@ button{width:100%;padding:0.75rem;background:#3b82f6;color:white;border:none;bor
                 debug=False,
                 shutdown_trigger=self._shutdown_event.wait
             )
+        except asyncio.CancelledError:
+            logger.info("[LLMDebugger] Web服务器任务被取消")
+            raise
         except Exception as e:
             logger.error(f"[LLMDebugger] Web 服务器运行失败: {e}\n{traceback.format_exc()}")
+        finally:
+            # 无论何种退出方式，都标记服务器已停止
+            self._server_stopped.set()
 
     # ========== 事件监听 ==========
     @filter.on_llm_request()
@@ -304,6 +343,12 @@ button{width:100%;padding:0.75rem;background:#3b82f6;color:white;border:none;bor
             return
         try:
             conv_id = getattr(req, 'conversation_id', None) or getattr(req, 'session_id', None) or getattr(req, 'id', None)
+            # 检查去重缓存
+            cache_key = (conv_id, "request")
+            if cache_key in self._processed_ids:
+                logger.debug(f"[LLMDebugger] 跳过重复的请求记录: {conv_id}")
+                return
+
             prompt = getattr(req, 'prompt', '') or event.message_str
             contexts = getattr(req, 'contexts', []) or (req.get_contexts() if hasattr(req, 'get_contexts') and callable(req.get_contexts) else [])
             system_prompt = getattr(req, 'system_prompt', '') or (req.get_system_prompt() if hasattr(req, 'get_system_prompt') and callable(req.get_system_prompt) else '')
@@ -337,6 +382,8 @@ button{width:100%;padding:0.75rem;background:#3b82f6;color:white;border:none;bor
             record_id = await self.db.save_record(safe_data)
             safe_data["id"] = record_id
             await self._broadcast(safe_data)
+            # 添加到缓存
+            self._processed_ids[cache_key] = time.time()
             logger.debug(f"[LLMDebugger] 已记录请求 {conv_id}")
         except Exception as e:
             logger.error(f"[LLMDebugger] 记录请求失败: {e}\n{traceback.format_exc()}")
@@ -348,6 +395,12 @@ button{width:100%;padding:0.75rem;background:#3b82f6;color:white;border:none;bor
             return
         try:
             conv_id = getattr(resp, 'conversation_id', None) or getattr(resp, 'session_id', None) or getattr(resp, 'id', None)
+            # 检查去重缓存
+            cache_key = (conv_id, "response")
+            if cache_key in self._processed_ids:
+                logger.debug(f"[LLMDebugger] 跳过重复的响应记录: {conv_id}")
+                return
+
             text = getattr(resp, 'completion_text', '') or getattr(resp, 'content', '') or getattr(resp, 'message', '') or getattr(resp, 'text', '') or (resp if isinstance(resp, str) else str(resp))
             model = getattr(resp, 'model', None)
             usage = getattr(resp, 'usage', None) or (resp.get_usage() if hasattr(resp, 'get_usage') and callable(resp.get_usage) else None)
@@ -375,6 +428,8 @@ button{width:100%;padding:0.75rem;background:#3b82f6;color:white;border:none;bor
             record_id = await self.db.save_record(safe_data)
             safe_data["id"] = record_id
             await self._broadcast(safe_data)
+            # 添加到缓存
+            self._processed_ids[cache_key] = time.time()
             logger.debug(f"[LLMDebugger] 已记录响应 {conv_id}")
         except Exception as e:
             logger.error(f"[LLMDebugger] 记录响应失败: {e}\n{traceback.format_exc()}")
@@ -424,16 +479,40 @@ button{width:100%;padding:0.75rem;background:#3b82f6;color:white;border:none;bor
         return []
 
     async def terminate(self):
-        """插件卸载"""
+        """插件卸载（增强等待与清理）"""
         logger.info("[LLMDebugger] 正在停止 Web 服务器...")
         if self._shutdown_event:
             self._shutdown_event.set()
+
         if self.web_server:
             try:
-                await asyncio.wait_for(self.web_server, timeout=5.0)
-            except (asyncio.CancelledError, asyncio.TimeoutError):
+                # 等待服务器真正停止，最多5秒
+                await asyncio.wait_for(self._server_stopped.wait(), timeout=5.0)
+                logger.debug("[LLMDebugger] Web服务器已正常停止")
+            except asyncio.TimeoutError:
+                logger.warning("[LLMDebugger] 等待服务器停止超时，将强制取消任务")
+                self.web_server.cancel()
+                try:
+                    await self.web_server
+                except asyncio.CancelledError:
+                    pass
+
+        # 停止缓存清理任务
+        if self._cleanup_task:
+            self._cleanup_task.cancel()
+            try:
+                await self._cleanup_task
+            except asyncio.CancelledError:
+                pass
+
+        # 关闭所有WebSocket连接
+        for ws in list(self.connected_clients):
+            try:
+                await ws.close(1000)
+            except:
                 pass
         self.connected_clients.clear()
+
         logger.info("[LLMDebugger] 已停止")
 
 

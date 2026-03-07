@@ -2,7 +2,7 @@
 LLM Debugger Plugin for AstrBot
 LLM 调用监控调试器（带WebUI）
 
-版本: 1.2.0
+版本: 1.3.1
 作者: 韶虹CYun
 """
 
@@ -13,7 +13,7 @@ LLMDebugger = register(
     name="llm_debugger",
     author="韶虹CYun",
     desc="LLM 调用监控调试器（带WebUI）- 修复版，支持插件主动上报",
-    version="1.2.0"
+    version="1.3.1"
 )(_LLMDebugger)
 
 __all__ = ["LLMDebugger"]
