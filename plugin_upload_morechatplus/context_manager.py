@@ -25,6 +25,8 @@ class ContextManager:
         # 内存缓存，用于快速访问最近消息
         self._message_cache: Dict[str, List[MessageRecord]] = defaultdict(list)
         self._message_counter: Dict[str, int] = defaultdict(int)
+        # 新增：正在总结中的标记，防止并发触发
+        self._summarizing: Dict[str, bool] = defaultdict(bool)
 
     def add_message(
         self,
@@ -37,6 +39,7 @@ class ContextManager:
         image_urls: List[str] = None,
         is_admin: bool = False,
         reply_to: str = "",
+        count_towards_summary: bool = True,  # 新增：是否计入总结计数
     ) -> MessageRecord:
         """添加消息到上下文"""
         timestamp = time.time()
@@ -78,8 +81,9 @@ class ContextManager:
         if len(self._message_cache[origin]) > max_cache:
             self._message_cache[origin] = self._message_cache[origin][-max_cache:]
 
-        # 增加计数器
-        self._message_counter[origin] += 1
+        # 只有非 bot 消息才增加计数器
+        if count_towards_summary:
+            self._message_counter[origin] += 1
 
         return record
 
@@ -89,10 +93,7 @@ class ContextManager:
         limit: int = None,
         include_summaries: bool = True,
     ) -> str:
-        """获取格式化的上下文
-
-        格式: [虹猫猫|28196593(user_id)|19:20:05]:(#msg267518526) <引用信息: #msg267518526> [at:机巧猫] [image:2384390259023809] 可爱喵~
-        """
+        """获取格式化的上下文"""
         if limit is None:
             limit = self.config.context.max_context_messages
 
@@ -146,11 +147,7 @@ class ContextManager:
         origin: str,
         message_id: str,
     ) -> Optional[Tuple[str, str, str]]:
-        """获取新消息的信息
-
-        Returns:
-            (formatted_message, user_id, nickname)
-        """
+        """获取新消息的信息"""
         messages = self.db.get_messages(origin, limit=1)
         if not messages:
             return None
@@ -179,17 +176,25 @@ class ContextManager:
         return formatted, msg.user_id, msg.nickname
 
     def should_trigger_summary(self, origin: str) -> bool:
-        """检查是否应该触发总结"""
+        """检查是否应该触发总结（同时检查是否正在总结中）"""
+        if self._summarizing[origin]:
+            # 如果正在总结中，不触发新总结
+            return False
         interval = self.config.context.summary_interval
         return self._message_counter[origin] >= interval
 
     def reset_counter(self, origin: str):
         """重置计数器"""
         self._message_counter[origin] = 0
+        self._summarizing[origin] = False  # 总结完成，清除标记
 
     def get_message_count_since_summary(self, origin: str) -> int:
         """获取自上次总结以来的消息数"""
         return self._message_counter[origin]
+
+    def set_summarizing(self, origin: str, summarizing: bool = True):
+        """设置正在总结中的状态"""
+        self._summarizing[origin] = summarizing
 
     def cleanup_old_context(self, origin: str):
         """清理旧上下文"""
@@ -214,10 +219,7 @@ class ContextManager:
         max_groups: int = 20,
         messages_per_group: int = 5,
     ) -> List[List[MessageRecord]]:
-        """获取包含新昵称的消息组
-
-        每组包含一条包含该昵称的消息及其后的若干条消息
-        """
+        """获取包含新昵称的消息组"""
         # 从数据库搜索包含该昵称的消息
         all_messages = self.db.get_messages(origin, limit=500)
 

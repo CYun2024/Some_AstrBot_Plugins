@@ -3,6 +3,7 @@
 import asyncio
 import json
 import re
+import time
 import uuid
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
@@ -35,22 +36,25 @@ class ModelAProcessor:
         context_manager: ContextManager,
         config: PluginConfig,
         context,
+        debugger=None,
     ):
         self.db = db
         self.context_manager = context_manager
         self.config = config
         self.context = context
+        self.debugger = debugger  # 可以是MoreChatPlusPlugin实例，它实现了safe_record_llm_call
+
+    async def _record_llm_call(self, data: dict):
+        """辅助方法：安全上报"""
+        if self.debugger and hasattr(self.debugger, 'safe_record_llm_call'):
+            await self.debugger.safe_record_llm_call(data)
 
     async def process_context(self, origin: str) -> Optional[SummaryResult]:
         """处理上下文，生成总结和回复建议"""
         try:
-            # 获取上下文
             context_text = self.context_manager.get_context_for_model_a(origin)
-
-            # 构建提示词
             prompt = self._build_summary_prompt(context_text)
 
-            # 调用模型A
             provider_id = self.config.models.model_a_provider
             if provider_id:
                 provider = self.context.get_provider_by_id(provider_id)
@@ -63,21 +67,46 @@ class ModelAProcessor:
 
             logger.info(f"[MoreChatPlus] 调用模型A进行上下文总结 | origin={origin}")
 
+            conv_id = uuid.uuid4().hex
+            model_name = getattr(provider, 'model', 'model_a')
+
+            # 上报请求
+            await self._record_llm_call({
+                "phase": "request",
+                "provider_id": provider_id or "default",
+                "model": model_name,
+                "prompt": prompt,
+                "source": {"plugin": "morechatplus", "purpose": "model_a_summary"},
+                "conversation_id": conv_id,
+                "timestamp": time.time()
+            })
+
             response = await asyncio.wait_for(
                 provider.text_chat(
                     prompt=prompt,
-                    session_id=uuid.uuid4().hex,
+                    session_id=conv_id,
                     persist=False,
                 ),
                 timeout=self.config.timeouts.model_a_sec,
             )
 
-            # 解析响应
-            result = self._parse_summary_response(response.completion_text or "")
+            result_text = response.completion_text or ""
 
-            # 保存总结到数据库
+            # 上报响应
+            await self._record_llm_call({
+                "phase": "response",
+                "provider_id": provider_id or "default",
+                "model": model_name,
+                "response": result_text,
+                "usage": getattr(response, 'usage', None),
+                "source": {"plugin": "morechatplus", "purpose": "model_a_summary"},
+                "conversation_id": conv_id,
+                "timestamp": time.time()
+            })
+
+            result = self._parse_summary_response(result_text)
+
             if result:
-                # 获取最近的消息ID范围
                 messages = self.db.get_messages(origin, limit=self.config.context.summary_interval)
                 if len(messages) >= 2:
                     start_msg_id = messages[-1].message_id
@@ -102,6 +131,16 @@ class ModelAProcessor:
 
         except asyncio.TimeoutError:
             logger.error("[MoreChatPlus] 模型A调用超时")
+            # 上报超时错误
+            await self._record_llm_call({
+                "phase": "response",
+                "provider_id": self.config.models.model_a_provider or "default",
+                "model": "model_a",
+                "response": "[模型A调用超时]",
+                "source": {"plugin": "morechatplus", "purpose": "model_a_timeout"},
+                "conversation_id": conv_id if 'conv_id' in locals() else "timeout",
+                "timestamp": time.time()
+            })
             return None
         except Exception as e:
             logger.error(f"[MoreChatPlus] 模型A处理失败: {e}")
@@ -129,7 +168,7 @@ class ModelAProcessor:
 1. 话题明确与bot有关（提到bot名字或@bot）
 2. 群友在友好地互动，且bot长时间未参与
 3. 群友在复读，且bot未参与过
-4. 群友在求助，bot可以提供帮助
+4. 群友在伤心倾倒负面情绪，bot可以进行简单的安慰（比如摸摸互动"摸摸你喵"）
 
 {avoid_controversial}
 
@@ -160,39 +199,33 @@ class ModelAProcessor:
     def _parse_summary_response(self, text: str) -> Optional[SummaryResult]:
         """解析总结响应"""
         try:
-            # 提取话题总结
             summary_match = re.search(
                 r'\[话题总结\]\s*\n?(.*?)(?=\[话题分析\]|\[回复建议\]|$)',
                 text, re.DOTALL
             )
             summary = summary_match.group(1).strip() if summary_match else ""
 
-            # 提取话题分析
             analysis_match = re.search(
                 r'\[话题分析\]\s*\n?(.*?)(?=\[回复建议\]|$)',
                 text, re.DOTALL
             )
             topic_analysis = analysis_match.group(1).strip() if analysis_match else ""
 
-            # 提取回复建议部分
             suggestion_match = re.search(
                 r'\[回复建议\]\s*\n?(.*)',
                 text, re.DOTALL
             )
             suggestions = suggestion_match.group(1).strip() if suggestion_match else ""
 
-            # 判定是否需要回复
             trigger_keyword = self.config.active_reply.trigger_keyword
             should_reply = trigger_keyword in text
 
-            # 提取回复目标消息ID
             msg_id_match = re.search(
                 r'回复目标消息ID[：:]\s*#?msg?(\d+)',
                 text, re.IGNORECASE
             )
             reply_target_msg_id = msg_id_match.group(1) if msg_id_match else ""
 
-            # 提取回复建议内容
             reply_suggestion_match = re.search(
                 r'回复建议内容[：:]\s*(.*?)(?:\n|$)',
                 text, re.DOTALL | re.IGNORECASE
@@ -218,20 +251,10 @@ class ModelAProcessor:
         origin: str,
         message_groups: List[List[Dict]],
     ) -> Optional[str]:
-        """检查新昵称是否指向某个用户
-
-        Args:
-            nickname: 新出现的昵称
-            origin: 消息来源
-            message_groups: 消息组列表
-
-        Returns:
-            如果确定指向某个用户，返回user_id，否则None
-        """
+        """检查新昵称是否指向某个用户"""
         try:
-            # 构建消息组文本
             groups_text = []
-            for i, group in enumerate(message_groups[:5], 1):  # 最多5组
+            for i, group in enumerate(message_groups[:5], 1):
                 group_texts = []
                 for msg in group:
                     time_str = __import__('datetime').datetime.fromtimestamp(
@@ -270,10 +293,24 @@ class ModelAProcessor:
             if not provider:
                 return None
 
+            conv_id = uuid.uuid4().hex
+            model_name = getattr(provider, 'model', 'model_a')
+
+            # 上报请求
+            await self._record_llm_call({
+                "phase": "request",
+                "provider_id": provider_id or "default",
+                "model": model_name,
+                "prompt": prompt,
+                "source": {"plugin": "morechatplus", "purpose": "nickname_check"},
+                "conversation_id": conv_id,
+                "timestamp": time.time()
+            })
+
             response = await asyncio.wait_for(
                 provider.text_chat(
                     prompt=prompt,
-                    session_id=uuid.uuid4().hex,
+                    session_id=conv_id,
                     persist=False,
                 ),
                 timeout=self.config.timeouts.model_a_sec,
@@ -281,7 +318,18 @@ class ModelAProcessor:
 
             text = response.completion_text or ""
 
-            # 提取用户ID
+            # 上报响应
+            await self._record_llm_call({
+                "phase": "response",
+                "provider_id": provider_id or "default",
+                "model": model_name,
+                "response": text,
+                "usage": getattr(response, 'usage', None),
+                "source": {"plugin": "morechatplus", "purpose": "nickname_check"},
+                "conversation_id": conv_id,
+                "timestamp": time.time()
+            })
+
             match = re.search(r'最可能用户ID[：:]\s*(\d+)', text)
             if match:
                 user_id = match.group(1)
@@ -298,15 +346,9 @@ class ModelAProcessor:
         self,
         origin: str,
     ) -> List[Tuple[str, str]]:
-        """在总结时检测新昵称
-
-        Returns:
-            List of (nickname, potential_user_id)
-        """
-        # 获取最近的消息
+        """在总结时检测新昵称"""
         messages = self.db.get_messages(origin, limit=50)
 
-        # 提取可能的人名（简化处理，实际应该用NLP）
         potential_names = []
         name_pattern = re.compile(r'我是([\u4e00-\u9fa5]{2,4})|叫我([\u4e00-\u9fa5]{2,4})|昵称是([\u4e00-\u9fa5]{2,4})')
 

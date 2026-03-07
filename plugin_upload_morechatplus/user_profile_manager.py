@@ -21,12 +21,19 @@ class UserProfileManager:
         db: DatabaseManager,
         config: PluginConfig,
         context,
+        debugger=None,
     ):
         self.db = db
         self.config = config
         self.context = context
+        self.debugger = debugger
         self._last_update_date: Optional[str] = None
-        self._identity_confirmations: Dict[str, Dict] = {}  # 身份确认状态
+        self._identity_confirmations: Dict[str, Dict] = {}
+
+    async def _record_llm_call(self, data: dict):
+        """辅助方法：安全上报"""
+        if self.debugger and hasattr(self.debugger, 'safe_record_llm_call'):
+            await self.debugger.safe_record_llm_call(data)
 
     async def initialize(self):
         """初始化，启动定时任务"""
@@ -40,7 +47,6 @@ class UserProfileManager:
                 now = datetime.now()
                 target_hour = self.config.user_profile.daily_update_hour
 
-                # 计算到下一个更新时间的等待时间
                 if now.hour < target_hour:
                     next_update = now.replace(hour=target_hour, minute=0, second=0)
                 else:
@@ -52,46 +58,42 @@ class UserProfileManager:
                 logger.info(f"[MoreChatPlus] 下次用户画像更新: {next_update}, 等待 {wait_seconds:.0f} 秒")
 
                 await asyncio.sleep(wait_seconds)
-
-                # 执行更新
                 await self._run_daily_update()
 
             except Exception as e:
                 logger.error(f"[MoreChatPlus] 每日更新任务出错: {e}")
-                await asyncio.sleep(3600)  # 出错后1小时重试
+                await asyncio.sleep(3600)
 
     async def _run_daily_update(self):
-        """执行每日用户画像更新（已修复：实际执行更新逻辑）"""
+        """执行每日用户画像更新"""
         logger.info("[MoreChatPlus] 开始每日用户画像更新")
 
         yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-        
+
         try:
-            # 获取所有不同的 origin（群聊）
             with self.db._lock, self.db._connect() as conn:
                 rows = conn.execute(
                     "SELECT DISTINCT origin FROM messages WHERE timestamp >= ?", 
                     ((datetime.now() - timedelta(days=2)).timestamp(),)
                 ).fetchall()
                 origins = [row["origin"] for row in rows]
-            
+
             if not origins:
                 logger.info("[MoreChatPlus] 没有需要更新的群聊")
                 self._last_update_date = yesterday
                 return
-            
+
             logger.info(f"[MoreChatPlus] 发现 {len(origins)} 个群聊需要更新用户画像")
-            
-            # 遍历每个 origin 更新用户画像
+
             for origin in origins:
                 try:
                     await self.update_user_profile_for_origin(origin, yesterday)
                     logger.info(f"[MoreChatPlus] 完成群聊 {origin} 的用户画像更新")
                 except Exception as e:
                     logger.error(f"[MoreChatPlus] 更新群聊 {origin} 失败: {e}")
-            
+
             self._last_update_date = yesterday
-            logger.info(f"[MoreChatPlus] 每日用户画像更新完成: {yesterday}, 共处理 {len(origins)} 个群聊")
+            logger.info(f"[MoreChatPlus] 每日用户画像更新完成: {yesterday}")
 
         except Exception as e:
             logger.error(f"[MoreChatPlus] 每日更新执行失败: {e}")
@@ -119,12 +121,10 @@ class UserProfileManager:
         if not messages:
             return
 
-        # 限制消息数量
         max_msgs = self.config.user_profile.max_daily_messages
         if len(messages) > max_msgs:
             messages = messages[-max_msgs:]
 
-        # 构建消息文本
         msg_texts = []
         for msg in messages:
             time_str = datetime.fromtimestamp(msg.timestamp).strftime("%H:%M")
@@ -132,11 +132,9 @@ class UserProfileManager:
 
         messages_str = "\n".join(msg_texts)
 
-        # 调用模型B分析
         analysis = await self._call_model_b_for_profile(user_id, messages_str)
 
         if analysis:
-            # 获取或创建用户画像
             profile = self.db.get_user_profile(user_id, origin)
             if not profile:
                 profile = UserProfile(
@@ -152,7 +150,6 @@ class UserProfileManager:
                     is_verified=False,
                 )
 
-            # 更新画像
             profile.personality_traits = analysis.get("personality", profile.personality_traits)
             profile.interests = analysis.get("interests", profile.interests)
             profile.common_topics = analysis.get("topics", profile.common_topics)
@@ -160,7 +157,6 @@ class UserProfileManager:
             profile.last_updated = time.time()
             profile.message_count += len(messages)
 
-            # 合并昵称
             existing_nicknames = set(json.loads(profile.nicknames or "[]"))
             for msg in messages:
                 if msg.nickname:
@@ -175,9 +171,12 @@ class UserProfileManager:
         user_id: str,
         messages_str: str,
     ) -> Optional[Dict]:
-        """调用模型B分析用户"""
+        """调用模型B分析用户（带完整上报）"""
+        conv_id = uuid.uuid4().hex
+        provider = None
+        provider_id = self.config.models.model_b_provider
+
         try:
-            provider_id = self.config.models.model_b_provider
             if provider_id:
                 provider = self.context.get_provider_by_id(provider_id)
             else:
@@ -202,18 +201,42 @@ class UserProfileManager:
     "relationship": "与机器人的关系（陌生人/普通群友/活跃互动者/朋友等）"
 }}
 
+注：792398771是bot自己的QQ号
 只输出JSON，不要其他内容。"""
 
-            import uuid
+            model_name = getattr(provider, 'model', 'model_b')
+
+            # 上报请求
+            await self._record_llm_call({
+                "phase": "request",
+                "provider_id": provider_id or "default",
+                "model": model_name,
+                "prompt": prompt,
+                "source": {"plugin": "morechatplus", "purpose": "model_b_profile"},
+                "conversation_id": conv_id,
+                "timestamp": time.time()
+            })
+
             response = await provider.text_chat(
                 prompt=prompt,
-                session_id=uuid.uuid4().hex,
+                session_id=conv_id,
                 persist=False,
             )
 
-            # 解析JSON响应
             text = response.completion_text or ""
-            # 尝试提取JSON
+
+            # 上报响应
+            await self._record_llm_call({
+                "phase": "response",
+                "provider_id": provider_id or "default",
+                "model": model_name,
+                "response": text,
+                "usage": getattr(response, 'usage', None),
+                "source": {"plugin": "morechatplus", "purpose": "model_b_profile"},
+                "conversation_id": conv_id,
+                "timestamp": time.time()
+            })
+
             json_match = re.search(r'\{[\s\S]*\}', text)
             if json_match:
                 return json.loads(json_match.group())
@@ -221,6 +244,16 @@ class UserProfileManager:
 
         except Exception as e:
             logger.error(f"[MoreChatPlus] 调用模型B失败: {e}")
+            # 上报错误
+            await self._record_llm_call({
+                "phase": "response",
+                "provider_id": provider_id or "default",
+                "model": getattr(provider, 'model', 'model_b') if provider else "unknown",
+                "response": f"[模型B错误: {str(e)}]",
+                "source": {"plugin": "morechatplus", "purpose": "model_b_error"},
+                "conversation_id": conv_id,
+                "timestamp": time.time()
+            })
             return None
 
     def get_or_create_profile(
@@ -266,7 +299,7 @@ class UserProfileManager:
         return True
 
     def check_nickname_exists(self, nickname: str, origin: str) -> List[str]:
-        """检查昵称是否已存在，返回匹配的用户ID列表"""
+        """检查昵称是否已存在"""
         return self.db.find_user_by_nickname(nickname, origin)
 
     async def check_identity_claim(
@@ -275,34 +308,24 @@ class UserProfileManager:
         origin: str,
         claimed_name: str,
     ) -> Tuple[bool, str]:
-        """检查用户身份声明
-
-        Returns:
-            (is_truthful, response_message)
-        """
+        """检查用户身份声明"""
         profile = self.db.get_user_profile(user_id, origin)
 
         if not profile:
-            # 新用户，创建画像
             self.get_or_create_profile(user_id, origin, claimed_name)
             return True, f"欢迎新群友 {claimed_name}~"
 
-        # 检查声明的名字是否在已知昵称中
         known_nicknames = json.loads(profile.nicknames or "[]")
 
         if claimed_name in known_nicknames:
             return True, ""
 
-        # 可能是冒充或开玩笑
-        # 检查是否有其他用户使用了这个名字
         other_users = self.check_nickname_exists(claimed_name, origin)
         other_users = [uid for uid, _ in other_users if uid != user_id]
 
         if other_users:
-            # 确定是冒充
             return False, f"[at:{user_id}] 哈气！你是{claimed_name}？那{other_users[0]}是谁！不许冒充别人！"
 
-        # 可能是新昵称，添加并验证
         self.add_nickname(user_id, origin, claimed_name)
         return True, f"记住你的新称呼啦，{claimed_name}~"
 
@@ -333,16 +356,5 @@ class UserProfileManager:
         origin: str,
         context_messages: List[Dict],
     ) -> Optional[str]:
-        """检查新昵称是否指向某个用户
-
-        Args:
-            nickname: 新出现的昵称
-            origin: 消息来源
-            context_messages: 上下文消息
-
-        Returns:
-            如果确定指向某个用户，返回user_id，否则None
-        """
-        # 这里应该调用模型A进行判断
-        # 简化处理，返回None表示不确定
+        """检查新昵称是否指向某个用户"""
         return None
