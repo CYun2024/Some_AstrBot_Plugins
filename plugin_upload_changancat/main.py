@@ -3,11 +3,12 @@
 长安猫插件，提供：
 - 表情包统计（每日榜单，从morechatplus读取）
 - 哈气统计（日榜、周榜，从morechatplus读取）
-- 每日定时统计报告
+- 每日定时统计报告（支持配置指定群号）
 - 复读功能（从morechatplus读取历史消息）
 """
 
 import asyncio
+import hashlib
 import re
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -85,8 +86,13 @@ class ChanganCatPlugin(star.Star):
             asyncio.create_task(self._daily_report_task())
             # 启动清理任务
             asyncio.create_task(self._cleanup_task())
+
+            # 显示配置的群号
+            target_groups = self.config.core.target_groups
+            groups_info = f"群号: {', '.join(target_groups)}" if target_groups else "群号: 未配置（将自动获取）"
+
             logger.info(
-                f"[ChanganCat] 插件已启用 | "
+                f"[ChanganCat] 插件已启用 | {groups_info} | "
                 f"复读={'开启' if self.config.repeat.enable else '关闭'} | "
                 f"统计={'开启' if self.config.stats.enable_haqi_stats or self.config.stats.enable_meme_stats else '关闭'}"
             )
@@ -131,10 +137,18 @@ class ChanganCatPlugin(star.Star):
                 await asyncio.sleep(3600)
 
     async def _send_daily_reports(self):
-        """发送每日报告到所有有记录的群"""
+        """发送每日报告到配置的群（支持指定群号）"""
         try:
-            # 获取所有有消息的群（从morechatplus数据库）
-            origins = self._get_all_origins_from_morechatplus()
+            target_groups = self.config.core.target_groups
+
+            if target_groups:
+                # 使用配置的群号列表
+                origins = [f"qq_group_{group_id}" for group_id in target_groups]
+                logger.info(f"[ChanganCat] 发送每日报告到配置的 {len(origins)} 个群: {origins}")
+            else:
+                # 回退到自动获取（从morechatplus数据库获取最近有消息的群）
+                origins = self._get_all_origins_from_morechatplus()
+                logger.info(f"[ChanganCat] 发送每日报告到自动获取的 {len(origins)} 个群")
 
             if not origins:
                 logger.info("[ChanganCat] 没有找到需要发送报告的群")
@@ -163,7 +177,7 @@ class ChanganCatPlugin(star.Star):
         logger.info(f"[ChanganCat] 已发送每日报告到 {origin}")
 
     def _get_all_origins_from_morechatplus(self) -> List[str]:
-        """从morechatplus获取所有有记录的群"""
+        """从morechatplus获取所有有记录的群（回退方案）"""
         try:
             import sqlite3
             morechatplus_db_path = (
@@ -259,7 +273,7 @@ class ChanganCatPlugin(star.Star):
                 await self._do_repeat(event, repeat_info)
 
     async def _extract_message_info(self, event: AstrMessageEvent) -> Optional[tuple]:
-        """提取消息信息"""
+        """提取消息信息（适配morechatplus的图片ID格式）"""
         try:
             message_id = str(event.message_obj.message_id or "")
             user_id = str(event.get_sender_id() or "")
@@ -275,9 +289,11 @@ class ChanganCatPlugin(star.Star):
                     url = str(comp.url or comp.file or "").strip()
                     if url:
                         image_urls.append(url)
-                        # 生成图片ID（兼容morechatplus格式）
-                        img_hash = hash(url) & 0xFFFFFFFF
-                        content_parts.append(f"[image:{len(image_urls)}:url_{img_hash:08x}]")
+                        # 生成与morechatplus兼容的图片ID（基于URL的MD5）
+                        # morechatplus使用 img_MD5前16位 格式
+                        url_hash = hashlib.md5(url.encode()).hexdigest()
+                        img_id = f"url_{url_hash[:16]}"
+                        content_parts.append(f"[image:{len(image_urls)}:{img_id}]")
                 elif isinstance(comp, At):
                     content_parts.append(f"[at:{comp.qq}]")
 
@@ -348,6 +364,30 @@ class ChanganCatPlugin(star.Star):
             logger.error(f"[ChanganCat] 哈气榜命令出错: {e}")
             await self._safe_send(event, f"获取哈气榜失败: {e}")
 
+    @filter.command("表情包榜")
+    async def cmd_meme_ranking(self, event: AstrMessageEvent):
+        """表情包榜命令（从morechatplus读取今日数据）"""
+        if not self.config.core.enable:
+            return
+
+        if event.get_message_type() != MessageType.GROUP_MESSAGE:
+            await self._safe_send(event, "该命令只能在群聊中使用")
+            return
+
+        origin = event.unified_msg_origin
+        group_name = self._get_group_name(origin)
+
+        try:
+            # 生成表情包榜（从morechatplus读取今日数据）
+            response, meme_images = self.stats_manager.format_meme_command_response(origin, group_name)
+
+            # 发送文本+图片
+            await self._safe_send_with_images(event, response, meme_images)
+            logger.info(f"[ChanganCat] 已响应/表情包榜命令")
+        except Exception as e:
+            logger.error(f"[ChanganCat] 表情包榜命令出错: {e}")
+            await self._safe_send(event, f"获取表情包榜失败: {e}")
+
     @filter.command("changancat_stats")
     async def cmd_stats(self, event: AstrMessageEvent):
         """统计信息命令（管理员）"""
@@ -363,7 +403,7 @@ class ChanganCatPlugin(star.Star):
             await self._safe_send(event, f"获取统计信息失败: {e}")
 
     async def _safe_send(self, event: AstrMessageEvent, text: str):
-        """安全发送消息"""
+        """安全发送文本消息"""
         origin = event.unified_msg_origin
 
         try:
@@ -372,6 +412,27 @@ class ChanganCatPlugin(star.Star):
             await self.context.send_message(origin, msg)
         except Exception as e:
             logger.error(f"[ChanganCat] 发送失败: {e}")
+
+    async def _safe_send_with_images(self, event: AstrMessageEvent, text: str, images: List[dict]):
+        """安全发送带图片的消息"""
+        origin = event.unified_msg_origin
+
+        try:
+            # 构建消息链
+            chain = [Plain(text)]
+
+            if images:
+                for i, img_info in enumerate(images[:5], 1):  # 最多5张
+                    if img_info.get("url"):
+                        chain.append(Plain(f"\n\n第{i}名 - 发送{img_info.get('count', '?')}次\n"))
+                        chain.append(Image(url=img_info["url"]))
+
+            msg = SimpleMessage(chain)
+            await self.context.send_message(origin, msg)
+        except Exception as e:
+            logger.error(f"[ChanganCat] 发送带图片消息失败: {e}")
+            # 回退到纯文本
+            await self._safe_send(event, text)
 
     def _get_stats_text(self) -> str:
         """获取插件统计信息"""
@@ -412,6 +473,13 @@ class ChanganCatPlugin(star.Star):
                 pass
         else:
             lines.append("morechatplus连接: 未找到数据库")
+
+        # 显示配置的群号
+        target_groups = self.config.core.target_groups
+        if target_groups:
+            lines.append(f"每日报告目标群: {', '.join(target_groups)}")
+        else:
+            lines.append("每日报告目标群: 未配置（自动获取）")
 
         return "\n".join(lines)
 

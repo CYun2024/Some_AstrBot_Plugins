@@ -1,7 +1,7 @@
 """插件配置解析模块"""
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, List
 
 
 def _to_bool(value: Any, default: bool) -> bool:
@@ -39,6 +39,15 @@ def _to_str(value: Any, default: str) -> str:
     return str(value).strip()
 
 
+def _parse_list(value: Any) -> List[str]:
+    """解析逗号分隔的列表"""
+    if isinstance(value, str):
+        return [item.strip() for item in value.split(",") if item.strip()]
+    if isinstance(value, (list, tuple)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return []
+
+
 @dataclass(frozen=True)
 class CoreSettings:
     """核心设置"""
@@ -46,6 +55,7 @@ class CoreSettings:
     bot_qq_id: str = ""
     daily_report_hour: int = 0
     daily_report_minute: int = 5
+    target_groups: List[str] = field(default_factory=list)  # 新增：指定发送每日报告的群号列表
 
 
 @dataclass(frozen=True)
@@ -90,6 +100,7 @@ def parse_plugin_config(raw: dict[str, Any] | None) -> PluginConfig:
         bot_qq_id=_to_str(core_raw.get("bot_qq_id"), ""),
         daily_report_hour=_to_int(core_raw.get("daily_report_hour"), 0, 0, 23),
         daily_report_minute=_to_int(core_raw.get("daily_report_minute"), 5, 0, 59),
+        target_groups=_parse_list(core_raw.get("target_groups", "")),  # 新增：解析群号列表
     )
 
     # 复读设置

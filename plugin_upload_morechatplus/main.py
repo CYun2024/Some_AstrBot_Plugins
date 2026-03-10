@@ -4,7 +4,7 @@ QQ群聊增强插件，提供：
 - 上下文管理和总结
 - 用户画像维护
 - 主动回复判定
-- 图片识别和缓存
+- 图片识别和缓存（插件自主管理存储）
 - 艾特功能
 """
 
@@ -53,7 +53,7 @@ class MoreChatPlusPlugin(star.Star):
         self.context = context
         self.config = parse_plugin_config(config)
 
-        # 初始化数据库
+        # 初始化数据库和图片存储
         plugin_data_dir = (
             Path(get_astrbot_data_path())
             / "plugin_data"
@@ -61,10 +61,12 @@ class MoreChatPlusPlugin(star.Star):
         )
         self.db = DatabaseManager(plugin_data_dir / "chat_data.db")
 
-        # 初始化图片缓存
+        # 初始化图片缓存（插件自主管理存储目录）
+        images_dir = plugin_data_dir / "images"
         self.image_cache = ImageCacheManager(
-            plugin_data_dir / "image_cache.db",
-            max_cache_size=1000  # 可配置
+            db_path=plugin_data_dir / "image_cache.db",
+            images_dir=images_dir,
+            max_cache_size=self.config.image_cache.max_cache_size
         )
 
         # 不再缓存debugger实例，改为动态获取以确保可靠
@@ -82,13 +84,13 @@ class MoreChatPlusPlugin(star.Star):
 
         # 初始化工具
         self.chat_tools = ChatTools(
-            self.db, self.context_manager, self.user_profile_manager
+            self.db, self.context_manager, self.user_profile_manager, self.image_cache
         )
 
         # 缓存
         self._pending_active_replies: dict = {}
 
-        logger.info("[MoreChatPlus] 插件初始化完成")
+        logger.info(f"[MoreChatPlus] 插件初始化完成，图片缓存目录: {images_dir}")
 
     def _get_llm_debugger(self):
         """动态获取 LLM Debugger 实例（带缓存刷新机制）"""
@@ -275,7 +277,7 @@ class MoreChatPlusPlugin(star.Star):
         self,
         event: AstrMessageEvent,
     ) -> Optional[tuple]:
-        """提取消息信息（修改后：分离引用内容和实际内容）"""
+        """提取消息信息（插件自主管理图片存储，MD5去重）"""
         try:
             message_id = str(event.message_obj.message_id or "")
             user_id = str(event.get_sender_id() or "")
@@ -295,19 +297,27 @@ class MoreChatPlusPlugin(star.Star):
                     url = str(comp.url or comp.file or "").strip()
                     if url:
                         image_urls.append(url)
-                        # 获取或创建图片缓存
-                        local_path = await self._resolve_image_to_local(url)
-                        if local_path:
-                            img_id, exists = self.image_cache.get_or_create_cache(url, local_path)
+                        # 下载/获取图片到临时路径
+                        temp_path = await self._resolve_image_to_local(url)
+
+                        if temp_path and Path(temp_path).exists():
+                            # 保存到插件缓存（自动MD5去重）
+                            # save_image 会：
+                            # 1. 计算MD5检查是否已存在
+                            # 2. 如果存在：删除temp_path，返回已有ID和路径
+                            # 3. 如果不存在：复制到插件目录，删除temp_path，返回新ID和路径
+                            img_id, exists, final_path = self.image_cache.save_image(url, temp_path)
                             image_ids.append(img_id)
-                            if exists:
-                                logger.debug(f"[MoreChatPlus] 图片缓存命中: {img_id}")
-                        content_parts.append(f"[image:{len(image_urls)}:{img_id if image_ids else 'unknown'}]")
+
+                            status = "命中" if exists else "新图片"
+                            logger.debug(f"[MoreChatPlus] 图片处理[{status}]: {img_id}")
+                            content_parts.append(f"[image:{len(image_urls)}:{img_id}]")
+                        else:
+                            content_parts.append(f"[image:{len(image_urls)}:unknown]")
                     else:
                         content_parts.append(f"[image:{len(image_urls)}:unknown]")
                 elif isinstance(comp, Reply):
                     reply_to = str(comp.id or "")
-                    # 修改：只保留引用ID，不包含引用内容
                     content_parts.append(f"<引用:{reply_to}>")
                 elif isinstance(comp, At):
                     content_parts.append(f"[at:{comp.qq}]")
@@ -326,7 +336,7 @@ class MoreChatPlusPlugin(star.Star):
         event: AstrMessageEvent,
     ) -> str:
         """处理图片识别，带缓存和完整上报"""
-        if not image_urls:
+        if not image_urls or not image_ids:
             return ""
 
         # 优先使用图片ID获取缓存的识图结果
@@ -334,6 +344,8 @@ class MoreChatPlusPlugin(star.Star):
             cached_result = self.image_cache.get_vision_result(img_id)
             if cached_result:
                 logger.info(f"[MoreChatPlus] 使用缓存的识图结果: {img_id}")
+                # 增加发送计数（识图结果被使用）
+                self.image_cache.increment_send_count(img_id)
                 return cached_result
 
         provider_id = self.config.models.vision_provider
@@ -350,10 +362,12 @@ class MoreChatPlusPlugin(star.Star):
                 logger.warning("[MoreChatPlus] 识图模型不可用")
                 return ""
 
-            image_url = image_urls[0]
-            local_path = await self._resolve_image_to_local(image_url)
+            # 使用第一个图片ID获取本地路径
+            image_id = image_ids[0]
+            local_path = self.image_cache.get_local_path(image_id)
 
-            if not local_path:
+            if not local_path or not Path(local_path).exists():
+                logger.warning(f"[MoreChatPlus] 图片文件不存在: {image_id}")
                 return ""
 
             logger.info(f"[MoreChatPlus] 开始识图: {local_path}")
@@ -385,8 +399,9 @@ class MoreChatPlusPlugin(star.Star):
             logger.info(f"[MoreChatPlus] 识图结果: {result[:100]}...")
 
             # 保存识图结果到缓存
-            if image_ids:
-                self.image_cache.set_vision_result(image_ids[0], result)
+            self.image_cache.set_vision_result(image_id, result)
+            # 增加发送计数（识图结果被使用）
+            self.image_cache.increment_send_count(image_id)
 
             # 上报响应
             await self.safe_record_llm_call({
@@ -428,7 +443,7 @@ class MoreChatPlusPlugin(star.Star):
             return ""
 
     async def _resolve_image_to_local(self, image_ref: str) -> str:
-        """解析图片到本地路径"""
+        """解析图片到本地路径（使用AstrBot的下载功能）"""
         clean_ref = str(image_ref or "").strip()
         if not clean_ref:
             return ""
@@ -573,35 +588,7 @@ class MoreChatPlusPlugin(star.Star):
     @llm_tool(name="morechatplus_get_image_vision")
     async def tool_get_image_vision(self, event: AstrMessageEvent, image_id: str):
         """获取图片的识图结果"""
-        if not self.image_cache:
-            return json.dumps({
-                "status": "error",
-                "message": "图片缓存未启用"
-            }, ensure_ascii=False)
-
-        result = self.image_cache.get_vision_result(image_id)
-        if result:
-            return json.dumps({
-                "status": "success",
-                "image_id": image_id,
-                "vision_result": result
-            }, ensure_ascii=False, indent=2)
-        
-        # 尝试通过URL查找
-        lookup_id = self.image_cache.lookup_by_url(image_id)
-        if lookup_id:
-            result = self.image_cache.get_vision_result(lookup_id)
-            if result:
-                return json.dumps({
-                    "status": "success",
-                    "image_id": lookup_id,
-                    "vision_result": result
-                }, ensure_ascii=False, indent=2)
-
-        return json.dumps({
-            "status": "not_found",
-            "message": f"未找到图片 {image_id} 的识图结果，该图片可能未被识别过"
-        }, ensure_ascii=False)
+        return await self.chat_tools.get_image_vision_result(event, image_id)
 
     async def terminate(self) -> None:
         """插件终止"""

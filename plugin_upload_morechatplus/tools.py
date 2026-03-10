@@ -136,7 +136,6 @@ class ChatTools:
             from datetime import datetime
             time_str = datetime.fromtimestamp(msg.timestamp).strftime("%H:%M:%S")
             admin_mark = "[管理员]" if msg.is_admin else ""
-            # 修改：显示 msg:ID 格式
             formatted.append(
                 f"[{msg.nickname}|{msg.user_id}|{time_str}]:(msg:{msg.message_id}){admin_mark} {msg.content}"
             )
@@ -182,7 +181,7 @@ class ChatTools:
         """获取图片的识图结果
 
         Args:
-            image_id: 图片ID（如 img_abc123 或 url_hash）
+            image_id: 图片ID（如 img_c72430bdf422415b）
         """
         if not self.image_cache:
             return json.dumps({
@@ -192,6 +191,8 @@ class ChatTools:
 
         result = self.image_cache.get_vision_result(image_id)
         if result:
+            # 增加发送计数（识图结果被LLM工具查看）
+            self.image_cache.increment_send_count(image_id)
             return json.dumps({
                 "status": "success",
                 "image_id": image_id,
@@ -203,6 +204,7 @@ class ChatTools:
             if lookup_id:
                 result = self.image_cache.get_vision_result(lookup_id)
                 if result:
+                    self.image_cache.increment_send_count(lookup_id)
                     return json.dumps({
                         "status": "success",
                         "image_id": lookup_id,

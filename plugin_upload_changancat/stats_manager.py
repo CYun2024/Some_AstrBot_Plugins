@@ -215,6 +215,35 @@ class StatsManager:
             "date": (datetime.now() - timedelta(days=1)).strftime("%Y/%m/%d")
         }
 
+    def get_today_meme_stats(self, origin: str) -> List[Dict]:
+        """获取今日表情包统计（按发送次数排序）"""
+        today_start = self.get_day_start_timestamp(0)
+
+        messages = self._get_messages_from_morechatplus(origin, today_start)
+
+        # 统计表情包: {image_id: {count, url}}
+        meme_stats = {}
+
+        for msg in messages:
+            content = msg["content"]
+            image_urls = msg["image_urls"]
+
+            memes = self.extract_memes(content)
+            for idx, img_id in memes:
+                url = image_urls[idx - 1] if 0 < idx <= len(image_urls) else ""
+
+                if img_id not in meme_stats:
+                    meme_stats[img_id] = {"count": 0, "url": url}
+                meme_stats[img_id]["count"] += 1
+
+        # 按发送次数排序
+        sorted_memes = [
+            {"image_id": img_id, "use_count": info["count"], "image_url": info["url"]}
+            for img_id, info in sorted(meme_stats.items(), key=lambda x: -x[1]["count"])
+        ]
+
+        return sorted_memes
+
     def get_weekly_stats(self, origin: str) -> Dict:
         """获取本周统计（7天，从morechatplus读取）"""
         week_start = self.get_day_start_timestamp(7)
@@ -352,6 +381,45 @@ class StatsManager:
         lines.append(weekly_lines)
 
         return "\n".join(lines)
+
+    def format_meme_command_response(self, origin: str, group_name: str = "") -> Tuple[str, List[Dict]]:
+        """格式化/表情包榜命令响应（从morechatplus获取今日数据）
+
+        Returns:
+            (报告文本, 表情包图片列表)
+        """
+        today_stats = self.get_today_meme_stats(origin)
+
+        lines = []
+        lines.append(f"🖼️ {datetime.now().strftime('%Y/%m/%d')} 表情包榜（今日）")
+        lines.append("")
+
+        # 群聊信息
+        if group_name:
+            lines.append(f"群聊：{group_name}")
+        else:
+            lines.append(f"群聊：{origin}")
+        lines.append("")
+
+        if not today_stats:
+            lines.append("今日暂无表情包数据~")
+            return "\n".join(lines), []
+
+        lines.append(f"今日共发送 {len(today_stats)} 种表情包，以下是发送次数TOP {min(5, len(today_stats))}：")
+        lines.append("")
+
+        # 准备图片列表
+        meme_images = []
+
+        for i, meme in enumerate(today_stats[:5], 1):
+            lines.append(f"{i}. 发送次数：{meme['use_count']} 次")
+            if meme["image_url"]:
+                meme_images.append({
+                    "url": meme["image_url"],
+                    "count": meme["use_count"]
+                })
+
+        return "\n".join(lines), meme_images
 
     def cleanup_old_stats(self):
         """清理过期统计数据（现在主要是清理本地复读记录）"""
