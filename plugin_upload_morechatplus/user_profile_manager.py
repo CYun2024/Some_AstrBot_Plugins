@@ -180,6 +180,8 @@ class UserProfileManager:
         """调用模型B分析用户（支持故障转移）"""
         primary_id = self.config.models.model_b_provider
         fallback_id = self.config.models.model_b_fallback_provider
+        bot_qq_id = self.config.core.bot_qq_id
+        bot_name = self.config.core.bot_name
 
         prompt = f"""请分析以下用户的聊天记录，提取用户画像信息。
 
@@ -196,7 +198,7 @@ class UserProfileManager:
     "relationship": "与机器人的关系（陌生人/普通群友/活跃互动者/朋友等）"
 }}
 
-注：792398771是bot自己的QQ号
+注：{bot_qq_id}是bot（{bot_name}）自己的QQ号
 只输出JSON，不要其他内容。"""
 
         logger.info(

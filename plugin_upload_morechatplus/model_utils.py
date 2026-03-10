@@ -80,18 +80,21 @@ async def call_model_with_fallback(
 
             model_name = getattr(provider, 'model', 'unknown')
 
-            # 上报请求
+            # 上报请求 - 包裹在try-except中防止上报失败影响主流程
             if record_callback:
-                await record_callback({
-                    "phase": "request",
-                    "provider_id": actual_id,
-                    "model": model_name,
-                    "prompt": prompt[:500] + "..." if len(prompt) > 500 else prompt,
-                    "source": {"plugin": "morechatplus", "purpose": purpose},
-                    "conversation_id": conv_id,
-                    "timestamp": time.time(),
-                    "is_fallback": is_fallback
-                })
+                try:
+                    await record_callback({
+                        "phase": "request",
+                        "provider_id": actual_id,
+                        "model": model_name,
+                        "prompt": prompt[:500] + "..." if len(prompt) > 500 else prompt,
+                        "source": {"plugin": "morechatplus", "purpose": purpose},
+                        "conversation_id": conv_id,
+                        "timestamp": time.time(),
+                        "is_fallback": is_fallback
+                    })
+                except Exception as e:
+                    logger.error(f"[MoreChatPlus] 上报LLM请求失败: {e}")
 
             # 执行调用
             response = await asyncio.wait_for(
@@ -107,20 +110,23 @@ async def call_model_with_fallback(
             text = response.completion_text or ""
             usage = getattr(response, 'usage', None)
 
-            # 上报成功响应
+            # 上报成功响应 - 包裹在try-except中
             if record_callback:
-                await record_callback({
-                    "phase": "response",
-                    "provider_id": actual_id,
-                    "model": model_name,
-                    "response": text[:200] + "..." if len(text) > 200 else text,
-                    "usage": usage,
-                    "source": {"plugin": "morechatplus", "purpose": purpose},
-                    "conversation_id": conv_id,
-                    "timestamp": time.time(),
-                    "is_fallback": is_fallback,
-                    "status": "success"
-                })
+                try:
+                    await record_callback({
+                        "phase": "response",
+                        "provider_id": actual_id,
+                        "model": model_name,
+                        "response": text[:200] + "..." if len(text) > 200 else text,
+                        "usage": usage,
+                        "source": {"plugin": "morechatplus", "purpose": purpose},
+                        "conversation_id": conv_id,
+                        "timestamp": time.time(),
+                        "is_fallback": is_fallback,
+                        "status": "success"
+                    })
+                except Exception as e:
+                    logger.error(f"[MoreChatPlus] 上报LLM响应失败: {e}")
 
             return ModelCallResult(
                 success=True,
@@ -134,18 +140,22 @@ async def call_model_with_fallback(
             error_msg = f"调用超时 ({timeout_sec}秒)"
             logger.warning(f"[MoreChatPlus] 模型 {actual_id} 调用超时")
 
+            # 上报超时错误
             if record_callback:
-                await record_callback({
-                    "phase": "response",
-                    "provider_id": actual_id,
-                    "model": getattr(provider, 'model', 'unknown') if provider else "unknown",
-                    "response": f"[{error_msg}]",
-                    "source": {"plugin": "morechatplus", "purpose": f"{purpose}_timeout"},
-                    "conversation_id": conv_id,
-                    "timestamp": time.time(),
-                    "is_fallback": is_fallback,
-                    "status": "error"
-                })
+                try:
+                    await record_callback({
+                        "phase": "response",
+                        "provider_id": actual_id,
+                        "model": getattr(provider, 'model', 'unknown') if provider else "unknown",
+                        "response": f"[{error_msg}]",
+                        "source": {"plugin": "morechatplus", "purpose": f"{purpose}_timeout"},
+                        "conversation_id": conv_id,
+                        "timestamp": time.time(),
+                        "is_fallback": is_fallback,
+                        "status": "error"
+                    })
+                except Exception as e:
+                    logger.error(f"[MoreChatPlus] 上报LLM超时失败: {e}")
 
             return ModelCallResult(
                 success=False,
@@ -158,18 +168,22 @@ async def call_model_with_fallback(
             error_msg = str(e)
             logger.error(f"[MoreChatPlus] 模型 {actual_id} 调用失败: {e}")
 
+            # 上报错误响应
             if record_callback:
-                await record_callback({
-                    "phase": "response",
-                    "provider_id": actual_id,
-                    "model": getattr(provider, 'model', 'unknown') if provider else "unknown",
-                    "response": f"[错误: {error_msg}]",
-                    "source": {"plugin": "morechatplus", "purpose": f"{purpose}_error"},
-                    "conversation_id": conv_id,
-                    "timestamp": time.time(),
-                    "is_fallback": is_fallback,
-                    "status": "error"
-                })
+                try:
+                    await record_callback({
+                        "phase": "response",
+                        "provider_id": actual_id,
+                        "model": getattr(provider, 'model', 'unknown') if provider else "unknown",
+                        "response": f"[错误: {error_msg}]",
+                        "source": {"plugin": "morechatplus", "purpose": f"{purpose}_error"},
+                        "conversation_id": conv_id,
+                        "timestamp": time.time(),
+                        "is_fallback": is_fallback,
+                        "status": "error"
+                    })
+                except Exception as err:
+                    logger.error(f"[MoreChatPlus] 上报LLM错误失败: {err}")
 
             return ModelCallResult(
                 success=False,

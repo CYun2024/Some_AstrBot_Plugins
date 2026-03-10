@@ -485,7 +485,7 @@ class MoreChatPlusPlugin(star.Star):
         vision_result: Optional[str] = None,
         active_reply_info: Optional[dict] = None,
     ) -> str:
-        """构建增强后的prompt"""
+        """构建增强后的prompt（区分主动/被动回复）"""
         origin = event.unified_msg_origin
 
         context_text = self.context_manager.get_formatted_context(origin)
@@ -513,14 +513,21 @@ class MoreChatPlusPlugin(star.Star):
         if vision_result:
             vision_hint = f"\n\n图片识别结果: {vision_result}"
 
+        # 关键修改：只有主动回复（非@触发）时才附加建议
         active_reply_hint = ""
         if active_reply_info:
-            active_reply_hint = (
-                f"\n\n【主动回复建议】\n"
-                f"模型A分析: {active_reply_info.topic_analysis}\n"
-                f"回复建议: {active_reply_info.reply_suggestion}\n"
-                f"目标消息ID: #{active_reply_info.reply_target_msg_id}"
-            )
+            # 检查当前是否是被@触发的（通过检查original_content中是否有[at:bot_qq_id]）
+            is_mentioned = self.config.core.bot_qq_id and f"[at:{self.config.core.bot_qq_id}]" in original_content
+            if not is_mentioned:
+                # 只有主动回复（非@触发）时才附加建议
+                active_reply_hint = (
+                    f"\n\n【主动回复建议】\n"
+                    f"场景分析: {active_reply_info.topic_analysis}\n"
+                    f"回复策略: {active_reply_info.reply_suggestion}"
+                )
+            else:
+                # 被@时不附加建议，让主LLM自行处理
+                logger.debug("[MoreChatPlus] 被@触发，不附加模型A建议")
 
         enhanced_prompt = f"""{system_prompt}
 

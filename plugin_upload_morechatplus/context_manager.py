@@ -93,20 +93,37 @@ class ContextManager:
         limit: int = None,
         include_summaries: bool = True,
     ) -> str:
-        """获取格式化的上下文"""
+        """获取格式化的上下文（优化历史总结展示）"""
         if limit is None:
             limit = self.config.context.max_context_messages
 
         # 获取最近的总结
         summary_text = ""
         if include_summaries:
-            summaries = self.db.get_recent_summaries(origin, limit=5)
+            summaries = self.db.get_recent_summaries(origin, limit=3)
             if summaries:
                 summary_parts = []
                 for s in summaries:
                     time_str = datetime.fromtimestamp(s.timestamp).strftime("%m-%d %H:%M")
-                    summary_parts.append(f"[{time_str}] 话题总结: {s.summary}")
-                summary_text = "=== 历史话题总结 ===\n" + "\n".join(summary_parts) + "\n=== 当前对话 ===\n"
+                    # 提取氛围标签（如果存在）
+                    tag = ""
+                    if "[复读狂欢]" in s.topic_analysis:
+                        tag = "[复读]"
+                    elif "[求助咨询]" in s.topic_analysis:
+                        tag = "[求助]"
+                    elif "[集中互动]" in s.topic_analysis:
+                        tag = "[互动]"
+                    elif "[Bot相关]" in s.topic_analysis:
+                        tag = "[Bot]"
+
+                    # 提取第一行作为简述
+                    summary_line = s.summary.split('\n')[0] if s.summary else "无"
+                    if summary_line.startswith("- 当前话题："):
+                        summary_line = summary_line.replace("- 当前话题：", "")
+
+                    summary_parts.append(f"[{time_str}]{tag} {summary_line}")
+
+                summary_text = "【历史话题】\n" + "\n".join(summary_parts) + "\n\n【当前对话】\n"
 
         # 获取消息
         messages = self.db.get_messages(origin, limit=limit)

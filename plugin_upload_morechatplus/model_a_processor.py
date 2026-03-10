@@ -26,8 +26,8 @@ class SummaryResult:
     should_reply: bool
     reply_target_msg_id: str = ""
     reply_suggestion: str = ""
-    used_fallback: bool = False  # 新增：是否使用了备用模型
-    provider_id: str = ""  # 新增：实际使用的模型ID
+    used_fallback: bool = False
+    provider_id: str = ""
 
 
 class ModelAProcessor:
@@ -45,15 +45,39 @@ class ModelAProcessor:
         self.context_manager = context_manager
         self.config = config
         self.context = context
-        self.debugger = debugger  # 可以是MoreChatPlusPlugin实例，它实现了safe_record_llm_call
+        self.debugger = debugger
 
     async def _record_llm_call(self, data: dict):
-        """辅助方法：安全上报"""
-        if self.debugger and hasattr(self.debugger, 'safe_record_llm_call'):
-            await self.debugger.safe_record_llm_call(data)
+        """辅助方法：安全上报到LLM Debugger"""
+        try:
+            if not hasattr(self.context, '_plugin_instances'):
+                logger.debug("[MoreChatPlus] context 没有 _plugin_instances 属性")
+                return
+
+            debugger = self.context._plugin_instances.get('llm_debugger')
+            if not debugger:
+                logger.debug("[MoreChatPlus] LLM Debugger 实例未找到")
+                return
+
+            if not hasattr(debugger, 'record_llm_call'):
+                logger.debug("[MoreChatPlus] LLM Debugger 没有 record_llm_call 方法")
+                return
+
+            if "timestamp" not in data:
+                data["timestamp"] = time.time()
+            if "source" not in data:
+                data["source"] = {"plugin": "morechatplus", "purpose": "unknown"}
+            if "conversation_id" not in data:
+                data["conversation_id"] = uuid.uuid4().hex
+
+            await debugger.record_llm_call(data)
+            logger.debug(f"[MoreChatPlus] 成功上报LLM调用: {data.get('phase')}")
+
+        except Exception as e:
+            logger.error(f"[MoreChatPlus] 上报LLM调用失败: {e}")
 
     async def process_context(self, origin: str) -> Optional[SummaryResult]:
-        """处理上下文，生成总结和回复建议（支持故障转移）"""
+        """处理上下文，生成总结和回复建议"""
         try:
             context_text = self.context_manager.get_context_for_model_a(origin)
             prompt = self._build_summary_prompt(context_text)
@@ -62,11 +86,10 @@ class ModelAProcessor:
             fallback_id = self.config.models.model_a_fallback_provider
 
             logger.info(
-                f"[MoreChatPlus] 调用模型A进行上下文总结 | origin={origin} | "
+                f"[MoreChatPlus] 调用模型A | origin={origin} | "
                 f"主模型={primary_id or 'default'} | 备用={fallback_id or '无'}"
             )
 
-            # 使用新的故障转移调用方法
             result = await call_model_with_fallback(
                 context=self.context,
                 config=self.config,
@@ -88,7 +111,6 @@ class ModelAProcessor:
             parsed = self._parse_summary_response(result.text)
 
             if parsed:
-                # 记录使用的模型信息
                 parsed.used_fallback = result.is_fallback
                 parsed.provider_id = result.provider_id
 
@@ -109,9 +131,7 @@ class ModelAProcessor:
 
                 logger.info(
                     f"[MoreChatPlus] 模型A总结完成 | origin={origin} "
-                    f"should_reply={parsed.should_reply} "
-                    f"provider={parsed.provider_id} "
-                    f"fallback={parsed.used_fallback}"
+                    f"should_reply={parsed.should_reply}"
                 )
 
             return parsed
@@ -121,95 +141,127 @@ class ModelAProcessor:
             return None
 
     def _build_summary_prompt(self, context_text: str) -> str:
-        """构建总结提示词"""
+        """构建总结提示词（严格触发逻辑）"""
         trigger_keyword = self.config.active_reply.trigger_keyword
-        strict_hint = "非常严格" if self.config.active_reply.strict_mode else "适度"
-        avoid_controversial = "避免参与有争议的话题。" if self.config.active_reply.avoid_controversial else ""
+        bot_name = self.config.core.bot_name
+        bot_qq_id = self.config.core.bot_qq_id
 
-        return f"""请分析以下群聊上下文，完成以下任务：
+        prompt = f"""你是群聊观察员，分析群聊上下文并判定bot是否需要**主动回复**（非@触发）。
 
-## 任务1：话题总结
-简要总结当前讨论的话题走向（2-3句话）。
+## Bot信息
+- Bot名称：{bot_name}
+- Bot QQ号：{bot_qq_id}
+- Bot人设：一只可爱的猫娘，性格活泼友好，喜欢用"喵"结尾说话
 
-## 任务2：话题分析
-分析：
-1. 当前话题是否与bot自身有关（如提到bot的名字、@bot等）
-2. 话题的性质（日常闲聊/求助/争议/其他）
-3. 群友的互动状态
+## 核心原则
+**绝大多数情况下不主动回复**，只有以下两种场景允许触发：
+1. **被明确@或提到名字**（且不是求助技术/游戏问题）
+2. **群友间集中情感互动**（如"摸摸""撅撅""我喜欢你"等，且非纯复读）
 
-## 任务3：回复建议
-判断bot是否应该主动回复。判定标准（{strict_hint}）：
-1. 话题明确与bot有关（提到bot名字或@bot）
-2. 群友在友好地互动，且bot长时间未参与
-3. 群友在复读，且bot未参与过
-4. 群友在伤心倾倒负面情绪，bot可以进行简单的安慰（比如摸摸互动"摸摸你喵"）
+## 禁止触发场景（绝不输出{trigger_keyword}）
+- ❌ **纯复读**：群友重复发送相同内容（由其他插件解决）
+- ❌ **求助提问**：涉及游戏攻略、技术问题、作业帮助等（由其他插件解决）
+- ❌ **争议对线**：争吵、阴阳怪气、负面情绪倾泻
+- ❌ **日常碎片**：无目的闲聊、分享链接、单方面发言
 
-{avoid_controversial}
+## 输出格式（严格遵循）
 
-如果判定需要回复，请输出标记：{trigger_keyword}
-同时提供回复建议：应该回复哪条消息（消息ID），建议回复什么内容。
+[场景速描]
+- 当前话题：一句话描述（如："群友在玩'希腊奶'复读梗" 或 "群友间互相摸头互动"）
+- 消息特征：最近N条消息的互动模式（如："A说摸摸，B回复摸摸，C说我喜欢你喵，形成互动链"）
+- Bot关联：是否被@或提到名字（是/否），如被@说明具体内容（是玩梗还是求助）
 
-## 输出格式
-请严格按照以下格式输出：
+[氛围判定]
+选择一项：
+- [复读狂欢]：重复相同梗/表情包，无意义刷屏 → **绝不触发**
+- [求助咨询]：有人问"怎么打BOSS"/"这个怎么用" → **绝不触发**
+- [集中互动]：群友间高频情感互动（摸摸/抱抱/表白/鼓励），且**非机械复读** 且上下文中bot没有一次发言→ **可能触发**
+- [日常闲聊]：分散的闲聊，无集中互动 → **不触发**
+- [Bot相关]：被@或讨论bot → **分析后决定**
 
-[话题总结]
-总结内容...
+[触发判定]
+是否需要主动回复：
+- 判定结果：[触发 / 不触发]
+- 判定理由：（具体说明）
 
-[话题分析]
-分析内容...
+**触发条件检查清单**（只有全部满足才触发）：
+1. 属于[集中互动]且互动内容积极友好（非争吵）？
+2. 最新消息在互动发生后的5分钟内？
+3. Bot未参与过这次互动？
+4. 互动内容不是纯复读（有创造性回应，如A说摸摸→B说摸摸你→C说撅撅你）？
 
-[回复建议]
-是否需要回复：是/否
-如果需要回复，在此处输出：{trigger_keyword}
-回复目标消息ID：（如 #msg123456）
-回复建议内容：建议回复什么...
+如果判定为**触发**，请输出：
+TRIGGER:{trigger_keyword}
+并提供回复建议：
+- 参与方式：[加入互动（模仿当前互动内容）/ 无视]
+- 建议内容：（如："摸摸你喵" 或 "也摸摸{name}" ）
 
 ---
 
 群聊上下文：
 {context_text}
 """
+        return prompt
 
     def _parse_summary_response(self, text: str) -> Optional[SummaryResult]:
-        """解析总结响应"""
+        """解析总结响应（适配严格触发逻辑）"""
         try:
+            # 提取场景速描
             summary_match = re.search(
-                r'\[话题总结\]\s*\n?(.*?)(?=\[话题分析\]|\[回复建议\]|$)',
+                r'\[场景速描\]\s*\n?(.*?)(?=\[氛围判定\]|\[触发判定\]|$)',
                 text, re.DOTALL
             )
             summary = summary_match.group(1).strip() if summary_match else ""
 
-            analysis_match = re.search(
-                r'\[话题分析\]\s*\n?(.*?)(?=\[回复建议\]|$)',
+            # 提取氛围判定
+            atmosphere_match = re.search(
+                r'\[氛围判定\]\s*\n?(.*?)(?=\[触发判定\]|$)',
                 text, re.DOTALL
             )
-            topic_analysis = analysis_match.group(1).strip() if analysis_match else ""
+            atmosphere = atmosphere_match.group(1).strip() if atmosphere_match else ""
 
-            suggestion_match = re.search(
-                r'\[回复建议\]\s*\n?(.*)',
+            # 提取触发判定部分
+            trigger_match = re.search(
+                r'\[触发判定\]\s*\n?(.*)',
                 text, re.DOTALL
             )
-            suggestions = suggestion_match.group(1).strip() if suggestion_match else ""
+            trigger_section = trigger_match.group(1).strip() if trigger_match else ""
 
+            # 组合topic_analysis
+            topic_analysis = f"氛围：{atmosphere}\n判定：{trigger_section}"
+
+            # 判断是否触发（严格检查）
             trigger_keyword = self.config.active_reply.trigger_keyword
-            should_reply = trigger_keyword in text
-
-            msg_id_match = re.search(
-                r'回复目标消息ID[：:]\s*#?msg?(\d+)',
-                text, re.IGNORECASE
+            should_reply = (
+                f"TRIGGER:{trigger_keyword}" in text or
+                (trigger_keyword in text and "不触发" not in trigger_section)
             )
-            reply_target_msg_id = msg_id_match.group(1) if msg_id_match else ""
 
-            reply_suggestion_match = re.search(
-                r'回复建议内容[：:]\s*(.*?)(?:\n|$)',
-                text, re.DOTALL | re.IGNORECASE
-            )
-            reply_suggestion = reply_suggestion_match.group(1).strip() if reply_suggestion_match else ""
+            # 如果明确写了"不触发"，强制设为False（防止误判）
+            if "判定结果：[不触发]" in trigger_section or "判定结果：不触发" in trigger_section:
+                should_reply = False
+
+            # 提取回复建议（仅在触发时）
+            reply_target_msg_id = ""
+            reply_suggestion = ""
+            if should_reply:
+                # 尝试提取建议内容
+                content_match = re.search(
+                    r'建议内容[：:]\s*(.*?)(?:\n|$)',
+                    text, re.DOTALL | re.IGNORECASE
+                )
+                if content_match:
+                    reply_suggestion = content_match.group(1).strip()
+
+                # 尝试提取目标（从场景速描中找最后发言者）
+                msg_match = re.search(r'msg[：:]?(\d+)', text)
+                if msg_match:
+                    reply_target_msg_id = msg_match.group(1)
 
             return SummaryResult(
                 summary=summary,
                 topic_analysis=topic_analysis,
-                suggestions=suggestions,
+                suggestions=trigger_section,
                 should_reply=should_reply,
                 reply_target_msg_id=reply_target_msg_id,
                 reply_suggestion=reply_suggestion,
@@ -231,7 +283,8 @@ class ModelAProcessor:
             for i, group in enumerate(message_groups[:5], 1):
                 group_texts = []
                 for msg in group:
-                    time_str = __import__('datetime').datetime.fromtimestamp(
+                    from datetime import datetime
+                    time_str = datetime.fromtimestamp(
                         msg.timestamp
                     ).strftime("%H:%M:%S")
                     group_texts.append(

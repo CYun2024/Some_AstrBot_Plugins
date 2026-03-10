@@ -1,0 +1,96 @@
+{
+    "core_settings": {
+        "description": "核心设置",
+        "hint": "插件的核心功能开关与基本配置",
+        "type": "object",
+        "items": {
+            "enable": {
+                "description": "启用插件",
+                "hint": "总开关，关闭后插件完全停止工作",
+                "type": "bool",
+                "default": true
+            },
+            "bot_qq_id": {
+                "description": "Bot的QQ号",
+                "hint": "用于识别bot自己的消息，避免复读自己",
+                "type": "string",
+                "default": ""
+            },
+            "daily_report_hour": {
+                "description": "每日报告发送时间",
+                "hint": "每天几点发送昨日统计报告（0-23）",
+                "type": "int",
+                "default": 0
+            },
+            "daily_report_minute": {
+                "description": "每日报告发送分钟",
+                "hint": "每天几分发送昨日统计报告（0-59）",
+                "type": "int",
+                "default": 5
+            }
+        }
+    },
+    "repeat_settings": {
+        "description": "复读设置",
+        "hint": "配置复读功能的触发条件",
+        "type": "object",
+        "items": {
+            "enable": {
+                "description": "启用复读",
+                "hint": "开启后bot会自动复读群聊中的热门消息",
+                "type": "bool",
+                "default": true
+            },
+            "check_message_count": {
+                "description": "检查消息数量",
+                "hint": "检查最近多少条消息内是否有重复",
+                "type": "int",
+                "default": 10
+            },
+            "repeat_threshold": {
+                "description": "复读阈值",
+                "hint": "近N条消息中有多少条相同才复读",
+                "type": "int",
+                "default": 5
+            }
+        }
+    },
+    "stats_settings": {
+        "description": "统计设置",
+        "hint": "配置表情包和哈气统计功能",
+        "type": "object",
+        "items": {
+            "enable_meme_stats": {
+                "description": "启用表情包统计",
+                "hint": "开启后统计群内表情包使用情况",
+                "type": "bool",
+                "default": true
+            },
+            "enable_haqi_stats": {
+                "description": "启用哈气统计",
+                "hint": "开启后统计群友哈气次数",
+                "type": "bool",
+                "default": true
+            },
+            "top_meme_count": {
+                "description": "表情包榜显示数量",
+                "hint": "每日表情包榜显示前N个",
+                "type": "int",
+                "default": 3
+            }
+        }
+    },
+    "database_settings": {
+        "description": "数据库设置",
+        "hint": "配置数据库相关参数",
+        "type": "object",
+        "items": {
+            "data_retention_days": {
+                "description": "数据保留天数",
+                "hint": "聊天记录保留多少天（默认7天，与morechatplus一致）",
+                "type": "int",
+                "default": 7
+            }
+        }
+    }
+}
