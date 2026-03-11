@@ -441,6 +441,7 @@
         }
     </style>
     <base target="_blank">
+<base target="_blank">
 </head>
 <body>
     <div class="header">
@@ -989,7 +990,32 @@
             }
         }
 
-        async function loadSummaries() {
+        // 切换总结文本的展开/折叠
+function toggleSummaryText(btn) {
+    const container = btn.parentElement;
+    const shortSpan = container.querySelector('.text-short');
+    const fullSpan = container.querySelector('.text-full');
+    const fullText = btn.getAttribute('data-full-text');
+
+    if (fullSpan.style.display === 'none' || fullSpan.style.display === '') {
+        // 展开
+        if (!fullSpan.innerHTML) {
+            fullSpan.innerHTML = '<br>' + fullText;
+        }
+        fullSpan.style.display = 'block';
+        shortSpan.style.display = 'none';
+        btn.textContent = '收起';
+        btn.classList.add('expanded');
+    } else {
+        // 折叠
+        fullSpan.style.display = 'none';
+        shortSpan.style.display = 'inline';
+        btn.textContent = '展开';
+        btn.classList.remove('expanded');
+    }
+}
+
+async function loadSummaries() {
             const container = document.getElementById('summaries-container');
             container.innerHTML = '<div class="loading">加载中...</div>';
             const origin = document.getElementById('summary-origin-select').value;
@@ -1003,10 +1029,57 @@
                     return;
                 }
 
-                let html = '<table class="data-table"><thead><tr><th>ID</th><th>时间</th><th>来源</th><th>总结</th><th>话题分析</th><th>建议</th><th>是否回复</th></tr></thead><tbody>';
+                // 添加样式
+                let html = `<style>
+                    .summary-text { max-width: 300px; font-size: 0.875rem; line-height: 1.4; }
+                    .text-short { display: inline; }
+                    .text-full { display: none; color: #e2e8f0; margin-top: 0.5rem; padding: 0.75rem; background: #0f172a; border-radius: 6px; border: 1px solid #334155; white-space: pre-wrap; word-break: break-word; max-height: 300px; overflow-y: auto; }
+                    .expand-btn { margin-left: 0.5rem; padding: 0.25rem 0.75rem; background: #3b82f6; border: none; color: white; border-radius: 4px; cursor: pointer; font-size: 0.75rem; transition: all 0.2s; }
+                    .expand-btn:hover { background: #2563eb; }
+                    .expand-btn.expanded { background: #64748b; }
+                </style>
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th>时间</th>
+                            <th>来源</th>
+                            <th style="min-width: 250px;">总结</th>
+                            <th style="min-width: 250px;">话题分析</th>
+                            <th style="min-width: 250px;">建议</th>
+                            <th>是否回复</th>
+                        </tr>
+                    </thead>
+                    <tbody>`;
+
                 data.summaries.forEach(summary => {
                     const time = new Date(summary.timestamp * 1000).toLocaleString();
-                    html += `<tr><td>${summary.id}</td><td>${time}</td><td>${escapeHtml(summary.origin || '')}</td><td>${escapeHtml(summary.summary || '').substring(0, 50)}...</td><td>${escapeHtml(summary.topic_analysis || '').substring(0, 50)}...</td><td>${escapeHtml(summary.suggestions || '').substring(0, 50)}...</td><td>${summary.should_reply ? '是' : '否'}</td></tr>`;
+
+                    // 辅助函数：生成长文本HTML
+                    const renderCell = (text) => {
+                        if (!text) return '<span style="color: #64748b;">(空)</span>';
+                        const escaped = escapeHtml(text);
+                        if (escaped.length <= 50) {
+                            return `<div class="summary-text"><span class="text-short">${escaped}</span><span class="text-full" style="display:none;"></span></div>`;
+                        }
+                        const short = escaped.substring(0, 50);
+                        // 使用 data 属性存储完整文本，避免引号转义问题
+                        return `<div class="summary-text">
+                            <span class="text-short">${short}...</span>
+                            <span class="text-full" style="display:none;"></span>
+                            <button class="expand-btn" data-full-text="${escaped.replace(/"/g, '&quot;')}" onclick="toggleSummaryText(this)">展开</button>
+                        </div>`;
+                    };
+
+                    html += `<tr>
+                        <td>${summary.id}</td>
+                        <td>${time}</td>
+                        <td>${escapeHtml(summary.origin || '')}</td>
+                        <td>${renderCell(summary.summary)}</td>
+                        <td>${renderCell(summary.topic_analysis)}</td>
+                        <td>${renderCell(summary.suggestions)}</td>
+                        <td>${summary.should_reply ? '<span style="color: #10b981; font-weight: bold;">是</span>' : '<span style="color: #64748b;">否</span>'}</td>
+                    </tr>`;
                 });
                 html += '</tbody></table>';
                 container.innerHTML = html;

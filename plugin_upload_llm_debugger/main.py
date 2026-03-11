@@ -1,6 +1,6 @@
 """LLM Debugger
 
-版本: 1.3.2
+版本: 1.3.3
 作者: 韶虹CYun
 """
 
@@ -23,7 +23,7 @@ except ImportError:
     LLMResponse = None
 
 
-@register("llm_debugger", "韶虹CYun", "LLM 调用监控调试器（带WebUI）", "1.3.2")
+@register("llm_debugger", "韶虹CYun", "LLM 调用监控调试器（带WebUI）", "1.3.3")
 class LLMDebugger(Star):
     """LLM 调用监控调试器（带WebUI）- 支持MoreChatPlus数据查看"""
 
@@ -42,6 +42,7 @@ class LLMDebugger(Star):
         self._processed_ids: Dict[Tuple[Optional[str], str], float] = {}
         self._cleanup_task = None
 
+        # 关键：尽早注册到 context
         self._register_to_context()
 
     def _register_to_context(self):
@@ -112,7 +113,30 @@ class LLMDebugger(Star):
 
     # ========== 公共方法：供其他插件手动记录 LLM 调用 ==========
     async def record_llm_call(self, data: dict):
-        """供其他插件调用的公共方法，用于记录 LLM 请求或响应"""
+        """供其他插件调用的公共方法，用于记录 LLM 请求或响应
+
+        支持的数据格式：
+        请求阶段：{
+            "phase": "request",
+            "prompt": "...",
+            "model": "...",
+            "system_prompt": "...",
+            "contexts": [...],
+            "images": [...],
+            "sender": {"id": "...", "name": "..."},
+            "source": {"plugin": "...", "purpose": "..."},
+            "conversation_id": "...",
+            "timestamp": ...
+        }
+        响应阶段：{
+            "phase": "response",
+            "response": "...",
+            "model": "...",
+            "usage": {...},
+            "raw_response": {...},
+            ...
+        }
+        """
         if not self.db:
             logger.debug("[LLMDebugger] 数据库未初始化，无法记录")
             return
@@ -123,29 +147,44 @@ class LLMDebugger(Star):
                 logger.warning(f"[LLMDebugger] 忽略无效 phase: {phase}")
                 return
 
+            # 记录来源信息
+            source = data.get("source", {})
+            plugin_name = source.get("plugin", "unknown")
+            purpose = source.get("purpose", "unknown")
+
+            logger.debug(f"[LLMDebugger] 收到上报: phase={phase}, plugin={plugin_name}, purpose={purpose}")
+
             record_data = {
                 "timestamp": data.get("timestamp", datetime.now().isoformat()),
                 "type": phase,
                 "conversation_id": data.get("conversation_id"),
                 "sender": data.get("sender", {}),
-                "source": data.get("source", {}),
+                "source": source,
             }
 
             if phase == "request":
+                # 处理请求数据
+                prompt = data.get("prompt", "")
+                contexts = data.get("contexts", [])
+                system_prompt = data.get("system_prompt", "")
+
                 record_data.update({
                     "message": {
-                        "raw": data.get("prompt", ""),
-                        "formatted_prompt": data.get("prompt", ""),
+                        "raw": prompt,
+                        "formatted_prompt": prompt,
                         "image_urls": data.get("images", []),
                     },
                     "llm_config": {
-                        "model": data.get("model"),
-                        "system_prompt": data.get("system_prompt", ""),
-                        "contexts": data.get("contexts", []),
-                        "contexts_count": len(data.get("contexts", [])),
+                        "model": data.get("model", "unknown"),
+                        "system_prompt": system_prompt,
+                        "contexts": self._make_serializable(contexts),
+                        "contexts_count": len(contexts),
                     }
                 })
+
+                logger.debug(f"[LLMDebugger] 记录请求: model={data.get('model')}, prompt_length={len(prompt)}, contexts_count={len(contexts)}")
             else:
+                # 处理响应数据
                 record_data.update({
                     "response": {
                         "text": data.get("response", ""),
@@ -155,17 +194,19 @@ class LLMDebugger(Star):
                     "usage": data.get("usage"),
                 })
 
+                logger.debug(f"[LLMDebugger] 记录响应: model={data.get('model')}, response_length={len(data.get('response', ''))}")
+
             safe_data = self._make_serializable(record_data)
             record_id = await self.db.save_record(safe_data)
             safe_data["id"] = record_id
             await self._broadcast(safe_data)
 
+            # 更新去重缓存
             conv_id = data.get("conversation_id")
             cache_key = (conv_id, phase)
             self._processed_ids[cache_key] = time.time()
 
-            source_info = data.get('source', {})
-            logger.debug(f"[LLMDebugger] 已记录 {phase} 来自 {source_info.get('plugin', 'unknown')}/{source_info.get('purpose', 'unknown')}")
+            logger.info(f"[LLMDebugger] 已记录 {phase} 来自 {plugin_name}/{purpose}, record_id={record_id}")
 
         except Exception as e:
             logger.error(f"[LLMDebugger] record_llm_call 失败: {e}\n{traceback.format_exc()}")
@@ -456,38 +497,142 @@ button{width:100%;padding:0.75rem;background:#3b82f6;color:white;border:none;bor
             self._server_stopped.set()
 
     # ========== 事件监听 ==========
+    # ========== 事件监听（修改后：延迟记录以捕获最终请求） ==========
     @filter.on_llm_request()
     async def on_llm_request(self, event: AstrMessageEvent, req):
-        """监听LLM请求"""
+        """监听LLM请求 - 延迟记录以捕获最终请求内容"""
         if not self.db:
             return
+
+        # 关键改动：延迟执行记录，确保其他插件（如 MoreChatPlus）先修改完 req
+        asyncio.create_task(self._delayed_record_request(event, req))
+
+    async def _delayed_record_request(self, event: AstrMessageEvent, req, delay: float = 0.3):
+        """延迟记录请求，确保捕获被其他插件修改后的最终内容
+
+        Args:
+            delay: 延迟秒数，给其他插件留出修改时间（默认0.3秒）
+        """
         try:
-            conv_id = getattr(req, 'conversation_id', None) or getattr(req, 'session_id', None) or getattr(req, 'id', None)
+            # 等待一小段时间，让 MoreChatPlus 等插件完成 on_llm_request 处理
+            await asyncio.sleep(delay)
+
+            # 现在 req 已经被其他插件（如 MoreChatPlus）修改过了
+            await self._do_record_request(event, req)
+
+        except Exception as e:
+            err_msg = f"[LLMDebugger] 延迟记录请求失败: {e}"
+            logger.error(err_msg)
+            logger.error(traceback.format_exc())
+
+    async def _do_record_request(self, event: AstrMessageEvent, req):
+        """实际执行请求记录（从原 on_llm_request 提取的逻辑）"""
+        try:
+            # 获取会话ID，用于去重
+            conv_id = None
+            if hasattr(req, 'conversation_id') and req.conversation_id:
+                conv_id = req.conversation_id
+            elif hasattr(req, 'session_id') and req.session_id:
+                conv_id = req.session_id
+            elif hasattr(req, 'id') and req.id:
+                conv_id = req.id
+            else:
+                conv_id = str(hash(str(req)) % 10000000)
+
             cache_key = (conv_id, "request")
+
+            # 检查是否重复（1秒内相同ID视为重复）
             if cache_key in self._processed_ids:
-                logger.debug(f"[LLMDebugger] 跳过重复的请求记录: {conv_id}")
-                return
+                last_time = self._processed_ids[cache_key]
+                if time.time() - last_time < 1.0:
+                    logger.debug(f"[LLMDebugger] 跳过重复的请求记录: {conv_id}")
+                    return
 
-            prompt = getattr(req, 'prompt', '') or event.message_str
-            contexts = getattr(req, 'contexts', []) or (req.get_contexts() if hasattr(req, 'get_contexts') and callable(req.get_contexts) else [])
-            system_prompt = getattr(req, 'system_prompt', '') or (req.get_system_prompt() if hasattr(req, 'get_system_prompt') and callable(req.get_system_prompt) else '')
-            model = getattr(req, 'model', 'default')
-            image_urls = getattr(req, 'image_urls', []) or (req.get_image_urls() if hasattr(req, 'get_image_urls') and callable(req.get_image_urls) else [])
+            # ===== 获取Prompt（这时候已经被 MoreChatPlus 修改过了） =====
+            prompt = ""
+            if hasattr(req, 'prompt') and req.prompt:
+                prompt = req.prompt
+            elif hasattr(req, 'text') and req.text:
+                prompt = req.text
+            elif hasattr(req, 'content') and req.content:
+                prompt = req.content
+            elif hasattr(req, 'messages') and req.messages:
+                messages = req.messages
+                if messages and len(messages) > 0:
+                    last_msg = messages[-1]
+                    if isinstance(last_msg, dict):
+                        prompt = last_msg.get('content', '') or last_msg.get('text', '')
+                    elif hasattr(last_msg, 'content'):
+                        prompt = last_msg.content
+                    elif hasattr(last_msg, 'text'):
+                        prompt = last_msg.text
 
+            if not prompt and event:
+                prompt = event.message_str or ""
+
+            # ===== 获取Contexts =====
+            contexts = []
+            try:
+                if hasattr(req, 'contexts') and req.contexts:
+                    contexts = req.contexts
+                elif hasattr(req, 'get_contexts') and callable(getattr(req, 'get_contexts')):
+                    contexts = req.get_contexts()
+                elif hasattr(req, 'messages') and req.messages:
+                    msgs = req.messages
+                    if msgs and len(msgs) > 1:
+                        contexts = msgs[:-1]
+            except Exception as e:
+                logger.debug(f"[LLMDebugger] 获取contexts失败: {e}")
+
+            # ===== 获取System Prompt =====
+            system_prompt = ""
+            try:
+                if hasattr(req, 'system_prompt') and req.system_prompt:
+                    system_prompt = req.system_prompt
+                elif hasattr(req, 'get_system_prompt') and callable(getattr(req, 'get_system_prompt')):
+                    system_prompt = req.get_system_prompt()
+                elif hasattr(req, 'system_instruction') and req.system_instruction:
+                    system_prompt = req.system_instruction
+            except Exception as e:
+                logger.debug(f"[LLMDebugger] 获取system_prompt失败: {e}")
+
+            # ===== 获取Model =====
+            model = "default"
+            try:
+                if hasattr(req, 'model') and req.model:
+                    model = req.model
+                elif hasattr(req, 'get_model') and callable(getattr(req, 'get_model')):
+                    model = req.get_model()
+            except Exception as e:
+                logger.debug(f"[LLMDebugger] 获取model失败: {e}")
+
+            # ===== 获取Image URLs =====
+            image_urls = []
+            try:
+                if hasattr(req, 'image_urls') and req.image_urls:
+                    image_urls = req.image_urls
+                elif hasattr(req, 'get_image_urls') and callable(getattr(req, 'get_image_urls')):
+                    image_urls = req.get_image_urls()
+                elif hasattr(req, 'images') and req.images:
+                    image_urls = req.images
+            except Exception as e:
+                logger.debug(f"[LLMDebugger] 获取image_urls失败: {e}")
+
+            # 构建记录数据
             data = {
                 "timestamp": datetime.now().isoformat(),
                 "type": "request",
                 "conversation_id": conv_id,
                 "sender": {
-                    "id": event.get_sender_id(),
-                    "name": event.get_sender_name(),
-                    "group_id": getattr(event, 'get_group_id', lambda: None)() if hasattr(event, 'get_group_id') else None,
-                    "platform": event.get_platform_name()
+                    "id": event.get_sender_id() if event else "unknown",
+                    "name": event.get_sender_name() if event else "unknown",
+                    "group_id": getattr(event, 'get_group_id', lambda: None)() if event and hasattr(event, 'get_group_id') else None,
+                    "platform": event.get_platform_name() if event else "unknown"
                 },
                 "message": {
-                    "raw": event.message_str,
+                    "raw": event.message_str if event else prompt,
                     "formatted_prompt": prompt,
-                    "image_urls": self._make_serializable(image_urls)
+                    "image_urls": self._make_serializable(image_urls),
                 },
                 "llm_config": {
                     "model": model,
@@ -502,37 +647,99 @@ button{width:100%;padding:0.75rem;background:#3b82f6;color:white;border:none;bor
             safe_data["id"] = record_id
             await self._broadcast(safe_data)
             self._processed_ids[cache_key] = time.time()
-            logger.debug(f"[LLMDebugger] 已记录请求 {conv_id}")
-        except Exception as e:
-            logger.error(f"[LLMDebugger] 记录请求失败: {e}\n{traceback.format_exc()}")
 
+            logger.info(f"[LLMDebugger] 已记录最终请求: conv_id={conv_id}, model={model}, contexts={len(contexts)}, prompt_length={len(prompt)}")
+
+            if len(prompt) > 1000:
+                logger.info(f"[LLMDebugger] 检测到长 Prompt（可能已注入上下文）: {prompt[:100]}...")
+
+        except Exception as e:
+            err_msg = f"[LLMDebugger] 记录请求失败: {e}"
+            logger.error(err_msg)
+            logger.error(traceback.format_exc())
     @filter.on_llm_response()
     async def on_llm_response(self, event: AstrMessageEvent, resp):
-        """监听LLM响应"""
+        """监听LLM响应 - 增强版"""
         if not self.db:
             return
         try:
-            conv_id = getattr(resp, 'conversation_id', None) or getattr(resp, 'session_id', None) or getattr(resp, 'id', None)
+            # 获取会话ID
+            conv_id = None
+            if hasattr(resp, 'conversation_id') and resp.conversation_id:
+                conv_id = resp.conversation_id
+            elif hasattr(resp, 'session_id') and resp.session_id:
+                conv_id = resp.session_id
+            elif hasattr(resp, 'id') and resp.id:
+                conv_id = resp.id
+            else:
+                conv_id = str(hash(str(resp)) % 10000000)
+
             cache_key = (conv_id, "response")
+
+            # 检查重复
             if cache_key in self._processed_ids:
-                logger.debug(f"[LLMDebugger] 跳过重复的响应记录: {conv_id}")
-                return
+                last_time = self._processed_ids[cache_key]
+                if time.time() - last_time < 1.0:
+                    logger.debug(f"[LLMDebugger] 跳过重复的响应记录: {conv_id}")
+                    return
 
-            text = getattr(resp, 'completion_text', '') or getattr(resp, 'content', '') or getattr(resp, 'message', '') or getattr(resp, 'text', '') or (resp if isinstance(resp, str) else str(resp))
-            model = getattr(resp, 'model', None)
-            usage = getattr(resp, 'usage', None) or (resp.get_usage() if hasattr(resp, 'get_usage') and callable(resp.get_usage) else None)
-            raw = getattr(resp, 'raw_completion', None) or (resp.get_raw() if hasattr(resp, 'get_raw') and callable(resp.get_raw) else None)
+            # 获取响应文本
+            text = ""
+            try:
+                if hasattr(resp, 'completion_text') and resp.completion_text:
+                    text = resp.completion_text
+                elif hasattr(resp, 'content') and resp.content:
+                    text = resp.content
+                elif hasattr(resp, 'message') and resp.message:
+                    text = resp.message
+                elif hasattr(resp, 'text') and resp.text:
+                    text = resp.text
+                elif isinstance(resp, str):
+                    text = resp
+                else:
+                    text = str(resp)
+            except Exception as e:
+                text = str(resp)
+                logger.debug(f"[LLMDebugger] 获取响应文本失败: {e}")
 
-            if usage is not None:
-                usage = self._make_serializable(usage)
-            if raw is not None:
-                raw = self._make_serializable(raw)
+            # 获取模型信息
+            model = None
+            try:
+                if hasattr(resp, 'model') and resp.model:
+                    model = resp.model
+            except:
+                pass
+
+            # 获取usage
+            usage = None
+            try:
+                if hasattr(resp, 'usage') and resp.usage:
+                    usage = self._make_serializable(resp.usage)
+                elif hasattr(resp, 'get_usage') and callable(getattr(resp, 'get_usage')):
+                    usage = self._make_serializable(resp.get_usage())
+            except Exception as e:
+                logger.debug(f"[LLMDebugger] 获取usage失败: {e}")
+
+            # 获取原始响应
+            raw = None
+            try:
+                if hasattr(resp, 'raw_completion') and resp.raw_completion:
+                    raw = self._make_serializable(resp.raw_completion)
+                elif hasattr(resp, 'get_raw') and callable(getattr(resp, 'get_raw')):
+                    raw = self._make_serializable(resp.get_raw())
+                elif hasattr(resp, 'raw') and resp.raw:
+                    raw = self._make_serializable(resp.raw)
+            except Exception as e:
+                logger.debug(f"[LLMDebugger] 获取raw失败: {e}")
 
             data = {
                 "timestamp": datetime.now().isoformat(),
                 "type": "response",
                 "conversation_id": conv_id,
-                "sender": {"id": event.get_sender_id(), "name": event.get_sender_name()},
+                "sender": {
+                    "id": event.get_sender_id() if event else "unknown", 
+                    "name": event.get_sender_name() if event else "unknown"
+                },
                 "response": {
                     "text": text,
                     "model": model,
@@ -546,7 +753,9 @@ button{width:100%;padding:0.75rem;background:#3b82f6;color:white;border:none;bor
             safe_data["id"] = record_id
             await self._broadcast(safe_data)
             self._processed_ids[cache_key] = time.time()
-            logger.debug(f"[LLMDebugger] 已记录响应 {conv_id}")
+
+            logger.info(f"[LLMDebugger] 已记录响应: conv_id={conv_id}, model={model}, text_length={len(text)}")
+
         except Exception as e:
             logger.error(f"[LLMDebugger] 记录响应失败: {e}\n{traceback.format_exc()}")
 

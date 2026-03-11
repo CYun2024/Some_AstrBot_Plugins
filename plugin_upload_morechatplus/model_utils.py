@@ -87,7 +87,7 @@ async def call_model_with_fallback(
                         "phase": "request",
                         "provider_id": actual_id,
                         "model": model_name,
-                        "prompt": prompt[:500] + "..." if len(prompt) > 500 else prompt,
+                        "prompt": prompt,  # 移除截断，上报完整prompt
                         "source": {"plugin": "morechatplus", "purpose": purpose},
                         "conversation_id": conv_id,
                         "timestamp": time.time(),
@@ -117,7 +117,7 @@ async def call_model_with_fallback(
                         "phase": "response",
                         "provider_id": actual_id,
                         "model": model_name,
-                        "response": text[:200] + "..." if len(text) > 200 else text,
+                        "response": text,  # 移除截断，上报完整response
                         "usage": usage,
                         "source": {"plugin": "morechatplus", "purpose": purpose},
                         "conversation_id": conv_id,

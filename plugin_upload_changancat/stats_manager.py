@@ -26,10 +26,18 @@ class StatsManager:
         self.db = db
         self.config = config
         self._morechatplus_db_path = None
+        self._morechatplus_image_cache_db_path = None  # 新增：图片缓存数据库路径
 
     def set_morechatplus_db_path(self, path: str):
-        """设置morechatplus数据库路径"""
+        """设置morechatplus数据库路径（聊天数据库）"""
         self._morechatplus_db_path = path
+        # 自动推断图片缓存数据库路径（同级目录下的 image_cache.db）
+        if path:
+            from pathlib import Path
+            p = Path(path)
+            self._morechatplus_image_cache_db_path = str(p.parent / "image_cache.db")
+            logger.info(f"[ChanganCat] 聊天数据库: {path}")
+            logger.info(f"[ChanganCat] 图片缓存数据库: {self._morechatplus_image_cache_db_path}")
 
     def _clean_content(self, content: str) -> str:
         """清理内容中的标签（引用、at、image）"""
@@ -162,6 +170,36 @@ class StatsManager:
             logger.error(f"[ChanganCat] 从morechatplus获取消息失败: {e}")
             return []
 
+    def _get_image_local_path(self, image_id: str) -> Optional[str]:
+        """从morechatplus的image_cache.db获取本地存储路径
+
+        Args:
+            image_id: 图片ID（如 img_c72430bdf422415b）
+
+        Returns:
+            本地文件路径，如果不存在返回None
+        """
+        if not self._morechatplus_image_cache_db_path:
+            return None
+
+        # 检查数据库文件是否存在
+        from pathlib import Path
+        if not Path(self._morechatplus_image_cache_db_path).exists():
+            logger.warning(f"[ChanganCat] 图片缓存数据库不存在: {self._morechatplus_image_cache_db_path}")
+            return None
+
+        try:
+            with sqlite3.connect(self._morechatplus_image_cache_db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                row = conn.execute(
+                    "SELECT local_path FROM image_cache WHERE image_id = ?",
+                    (image_id,)
+                ).fetchone()
+                return row["local_path"] if row else None
+        except Exception as e:
+            logger.error(f"[ChanganCat] 获取图片本地路径失败: {e}")
+            return None
+
     def get_yesterday_stats(self, origin: str) -> Dict:
         """获取昨日统计（从morechatplus读取）"""
         yesterday_start = self.get_day_start_timestamp(1)
@@ -171,7 +209,7 @@ class StatsManager:
 
         # 统计哈气（现在可能一条消息包含多次哈气）
         haqi_count = {}
-        # 统计表情包: {image_id: {count, url}}
+        # 统计表情包: {image_id: {count, url, local_path}}
         meme_stats = {}
 
         for msg in messages:
@@ -193,8 +231,18 @@ class StatsManager:
                 # 获取对应序号的URL（idx从1开始）
                 url = image_urls[idx - 1] if 0 < idx <= len(image_urls) else ""
 
+                # 获取本地缓存路径（关键修改）
+                local_path = self._get_image_local_path(img_id)
+
                 if img_id not in meme_stats:
-                    meme_stats[img_id] = {"count": 0, "url": url}
+                    meme_stats[img_id] = {"count": 0, "url": url, "local_path": local_path}
+                else:
+                    # 修复：如果之前记录的url或local_path为空，但当前有有效的，则更新
+                    if url and not meme_stats[img_id]["url"]:
+                        meme_stats[img_id]["url"] = url
+                    if local_path and not meme_stats[img_id].get("local_path"):
+                        meme_stats[img_id]["local_path"] = local_path
+
                 meme_stats[img_id]["count"] += 1
 
         # 排序哈气榜
@@ -205,7 +253,7 @@ class StatsManager:
 
         # 排序表情包榜
         top_memes = [
-            {"image_id": img_id, "use_count": info["count"], "image_url": info["url"]}
+            {"image_id": img_id, "use_count": info["count"], "image_url": info["url"], "local_path": info.get("local_path", "")}
             for img_id, info in sorted(meme_stats.items(), key=lambda x: -x[1]["count"])
         ][:self.config.stats.top_meme_count]
 
@@ -221,7 +269,7 @@ class StatsManager:
 
         messages = self._get_messages_from_morechatplus(origin, today_start)
 
-        # 统计表情包: {image_id: {count, url}}
+        # 统计表情包: {image_id: {count, url, local_path}}
         meme_stats = {}
 
         for msg in messages:
@@ -232,15 +280,29 @@ class StatsManager:
             for idx, img_id in memes:
                 url = image_urls[idx - 1] if 0 < idx <= len(image_urls) else ""
 
+                # 获取本地缓存路径（关键修改）
+                local_path = self._get_image_local_path(img_id)
+
                 if img_id not in meme_stats:
-                    meme_stats[img_id] = {"count": 0, "url": url}
+                    meme_stats[img_id] = {"count": 0, "url": url, "local_path": local_path}
+                else:
+                    # 修复：如果之前记录的url或local_path为空，但当前有有效的，则更新
+                    if url and not meme_stats[img_id]["url"]:
+                        meme_stats[img_id]["url"] = url
+                    if local_path and not meme_stats[img_id].get("local_path"):
+                        meme_stats[img_id]["local_path"] = local_path
+
                 meme_stats[img_id]["count"] += 1
 
         # 按发送次数排序
         sorted_memes = [
-            {"image_id": img_id, "use_count": info["count"], "image_url": info["url"]}
+            {"image_id": img_id, "use_count": info["count"], "image_url": info["url"], "local_path": info.get("local_path", "")}
             for img_id, info in sorted(meme_stats.items(), key=lambda x: -x[1]["count"])
         ]
+
+        # 调试日志：检查有多少个表情包有本地路径
+        with_local = sum(1 for m in sorted_memes if m.get("local_path"))
+        logger.debug(f"[ChanganCat] 今日表情包统计: 共{len(sorted_memes)}个，{with_local}个有本地路径")
 
         return sorted_memes
 
@@ -345,10 +407,13 @@ class StatsManager:
             lines.append("🖼️ 今日表情包榜：")
             for i, meme in enumerate(stats["top_memes"][:3], 1):
                 lines.append(f"{i}. 使用次数：{meme['use_count']}")
-                if meme["image_url"]:
+                # 优先使用本地路径，如果没有则使用URL
+                img_path = meme.get("local_path") or meme.get("image_url")
+                if img_path:
                     meme_images.append({
-                        "url": meme["image_url"],
-                        "count": meme["use_count"]
+                        "path": img_path,
+                        "count": meme["use_count"],
+                        "is_local": bool(meme.get("local_path"))
                     })
         else:
             lines.append("🖼️ 今日表情包榜：暂无数据")
@@ -410,14 +475,27 @@ class StatsManager:
 
         # 准备图片列表
         meme_images = []
+        valid_count = 0
 
         for i, meme in enumerate(today_stats[:5], 1):
-            lines.append(f"{i}. 发送次数：{meme['use_count']} 次")
-            if meme["image_url"]:
+            # 优先使用本地路径，如果没有则使用URL
+            img_path = meme.get("local_path") or meme.get("image_url")
+            if img_path:
+                valid_count += 1
+                lines.append(f"{i}. 发送次数：{meme['use_count']} 次")
                 meme_images.append({
-                    "url": meme["image_url"],
-                    "count": meme["use_count"]
+                    "path": img_path,
+                    "count": meme["use_count"],
+                    "is_local": bool(meme.get("local_path"))
                 })
+            else:
+                # 如果没有路径，显示ID的一部分用于调试
+                img_id_short = meme["image_id"][:8] if len(meme["image_id"]) > 8 else meme["image_id"]
+                lines.append(f"{i}. 发送次数：{meme['use_count']} 次 (ID:{img_id_short}...无图片)")
+                logger.debug(f"[ChanganCat] 表情包无路径: {meme['image_id']}")
+
+        if valid_count == 0 and today_stats:
+            lines.append("\n⚠️ 注意：检测到表情包记录但无法获取图片，请检查morechatplus图片缓存配置")
 
         return "\n".join(lines), meme_images
 

@@ -10,6 +10,8 @@
 import asyncio
 import hashlib
 import re
+import aiohttp
+import os
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Optional
@@ -48,6 +50,10 @@ class ChanganCatPlugin(star.Star):
         )
         self.db = DatabaseManager(plugin_data_dir / "changancat.db")
 
+        # 临时下载目录（用于网络图片）
+        self.temp_dir = plugin_data_dir / "temp_images"
+        self.temp_dir.mkdir(parents=True, exist_ok=True)
+
         # 初始化管理器
         self.stats_manager = StatsManager(self.db, self.config)
         self.repeat_manager = RepeatManager(self.db, self.config)
@@ -77,6 +83,40 @@ class ChanganCatPlugin(star.Star):
                 logger.warning(f"[ChanganCat] morechatplus数据库不存在，功能将受限")
         except Exception as e:
             logger.warning(f"[ChanganCat] 连接morechatplus数据库失败: {e}")
+
+    async def _download_image(self, url: str) -> Optional[str]:
+        """下载网络图片到本地临时目录
+
+        Returns:
+            本地文件路径，下载失败返回None
+        """
+        if not url or not url.startswith("http"):
+            return None
+
+        # 生成临时文件名（基于URL的MD5）
+        url_hash = hashlib.md5(url.encode()).hexdigest()
+        ext = ".gif" if ".gif" in url.lower() else ".jpg"
+        temp_path = self.temp_dir / f"{url_hash}{ext}"
+
+        # 如果已存在，直接返回
+        if temp_path.exists():
+            return str(temp_path)
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as response:
+                    if response.status == 200:
+                        content = await response.read()
+                        with open(temp_path, "wb") as f:
+                            f.write(content)
+                        logger.debug(f"[ChanganCat] 下载图片成功: {url} -> {temp_path}")
+                        return str(temp_path)
+                    else:
+                        logger.warning(f"[ChanganCat] 下载图片失败，状态码: {response.status}, url: {url}")
+        except Exception as e:
+            logger.error(f"[ChanganCat] 下载图片异常: {e}, url: {url}")
+
+        return None
 
     @filter.on_astrbot_loaded()
     async def on_astrbot_loaded(self) -> None:
@@ -132,9 +172,25 @@ class ChanganCatPlugin(star.Star):
                 # 每天清理一次
                 await asyncio.sleep(86400)
                 self.stats_manager.cleanup_old_stats()
+                # 清理临时图片（保留最近7天）
+                self._cleanup_temp_images()
             except Exception as e:
                 logger.error(f"[ChanganCat] 清理任务出错: {e}")
                 await asyncio.sleep(3600)
+
+    def _cleanup_temp_images(self):
+        """清理临时下载的图片"""
+        try:
+            cutoff = datetime.now() - timedelta(days=7)
+            count = 0
+            for f in self.temp_dir.iterdir():
+                if f.is_file() and datetime.fromtimestamp(f.stat().st_mtime) < cutoff:
+                    f.unlink()
+                    count += 1
+            if count > 0:
+                logger.info(f"[ChanganCat] 清理了 {count} 个临时图片文件")
+        except Exception as e:
+            logger.error(f"[ChanganCat] 清理临时图片失败: {e}")
 
     async def _send_daily_reports(self):
         """发送每日报告到配置的群（支持指定群号）"""
@@ -171,8 +227,8 @@ class ChanganCatPlugin(star.Star):
         # 生成报告（从morechatplus获取数据）
         report_text, meme_images = self.stats_manager.format_daily_report(origin, group_name)
 
-        # 发送消息
-        await self._send_message_to_origin(origin, report_text, meme_images)
+        # 发送消息（修复：使用交替模式）
+        await self._send_message_to_origin_alternate(origin, report_text, meme_images)
 
         logger.info(f"[ChanganCat] 已发送每日报告到 {origin}")
 
@@ -217,21 +273,104 @@ class ChanganCatPlugin(star.Star):
 
         return origin
 
-    async def _send_message_to_origin(self, origin: str, text: str, images: List[dict] = None):
-        """发送消息到指定origin"""
+    async def _send_message_to_origin_alternate(self, origin: str, text: str, images: List[dict] = None):
+        """发送消息到指定origin（修复：文本和图片交替显示）
+
+        格式：
+        1. 发送次数：8 次
+        [图片1]
+        2. 发送次数：5 次
+        [图片2]
+        """
         try:
-            # 构建消息链
+            chain = []
+
+            # 分割文本为多行
+            lines = text.split("\n")
+            image_idx = 0
+
+            for line in lines:
+                # 添加当前行文本
+                if line.strip():
+                    chain.append(Plain(line + "\n"))
+                else:
+                    chain.append(Plain("\n"))
+
+                # 检查这一行是否是排名行（如 "1. 发送次数：8 次"）
+                if re.match(r'^\d+\.\s*发送次数：\d+', line) and images and image_idx < len(images):
+                    img_info = images[image_idx]
+                    img_path = img_info.get("path")
+                    is_local = img_info.get("is_local", False)
+
+                    if img_path:
+                        # 如果是网络URL，先下载
+                        if not is_local and img_path.startswith("http"):
+                            local_path = await self._download_image(img_path)
+                            if local_path:
+                                img_path = local_path
+                                is_local = True
+                            else:
+                                image_idx += 1
+                                continue
+
+                        # 检查文件是否存在
+                        if Path(img_path).exists():
+                            try:
+                                # 修复：添加 sub_type=1 让图片以表情模式显示（较小尺寸）
+                                # 注意：不同版本的AstrBot可能参数名不同，如果无效请尝试移除 sub_type 参数
+                                chain.append(Image(file=img_path, sub_type=1))
+                                chain.append(Plain("\n"))  # 图片后换行
+                                image_idx += 1
+                            except Exception as img_e:
+                                # 如果 sub_type 参数不支持，尝试不使用
+                                try:
+                                    chain.append(Image(file=img_path))
+                                    chain.append(Plain("\n"))
+                                    image_idx += 1
+                                except Exception as e2:
+                                    logger.error(f"[ChanganCat] 创建图片失败: {e2}")
+                                    image_idx += 1
+                        else:
+                            image_idx += 1
+
+            # 使用 SimpleMessage 包装
+            if chain:
+                msg = SimpleMessage(chain)
+                await self.context.send_message(origin, msg)
+
+        except Exception as e:
+            logger.error(f"[ChanganCat] 发送消息失败: {e}")
+            # 回退到简单发送
+            await self._send_message_to_origin(origin, text, images)
+
+    async def _send_message_to_origin(self, origin: str, text: str, images: List[dict] = None):
+        """发送消息到指定origin（备用方法）"""
+        try:
             chain = []
             chain.append(Plain(text))
 
-            # 添加表情包图片
             if images:
-                for img_info in images[:3]:  # 最多3张
-                    if img_info.get("url"):
-                        chain.append(Plain(f"\n\n【表情包TOP{img_info.get('count', '?')}】\n"))
-                        chain.append(Image(url=img_info["url"]))
+                for img_info in images[:3]:
+                    img_path = img_info.get("path")
+                    is_local = img_info.get("is_local", False)
 
-            # 使用 SimpleMessage 包装
+                    if not img_path:
+                        continue
+
+                    if not is_local and img_path.startswith("http"):
+                        local_path = await self._download_image(img_path)
+                        if local_path:
+                            img_path = local_path
+                        else:
+                            continue
+
+                    if Path(img_path).exists():
+                        chain.append(Plain("\n"))
+                        try:
+                            chain.append(Image(file=img_path, sub_type=1))
+                        except:
+                            chain.append(Image(file=img_path))
+
             msg = SimpleMessage(chain)
             await self.context.send_message(origin, msg)
 
@@ -305,7 +444,7 @@ class ChanganCatPlugin(star.Star):
             return None
 
     async def _do_repeat(self, event: AstrMessageEvent, repeat_info: dict):
-        """执行复读"""
+        """执行复读（修复：网络图片先下载，使用sub_type=1）"""
         try:
             content = repeat_info["content"]
             image_urls = repeat_info.get("image_urls", [])
@@ -318,8 +457,34 @@ class ChanganCatPlugin(star.Star):
             if is_meme and image_urls:
                 # 如果是表情包，发送图片
                 for url in image_urls[:3]:  # 最多3张
-                    if url:
-                        chain.append(Image(url=url))
+                    if not url or not isinstance(url, str):
+                        continue
+
+                    try:
+                        # 检查是否是本地路径（以/或Windows盘符开头）
+                        is_local = url.startswith("/") or (len(url) > 1 and url[1] == ":")
+
+                        if is_local:
+                            if Path(url).exists():
+                                try:
+                                    chain.append(Image(file=url, sub_type=1))
+                                except:
+                                    chain.append(Image(file=url))
+                            else:
+                                logger.warning(f"[ChanganCat] 复读图片不存在: {url}")
+                        else:
+                            # 网络URL，先下载
+                            local_path = await self._download_image(url)
+                            if local_path:
+                                try:
+                                    chain.append(Image(file=local_path, sub_type=1))
+                                except:
+                                    chain.append(Image(file=local_path))
+                            else:
+                                logger.warning(f"[ChanganCat] 复读下载图片失败: {url}")
+                    except Exception as img_e:
+                        logger.error(f"[ChanganCat] 复读图片失败: {img_e}")
+                        continue
             else:
                 # 发送文本
                 # 清理内容中的at标签和图片标记
@@ -350,6 +515,7 @@ class ChanganCatPlugin(star.Star):
 
         if event.get_message_type() != MessageType.GROUP_MESSAGE:
             await self._safe_send(event, "该命令只能在群聊中使用")
+            event.stop_event()
             return
 
         origin = event.unified_msg_origin
@@ -360,18 +526,21 @@ class ChanganCatPlugin(star.Star):
             response = self.stats_manager.format_haqi_command_response(origin, group_name)
             await self._safe_send(event, response)
             logger.info(f"[ChanganCat] 已响应/哈气榜命令")
+            event.stop_event()
         except Exception as e:
             logger.error(f"[ChanganCat] 哈气榜命令出错: {e}")
             await self._safe_send(event, f"获取哈气榜失败: {e}")
+            event.stop_event()
 
     @filter.command("表情包榜")
     async def cmd_meme_ranking(self, event: AstrMessageEvent):
-        """表情包榜命令（从morechatplus读取今日数据）"""
+        """表情包榜命令（从morechatplus读取今日数据，交替显示）"""
         if not self.config.core.enable:
             return
 
         if event.get_message_type() != MessageType.GROUP_MESSAGE:
             await self._safe_send(event, "该命令只能在群聊中使用")
+            event.stop_event()
             return
 
         origin = event.unified_msg_origin
@@ -381,12 +550,17 @@ class ChanganCatPlugin(star.Star):
             # 生成表情包榜（从morechatplus读取今日数据）
             response, meme_images = self.stats_manager.format_meme_command_response(origin, group_name)
 
-            # 发送文本+图片
-            await self._safe_send_with_images(event, response, meme_images)
+            logger.debug(f"[ChanganCat] 表情包榜: {len(meme_images)}张图片待发送")
+
+            # 修复：使用交替发送模式
+            await self._send_message_to_origin_alternate(event.unified_msg_origin, response, meme_images)
+
             logger.info(f"[ChanganCat] 已响应/表情包榜命令")
+            event.stop_event()
         except Exception as e:
             logger.error(f"[ChanganCat] 表情包榜命令出错: {e}")
             await self._safe_send(event, f"获取表情包榜失败: {e}")
+            event.stop_event()
 
     @filter.command("changancat_stats")
     async def cmd_stats(self, event: AstrMessageEvent):
@@ -398,9 +572,11 @@ class ChanganCatPlugin(star.Star):
             # 获取统计信息
             stats_text = self._get_stats_text()
             await self._safe_send(event, stats_text)
+            event.stop_event()
         except Exception as e:
             logger.error(f"[ChanganCat] 获取统计信息失败: {e}")
             await self._safe_send(event, f"获取统计信息失败: {e}")
+            event.stop_event()
 
     async def _safe_send(self, event: AstrMessageEvent, text: str):
         """安全发送文本消息"""
@@ -412,27 +588,6 @@ class ChanganCatPlugin(star.Star):
             await self.context.send_message(origin, msg)
         except Exception as e:
             logger.error(f"[ChanganCat] 发送失败: {e}")
-
-    async def _safe_send_with_images(self, event: AstrMessageEvent, text: str, images: List[dict]):
-        """安全发送带图片的消息"""
-        origin = event.unified_msg_origin
-
-        try:
-            # 构建消息链
-            chain = [Plain(text)]
-
-            if images:
-                for i, img_info in enumerate(images[:5], 1):  # 最多5张
-                    if img_info.get("url"):
-                        chain.append(Plain(f"\n\n第{i}名 - 发送{img_info.get('count', '?')}次\n"))
-                        chain.append(Image(url=img_info["url"]))
-
-            msg = SimpleMessage(chain)
-            await self.context.send_message(origin, msg)
-        except Exception as e:
-            logger.error(f"[ChanganCat] 发送带图片消息失败: {e}")
-            # 回退到纯文本
-            await self._safe_send(event, text)
 
     def _get_stats_text(self) -> str:
         """获取插件统计信息"""
