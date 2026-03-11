@@ -83,6 +83,15 @@
                 "hint": "每日表情包榜显示前N个",
                 "type": "int",
                 "default": 3
+            },
+            "haqi_meme_ids": {
+                "description": "哈气表情包ID列表",
+                "hint": "添加表情包ID后，发送该表情包会被计入哈气统计。只需输入ID的后半部分（如：0496dc941d1088bd），系统会自动添加img_前缀。可在表情包榜中查看完整ID",
+                "type": "list",
+                "items": {
+                    "type": "string"
+                },
+                "default": []
             }
         }
     },

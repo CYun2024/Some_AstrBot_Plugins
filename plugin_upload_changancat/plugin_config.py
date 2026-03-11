@@ -72,6 +72,7 @@ class StatsSettings:
     enable_meme_stats: bool = True
     enable_haqi_stats: bool = True
     top_meme_count: int = 3
+    haqi_meme_ids: List[str] = field(default_factory=list)  # 哈气表情包ID列表，这些表情包会被计为哈气
 
 
 @dataclass(frozen=True)
@@ -117,6 +118,7 @@ def parse_plugin_config(raw: dict[str, Any] | None) -> PluginConfig:
         enable_meme_stats=_to_bool(stats_raw.get("enable_meme_stats"), True),
         enable_haqi_stats=_to_bool(stats_raw.get("enable_haqi_stats"), True),
         top_meme_count=_to_int(stats_raw.get("top_meme_count"), 3, 1, 10),
+        haqi_meme_ids=stats_raw.get("haqi_meme_ids") or [],  # 哈气表情包ID列表（AstrBot list类型）
     )
 
     # 数据库设置
