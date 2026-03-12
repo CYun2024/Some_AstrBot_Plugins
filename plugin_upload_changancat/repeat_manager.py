@@ -144,7 +144,7 @@ class RepeatManager:
                 # 记录复读
                 self.db.record_repeat(origin, content, msg["message_id"])
 
-                # 判断是否是表情包
+                # 判断是否是表情包（检查是否有[image:x:xxx]标记）
                 is_meme = self.MEME_PATTERN.search(content) is not None
 
                 logger.info(f"[ChanganCat] 触发复读: {content[:50]}...")
@@ -161,7 +161,7 @@ class RepeatManager:
     def check_repeat_from_morechatplus(self, origin: str) -> Optional[Dict]:
         """从morechatplus数据库检查最近消息是否需要复读
 
-        查询最近10条消息，如果有5条相同则复读
+        查询最近 check_message_count 条消息，如果有 repeat_threshold 条相同则复读
         """
         if not self.config.repeat.enable or not self._morechatplus_db_path:
             return None

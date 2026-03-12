@@ -10,6 +10,12 @@
                 "type": "bool",
                 "default": true
             },
+            "enable_daily_report": {
+                "description": "启用每日定时播报",
+                "hint": "开启后会在指定时间自动发送昨日统计报告",
+                "type": "bool",
+                "default": true
+            },
             "bot_qq_id": {
                 "description": "Bot的QQ号",
                 "hint": "用于识别bot自己的消息，避免复读自己",

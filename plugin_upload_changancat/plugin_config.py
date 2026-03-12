@@ -52,10 +52,11 @@ def _parse_list(value: Any) -> List[str]:
 class CoreSettings:
     """核心设置"""
     enable: bool = True
+    enable_daily_report: bool = True  # 新增：每日播报开关
     bot_qq_id: str = ""
     daily_report_hour: int = 0
     daily_report_minute: int = 5
-    target_groups: List[str] = field(default_factory=list)  # 新增：指定发送每日报告的群号列表
+    target_groups: List[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -72,7 +73,7 @@ class StatsSettings:
     enable_meme_stats: bool = True
     enable_haqi_stats: bool = True
     top_meme_count: int = 3
-    haqi_meme_ids: List[str] = field(default_factory=list)  # 哈气表情包ID列表，这些表情包会被计为哈气
+    haqi_meme_ids: List[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -98,10 +99,11 @@ def parse_plugin_config(raw: dict[str, Any] | None) -> PluginConfig:
     core_raw = raw.get("core_settings", {})
     core = CoreSettings(
         enable=_to_bool(core_raw.get("enable"), True),
+        enable_daily_report=_to_bool(core_raw.get("enable_daily_report"), True),  # 新增
         bot_qq_id=_to_str(core_raw.get("bot_qq_id"), ""),
         daily_report_hour=_to_int(core_raw.get("daily_report_hour"), 0, 0, 23),
         daily_report_minute=_to_int(core_raw.get("daily_report_minute"), 5, 0, 59),
-        target_groups=_parse_list(core_raw.get("target_groups", "")),  # 新增：解析群号列表
+        target_groups=_parse_list(core_raw.get("target_groups", "")),
     )
 
     # 复读设置
@@ -118,7 +120,7 @@ def parse_plugin_config(raw: dict[str, Any] | None) -> PluginConfig:
         enable_meme_stats=_to_bool(stats_raw.get("enable_meme_stats"), True),
         enable_haqi_stats=_to_bool(stats_raw.get("enable_haqi_stats"), True),
         top_meme_count=_to_int(stats_raw.get("top_meme_count"), 3, 1, 10),
-        haqi_meme_ids=stats_raw.get("haqi_meme_ids") or [],  # 哈气表情包ID列表（AstrBot list类型）
+        haqi_meme_ids=stats_raw.get("haqi_meme_ids") or [],
     )
 
     # 数据库设置

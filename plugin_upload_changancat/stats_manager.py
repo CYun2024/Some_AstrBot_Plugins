@@ -510,8 +510,8 @@ class StatsManager:
             lines.append("今日暂无表情包数据~")
             return "\n".join(lines), []
 
-        lines.append(f"今日共发送 {len(today_stats)} 种表情包，以下是发送次数TOP {min(5, len(today_stats))}：")
-        lines.append("")
+        lines.append(f"今日共发送 {len(today_stats)} 种表情包/图片，以下是发送次数TOP {min(5, len(today_stats))}：")
+        lines.append("\n")
 
         meme_images = []
         valid_count = 0
