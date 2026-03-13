@@ -6,6 +6,7 @@
 - 每日定时统计报告（支持配置指定群号，带开关）
 - 复读功能（修复表情包复读，从morechatplus读取历史消息）
 - 个人哈气详情查询（支持图片渲染）
+- 哈气周榜（按天分组显示最近7天统计）
 """
 
 import asyncio
@@ -70,13 +71,20 @@ class ChanganCatPlugin(star.Star):
         # 连接morechatplus数据库
         self._init_morechatplus_connection()
 
-        # 群名缓存
+        # 群名缓存 {内部ID: 群名}
         self._group_name_cache: dict = {}
+        # 真实origin缓存 {内部ID: 真实origin}，用于日报发送
+        self._real_origin_cache: dict = {}
 
         # 字体缓存
         self._font_cache = {}
 
-        logger.info("[ChanganCat] 插件初始化完成")
+        # 任务引用和状态标志
+        self._daily_report_task_ref: Optional[asyncio.Task] = None
+        self._cleanup_task_ref: Optional[asyncio.Task] = None
+        self._tasks_started: bool = False
+
+        logger.info("[ChanganCat] 插件初始化完成，等待第一条消息启动后台任务...")
 
     def _init_morechatplus_connection(self):
         """初始化与morechatplus的连接"""
@@ -101,18 +109,14 @@ class ChanganCatPlugin(star.Star):
         if size in self._font_cache:
             return self._font_cache[size]
 
-        # 常见中文字体路径（按优先级）
         font_paths = [
-            # Linux
             "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
             "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
             "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-            # Windows
             "C:/Windows/Fonts/simhei.ttf",
             "C:/Windows/Fonts/simsun.ttc",
             "C:/Windows/Fonts/msyh.ttc",
-            # macOS
             "/System/Library/Fonts/PingFang.ttc",
             "/System/Library/Fonts/STHeiti Light.ttc",
             "/Library/Fonts/Arial Unicode.ttf",
@@ -123,13 +127,11 @@ class ChanganCatPlugin(star.Star):
             try:
                 if os.path.exists(font_path):
                     font = ImageFont.truetype(font_path, size)
-                    logger.debug(f"[ChanganCat] 使用字体: {font_path}")
                     break
             except:
                 continue
 
         if font is None:
-            # 使用默认字体（可能不支持中文）
             font = ImageFont.load_default()
             logger.warning("[ChanganCat] 未找到中文字体，使用默认字体")
 
@@ -288,65 +290,83 @@ class ChanganCatPlugin(star.Star):
 
         return None
 
-    @filter.on_astrbot_loaded()
-    async def on_astrbot_loaded(self) -> None:
-        """AstrBot加载完成时初始化"""
-        if self.config.core.enable:
-            # 只在启用每日播报时启动任务
-            if self.config.core.enable_daily_report:
-                asyncio.create_task(self._daily_report_task())
-                logger.info("[ChanganCat] 每日播报任务已启动")
-            else:
-                logger.info("[ChanganCat] 每日播报任务已禁用")
+    def _start_background_tasks(self):
+        """启动后台定时任务（懒加载）"""
+        if self._tasks_started:
+            return
 
-            asyncio.create_task(self._cleanup_task())
+        self._tasks_started = True
+        logger.info("[ChanganCat] 正在启动后台定时任务...")
 
-            target_groups = self.config.core.target_groups
-            groups_info = f"群号: {', '.join(target_groups)}" if target_groups else "群号: 未配置"
+        if self.config.core.enable and self.config.core.enable_daily_report:
+            try:
+                self._daily_report_task_ref = asyncio.create_task(
+                    self._daily_report_task(), 
+                    name="ChanganCat_DailyReport"
+                )
+                logger.info("[ChanganCat] 每日报告任务已启动")
+            except Exception as e:
+                logger.error(f"[ChanganCat] 启动每日报告任务失败: {e}")
 
-            logger.info(
-                f"[ChanganCat] 插件已启用 | {groups_info} | "
-                f"复读={'开启' if self.config.repeat.enable else '关闭'} | "
-                f"统计={'开启' if self.config.stats.enable_haqi_stats or self.config.stats.enable_meme_stats else '关闭'}"
+        try:
+            self._cleanup_task_ref = asyncio.create_task(
+                self._cleanup_task(), 
+                name="ChanganCat_Cleanup"
             )
-        else:
-            logger.info("[ChanganCat] 插件已禁用")
+            logger.info("[ChanganCat] 清理任务已启动")
+        except Exception as e:
+            logger.error(f"[ChanganCat] 启动清理任务失败: {e}")
 
     async def _daily_report_task(self):
         """每日报告定时任务"""
+        logger.info("[ChanganCat] 每日报告任务进入主循环")
+
+        await asyncio.sleep(30)
+
         while True:
             try:
                 now = datetime.now()
                 target_hour = self.config.core.daily_report_hour
                 target_minute = self.config.core.daily_report_minute
 
-                if now.hour < target_hour or (now.hour == target_hour and now.minute < target_minute):
-                    next_report = now.replace(hour=target_hour, minute=target_minute, second=0, microsecond=0)
-                else:
-                    next_report = (now + timedelta(days=1)).replace(
-                        hour=target_hour, minute=target_minute, second=0, microsecond=0
-                    )
+                target_time = now.replace(hour=target_hour, minute=target_minute, second=0, microsecond=0)
+                if now >= target_time:
+                    target_time = target_time + timedelta(days=1)
 
-                wait_seconds = (next_report - now).total_seconds()
-                logger.info(f"[ChanganCat] 下次每日报告: {next_report}, 等待 {wait_seconds:.0f} 秒")
+                wait_seconds = (target_time - now).total_seconds()
+                logger.info(f"[ChanganCat] 下次报告时间: {target_time.strftime('%Y-%m-%d %H:%M:%S')} (等待 {wait_seconds:.0f} 秒)")
 
                 await asyncio.sleep(wait_seconds)
 
-                # 再次检查是否仍然启用
-                if self.config.core.enable_daily_report:
-                    await self._send_daily_reports()
+                if not self.config.core.enable or not self.config.core.enable_daily_report:
+                    logger.info("[ChanganCat] 配置已禁用，跳过本次发送")
+                    await asyncio.sleep(60)
+                    continue
 
+                logger.info("[ChanganCat] 开始发送每日哈气榜...")
+                await self._send_daily_reports()
+                logger.info("[ChanganCat] 每日哈气榜发送完成")
+
+                await asyncio.sleep(60)
+
+            except asyncio.CancelledError:
+                logger.info("[ChanganCat] 每日报告任务被取消")
+                break
             except Exception as e:
-                logger.error(f"[ChanganCat] 每日报告任务出错: {e}")
-                await asyncio.sleep(3600)
+                logger.error(f"[ChanganCat] 每日报告任务出错: {e}", exc_info=True)
+                await asyncio.sleep(300)
 
     async def _cleanup_task(self):
         """定时清理任务"""
         while True:
             try:
                 await asyncio.sleep(86400)
+                if not self.config.core.enable:
+                    break
                 self.stats_manager.cleanup_old_stats()
                 self._cleanup_temp_images()
+            except asyncio.CancelledError:
+                break
             except Exception as e:
                 logger.error(f"[ChanganCat] 清理任务出错: {e}")
                 await asyncio.sleep(3600)
@@ -365,8 +385,38 @@ class ChanganCatPlugin(star.Star):
         except Exception as e:
             logger.error(f"[ChanganCat] 清理临时图片失败: {e}")
 
+    def _extract_internal_id(self, origin: str) -> str:
+        """从真实origin提取内部ID (qq_group_XXX)，用于缓存"""
+        match = re.search(r'(\d+)$', origin)
+        if match:
+            group_id = match.group(1)
+            return f"qq_group_{group_id}"
+        return origin
+
+    def _get_real_origin(self, internal_id: str) -> Optional[str]:
+        """从内部ID获取缓存的真实origin（用于发送消息）"""
+        return self._real_origin_cache.get(internal_id)
+
+    async def _send_text_to_origin(self, internal_id: str, text: str):
+        """发送纯文本消息（使用缓存的真实origin）"""
+        try:
+            from astrbot.api.message_components import Plain
+
+            real_origin = self._get_real_origin(internal_id)
+            if not real_origin:
+                logger.error(f"[ChanganCat] 未找到群 {internal_id} 的真实origin，无法发送消息")
+                raise ValueError(f"未缓存群 {internal_id} 的origin，请先在群内发送消息")
+
+            msg = SimpleMessage([Plain(text)])
+            await self.context.send_message(real_origin, msg)
+            logger.info(f"[ChanganCat] 已发送消息到 {internal_id} ({real_origin})")
+
+        except Exception as e:
+            logger.error(f"[ChanganCat] 发送消息到 {internal_id} 失败: {e}")
+            raise
+
     async def _send_daily_reports(self):
-        """发送每日报告"""
+        """发送每日报告到所有目标群"""
         try:
             target_groups = self.config.core.target_groups
 
@@ -381,77 +431,45 @@ class ChanganCatPlugin(star.Star):
                 logger.info("[ChanganCat] 没有找到需要发送报告的群")
                 return
 
-            for origin in origins:
+            for internal_id in origins:
                 try:
-                    await self._send_daily_report_to_group(origin)
-                    # 添加延迟避免发送过快
+                    if internal_id not in self._real_origin_cache:
+                        logger.warning(f"[ChanganCat] 群 {internal_id} 未激活（无真实origin缓存），跳过发送")
+                        continue
+
+                    await self._send_daily_report_to_group(internal_id)
                     await asyncio.sleep(2)
                 except Exception as e:
-                    logger.error(f"[ChanganCat] 发送每日报告到 {origin} 失败: {e}")
+                    logger.error(f"[ChanganCat] 发送每日报告到 {internal_id} 失败: {e}")
+                    continue
 
         except Exception as e:
-            logger.error(f"[ChanganCat] 发送每日报告失败: {e}")
+            logger.error(f"[ChanganCat] 发送每日报告失败: {e}", exc_info=True)
 
-    async def _send_daily_report_to_group(self, origin: str):
-        """发送每日报告到指定群"""
-        group_name = self._get_group_name(origin)
-        report_text, meme_images = self.stats_manager.format_daily_report(origin, group_name)
-
-        # 使用 SimpleMessage 包装
-        await self._send_report_to_origin(origin, report_text, meme_images)
-        logger.info(f"[ChanganCat] 已发送每日报告到 {origin}")
-
-    async def _send_report_to_origin(self, origin: str, text: str, images: List[dict] = None):
-        """发送报告到指定origin（支持图文混排）"""
+    async def _send_daily_report_to_group(self, internal_id: str):
+        """发送每日报告到指定群（使用真实origin查询和发送）"""
         try:
-            from astrbot.api.message_components import Plain, Image as CompImage
+            # 获取真实origin（用于查询数据库和发送消息）
+            real_origin = self._get_real_origin(internal_id)
+            if not real_origin:
+                logger.error(f"[ChanganCat] 无法发送日报到 {internal_id}：未缓存真实origin")
+                return
 
-            # 构建消息链
-            chain = []
-            lines = text.split("\n")
-            image_idx = 0
+            group_name = self._get_group_name(internal_id)
 
-            for line in lines:
-                if line.strip():
-                    chain.append(Plain(line + "\n"))
-                else:
-                    chain.append(Plain("\n"))
+            # 使用真实origin查询数据（与/哈气榜一致）
+            report_text = self.stats_manager.format_haqi_command_response(real_origin, group_name)
 
-                # 检查是否是表情包榜单行（格式：数字. 发送次数：数字）
-                if re.match(r'^\d+\.\s*发送次数：\d+', line) and images and image_idx < len(images):
-                    img_info = images[image_idx]
-                    img_path = img_info.get("path")
-                    is_local = img_info.get("is_local", False)
+            # 使用真实origin发送消息
+            await self._send_text_to_origin(internal_id, report_text)
 
-                    if img_path:
-                        # 如果是网络图片，先下载
-                        if not is_local and img_path.startswith("http"):
-                            local_path = await self._download_image(img_path)
-                            if local_path:
-                                img_path = local_path
-                                is_local = True
-                            else:
-                                image_idx += 1
-                                continue
-
-                        # 检查文件是否存在
-                        if Path(img_path).exists():
-                            chain.append(CompImage(file=img_path))
-                            chain.append(Plain("\n"))
-                            image_idx += 1
-                        else:
-                            image_idx += 1
-
-            # 使用 SimpleMessage 包装后发送
-            if chain:
-                msg = SimpleMessage(chain)
-                await self.context.send_message(origin, msg)
-
+            logger.info(f"[ChanganCat] 已发送每日哈气榜到 {internal_id}")
         except Exception as e:
-            logger.error(f"[ChanganCat] 发送报告失败: {e}")
+            logger.error(f"[ChanganCat] 发送每日报告到 {internal_id} 失败: {e}", exc_info=True)
+            raise
 
     def _get_all_origins_from_morechatplus(self) -> List[str]:
-        """从morechatplus获取所有有记录的群"""
+        """从morechatplus获取所有有记录的群（返回内部ID格式）"""
         try:
             import sqlite3
             morechatplus_db_path = (
@@ -471,76 +489,38 @@ class ChanganCatPlugin(star.Star):
                     "SELECT DISTINCT origin FROM messages WHERE timestamp >= ?",
                     (yesterday,)
                 ).fetchall()
-                return [row["origin"] for row in rows]
+                # 转换为内部ID格式
+                origins = []
+                for row in rows:
+                    origin = row["origin"]
+                    if origin.startswith("qq_group_"):
+                        origins.append(origin)
+                    else:
+                        origins.append(self._extract_internal_id(origin))
+                return origins
         except Exception as e:
             logger.debug(f"[ChanganCat] 获取群列表失败: {e}")
             return []
 
-    def _get_group_name(self, origin: str) -> str:
+    def _get_group_name(self, internal_id: str) -> str:
         """获取群名"""
-        if origin in self._group_name_cache:
-            return self._group_name_cache[origin]
+        if internal_id in self._group_name_cache:
+            return self._group_name_cache[internal_id]
 
-        match = re.search(r'qq_group_(\d+)', origin)
+        match = re.search(r'qq_group_(\d+)', internal_id)
         if match:
             group_id = match.group(1)
             return f"QQ群 {group_id}"
 
-        return origin
-
-    async def _send_message_to_origin_alternate(self, origin: str, text: str, images: List[dict] = None):
-        """发送消息到指定origin（交替模式）"""
-        try:
-            from astrbot.api.message_components import Plain, Image as CompImage
-
-            chain = []
-            lines = text.split("\n")
-            image_idx = 0
-
-            for line in lines:
-                if line.strip():
-                    chain.append(Plain(line + "\n"))
-                else:
-                    chain.append(Plain("\n"))
-
-                if re.match(r'^\d+\.\s*发送次数：\d+', line) and images and image_idx < len(images):
-                    img_info = images[image_idx]
-                    img_path = img_info.get("path")
-                    is_local = img_info.get("is_local", False)
-
-                    if img_path:
-                        if not is_local and img_path.startswith("http"):
-                            local_path = await self._download_image(img_path)
-                            if local_path:
-                                img_path = local_path
-                                is_local = True
-                            else:
-                                image_idx += 1
-                                continue
-
-                        if Path(img_path).exists():
-                            try:
-                                chain.append(CompImage(file=img_path))
-                                chain.append(Plain("\n"))
-                                image_idx += 1
-                            except Exception as e:
-                                logger.error(f"[ChanganCat] 创建图片失败: {e}")
-                                image_idx += 1
-                        else:
-                            image_idx += 1
-
-            if chain:
-                # 使用 SimpleMessage 包装
-                msg = SimpleMessage(chain)
-                await self.context.send_message(origin, msg)
-
-        except Exception as e:
-            logger.error(f"[ChanganCat] 发送消息失败: {e}")
+        return internal_id
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.ALL)
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_message(self, event: AstrMessageEvent):
-        """处理消息（仅用于复读检测）"""
+        """处理消息（启动定时任务 + 复读检测 + 缓存origin和群名）"""
+        if not self._tasks_started and self.config.core.enable:
+            self._start_background_tasks()
+
         if not self.config.core.enable:
             return
 
@@ -552,17 +532,38 @@ class ChanganCatPlugin(star.Star):
             return
 
         message_id, user_id, nickname, content, image_urls = msg_info
-        origin = event.unified_msg_origin
+        real_origin = event.unified_msg_origin
+        internal_id = self._extract_internal_id(real_origin)
+
+        # 缓存真实origin（用于日报发送）
+        if internal_id not in self._real_origin_cache:
+            self._real_origin_cache[internal_id] = real_origin
+            logger.info(f"[ChanganCat] 已缓存群 {internal_id} 的真实origin: {real_origin}")
+
+        # 缓存群名（修正：尝试获取真实群名）
+        if internal_id not in self._group_name_cache:
+            group_name = None
+            try:
+                if hasattr(event.message_obj, 'group_name') and event.message_obj.group_name:
+                    group_name = event.message_obj.group_name
+                elif hasattr(event, 'group_name') and event.group_name:
+                    group_name = event.group_name
+            except Exception:
+                pass
+
+            if group_name:
+                self._group_name_cache[internal_id] = group_name
+                logger.info(f"[ChanganCat] 已缓存群 {internal_id} 的名称为: {group_name}")
 
         logger.debug(f"[ChanganCat] 收到消息: {nickname}({user_id}): {content[:50]}...")
 
         if self.config.repeat.enable:
             repeat_info = self.repeat_manager.check_and_record_message(
-                origin, message_id, user_id, content, image_urls
+                internal_id, message_id, user_id, content, image_urls
             )
 
             if not repeat_info:
-                repeat_info = self.repeat_manager.check_repeat_from_morechatplus(origin)
+                repeat_info = self.repeat_manager.check_repeat_from_morechatplus(internal_id)
 
             if repeat_info:
                 await self._do_repeat(event, repeat_info)
@@ -598,36 +599,30 @@ class ChanganCatPlugin(star.Star):
             return None
 
     async def _do_repeat(self, event: AstrMessageEvent, repeat_info: dict):
-        """执行复读（修复表情包复读逻辑）"""
+        """执行复读"""
         try:
             content = repeat_info["content"]
             image_urls = repeat_info.get("image_urls", [])
             is_meme = repeat_info.get("is_meme", False)
             origin = event.unified_msg_origin
 
-            # 从 AstrBot 导入 Image 组件
             from astrbot.api.message_components import Plain, Image as CompImage
 
             chain = []
 
             if is_meme:
-                # 表情包复读：需要从morechatplus获取本地路径
-                # 提取表情包ID
                 memes = self.stats_manager.extract_memes(content)
 
                 if memes:
                     for idx, img_id in memes:
-                        # 从image_cache.db获取本地路径
                         local_path = self.stats_manager._get_image_local_path(img_id)
 
                         if local_path and Path(local_path).exists():
                             try:
                                 chain.append(CompImage(file=local_path))
-                                logger.debug(f"[ChanganCat] 复读表情包: {local_path}")
                             except Exception as e:
                                 logger.error(f"[ChanganCat] 添加表情包失败: {e}")
                         else:
-                            # 尝试使用URL
                             if idx <= len(image_urls) and image_urls[idx - 1]:
                                 url = image_urls[idx - 1]
                                 if url.startswith("http"):
@@ -637,30 +632,22 @@ class ChanganCatPlugin(star.Star):
                                 elif Path(url).exists():
                                     chain.append(CompImage(file=url))
                 else:
-                    # 没有提取到表情包ID，尝试直接使用image_urls
                     for url in image_urls[:3]:
                         if not url or not isinstance(url, str):
                             continue
-
                         try:
                             is_local = url.startswith("/") or (len(url) > 1 and url[1] == ":")
-
                             if is_local:
                                 if Path(url).exists():
                                     chain.append(CompImage(file=url))
-                                else:
-                                    logger.warning(f"[ChanganCat] 复读图片不存在: {url}")
                             else:
                                 local_path = await self._download_image(url)
                                 if local_path:
                                     chain.append(CompImage(file=local_path))
-                                else:
-                                    logger.warning(f"[ChanganCat] 复读下载图片失败: {url}")
                         except Exception as img_e:
                             logger.error(f"[ChanganCat] 复读图片失败: {img_e}")
                             continue
             else:
-                # 文本复读
                 clean_content = re.sub(r'\[at:\d+\]', '', content)
                 clean_content = re.sub(r'<引用:\d+>', '', clean_content)
                 clean_content = re.sub(r'\[image:\d+:[^\]]+\]', '[图片]', clean_content)
@@ -670,7 +657,6 @@ class ChanganCatPlugin(star.Star):
                     chain.append(Plain(clean_content))
 
             if chain:
-                # 使用 SimpleMessage 包装
                 msg = SimpleMessage(chain)
                 await self.context.send_message(origin, msg)
                 logger.info(f"[ChanganCat] 复读消息: {content[:50]}...")
@@ -680,7 +666,7 @@ class ChanganCatPlugin(star.Star):
 
     @filter.command("哈气榜")
     async def cmd_haqi_ranking(self, event: AstrMessageEvent):
-        """哈气榜命令"""
+        """哈气榜命令 - 使用真实origin查询（与数据库存储格式一致）"""
         if not self.config.core.enable:
             return
 
@@ -689,10 +675,14 @@ class ChanganCatPlugin(star.Star):
             event.stop_event()
             return
 
+        # 使用真实origin查询数据库（恢复原有行为）
         origin = event.unified_msg_origin
-        group_name = self._get_group_name(origin)
+        # 尝试获取群名（如果已缓存）
+        internal_id = self._extract_internal_id(origin)
+        group_name = self._get_group_name(internal_id)
 
         try:
+            # 使用真实origin查询数据（因为数据库存储的是aiocqhttp:GroupMessage:XXX格式）
             response = self.stats_manager.format_haqi_command_response(origin, group_name)
             await self._safe_send(event, response)
             logger.info(f"[ChanganCat] 已响应/哈气榜命令")
@@ -702,9 +692,9 @@ class ChanganCatPlugin(star.Star):
             await self._safe_send(event, f"获取哈气榜失败: {e}")
             event.stop_event()
 
-    @filter.command("表情包榜")
-    async def cmd_meme_ranking(self, event: AstrMessageEvent):
-        """表情包榜命令"""
+    @filter.command("哈气周榜")
+    async def cmd_daily_haqi_ranking(self, event: AstrMessageEvent):
+        """哈气周榜命令 - 按天显示最近7天的哈气统计"""
         if not self.config.core.enable:
             return
 
@@ -714,11 +704,37 @@ class ChanganCatPlugin(star.Star):
             return
 
         origin = event.unified_msg_origin
-        group_name = self._get_group_name(origin)
+        internal_id = self._extract_internal_id(origin)
+        group_name = self._get_group_name(internal_id)
+
+        try:
+            response = self.stats_manager.format_daily_haqi_report(origin, group_name, days=7)
+            await self._safe_send(event, response)
+            logger.info(f"[ChanganCat] 已响应/哈气周榜命令")
+            event.stop_event()
+        except Exception as e:
+            logger.error(f"[ChanganCat] 哈气周榜命令出错: {e}")
+            await self._safe_send(event, f"获取哈气周榜失败: {e}")
+            event.stop_event()
+
+    @filter.command("表情包榜")
+    async def cmd_meme_ranking(self, event: AstrMessageEvent):
+        """表情包榜命令 - 使用真实origin查询"""
+        if not self.config.core.enable:
+            return
+
+        if event.get_message_type() != MessageType.GROUP_MESSAGE:
+            await self._safe_send(event, "该命令只能在群聊中使用")
+            event.stop_event()
+            return
+
+        origin = event.unified_msg_origin
+        internal_id = self._extract_internal_id(origin)
+        group_name = self._get_group_name(internal_id)
 
         try:
             response, meme_images = self.stats_manager.format_meme_command_response(origin, group_name)
-            await self._send_message_to_origin_alternate(event.unified_msg_origin, response, meme_images)
+            await self._send_message_with_images(event.unified_msg_origin, response, meme_images)
             logger.info(f"[ChanganCat] 已响应/表情包榜命令")
             event.stop_event()
         except Exception as e:
@@ -741,6 +757,33 @@ class ChanganCatPlugin(star.Star):
             await self._safe_send(event, f"获取统计信息失败: {e}")
             event.stop_event()
 
+    @filter.command("test_daily_report")
+    async def cmd_test_daily_report(self, event: AstrMessageEvent):
+        """测试每日日报（立即触发一次）"""
+        if not self.config.core.enable:
+            return
+
+        origin = event.unified_msg_origin
+        internal_id = self._extract_internal_id(origin)
+
+        # 确保缓存当前群
+        if internal_id not in self._real_origin_cache:
+            self._real_origin_cache[internal_id] = origin
+            logger.info(f"[ChanganCat] 测试前已缓存当前群: {internal_id}")
+
+        await self._safe_send(event, "正在测试发送每日哈气榜...")
+        logger.info("[ChanganCat] 手动触发每日报告测试")
+
+        try:
+            # 只发送当前群
+            await self._send_daily_report_to_group(internal_id)
+            await self._safe_send(event, "测试发送完成")
+        except Exception as e:
+            logger.error(f"[ChanganCat] 测试发送失败: {e}", exc_info=True)
+            await self._safe_send(event, f"测试发送失败: {e}")
+        finally:
+            event.stop_event()
+
     def _extract_at_target(self, event: AstrMessageEvent) -> Optional[str]:
         """提取@的目标用户ID"""
         for comp in event.get_messages():
@@ -750,7 +793,7 @@ class ChanganCatPlugin(star.Star):
 
     @filter.command("今日哈气")
     async def cmd_today_haqi_detail(self, event: AstrMessageEvent):
-        """今日哈气详情（图片渲染）"""
+        """今日哈气详情"""
         if not self.config.core.enable:
             return
 
@@ -782,7 +825,6 @@ class ChanganCatPlugin(star.Star):
 
                 if success and img_path.exists():
                     from astrbot.api.message_components import Image as CompImage
-                    # 使用 SimpleMessage 包装
                     msg = SimpleMessage([CompImage(file=str(img_path))])
                     await self.context.send_message(event.unified_msg_origin, msg)
                     logger.info(f"[ChanganCat] 已发送今日哈气图片报告 for {target_id}")
@@ -802,7 +844,7 @@ class ChanganCatPlugin(star.Star):
 
     @filter.command("七日哈气")
     async def cmd_week_haqi_detail(self, event: AstrMessageEvent):
-        """七日哈气详情（图片渲染）"""
+        """七日哈气详情"""
         if not self.config.core.enable:
             return
 
@@ -834,7 +876,6 @@ class ChanganCatPlugin(star.Star):
 
                 if success and img_path.exists():
                     from astrbot.api.message_components import Image as CompImage
-                    # 使用 SimpleMessage 包装
                     msg = SimpleMessage([CompImage(file=str(img_path))])
                     await self.context.send_message(event.unified_msg_origin, msg)
                     logger.info(f"[ChanganCat] 已发送七日哈气图片报告 for {target_id}")
@@ -853,7 +894,7 @@ class ChanganCatPlugin(star.Star):
             event.stop_event()
 
     def _format_haqi_detail_text(self, data: dict) -> str:
-        """格式化哈气详情为文字（备用）"""
+        """格式化哈气详情为文字"""
         lines = []
         nickname = data.get("nickname", "用户")
         days = data.get("days", 1)
@@ -883,19 +924,64 @@ class ChanganCatPlugin(star.Star):
         else:
             lines.append("无")
 
-        return "\n".join(lines)
+        return chr(10).join(lines)
 
     async def _safe_send(self, event: AstrMessageEvent, text: str):
         """安全发送文本消息"""
         origin = event.unified_msg_origin
-
         try:
             from astrbot.api.message_components import Plain
-            # 使用 SimpleMessage 包装
             msg = SimpleMessage([Plain(text)])
             await self.context.send_message(origin, msg)
         except Exception as e:
             logger.error(f"[ChanganCat] 发送失败: {e}")
+
+    async def _send_message_with_images(self, origin: str, text: str, images: List[dict] = None):
+        """发送消息（带图片）"""
+        try:
+            from astrbot.api.message_components import Plain, Image as CompImage
+
+            chain = []
+            lines = text.split(chr(10))
+            image_idx = 0
+
+            for line in lines:
+                if line.strip():
+                    chain.append(Plain(line + chr(10)))
+                else:
+                    chain.append(Plain(chr(10)))
+
+                if re.match(r'^\d+\.\s*发送次数：\d+', line) and images and image_idx < len(images):
+                    img_info = images[image_idx]
+                    img_path = img_info.get("path")
+                    is_local = img_info.get("is_local", False)
+
+                    if img_path:
+                        if not is_local and img_path.startswith("http"):
+                            local_path = await self._download_image(img_path)
+                            if local_path:
+                                img_path = local_path
+                                is_local = True
+                            else:
+                                image_idx += 1
+                                continue
+
+                        if Path(img_path).exists():
+                            try:
+                                chain.append(CompImage(file=img_path))
+                                chain.append(Plain(chr(10)))
+                                image_idx += 1
+                            except Exception as e:
+                                logger.error(f"[ChanganCat] 创建图片失败: {e}")
+                                image_idx += 1
+                        else:
+                            image_idx += 1
+
+            if chain:
+                await self.context.send_message(origin, SimpleMessage(chain))
+
+        except Exception as e:
+            logger.error(f"[ChanganCat] 发送消息失败: {e}")
 
     def _get_stats_text(self) -> str:
         """获取插件统计信息"""
@@ -940,14 +1026,34 @@ class ChanganCatPlugin(star.Star):
         else:
             lines.append("每日报告目标群: 未配置（自动获取）")
 
-        # 显示每日播报状态
         lines.append(f"每日播报: {'开启' if self.config.core.enable_daily_report else '关闭'}")
 
-        # 显示PIL状态
-        lines.append(f"图片渲染: {'可用' if PIL_AVAILABLE else '不可用(缺少PIL库)'}")
+        if self._daily_report_task_ref and not self._daily_report_task_ref.done():
+            lines.append("定时任务状态: 运行中")
+        else:
+            lines.append("定时任务状态: 未运行")
 
-        return "\n".join(lines)
+        if self._real_origin_cache:
+            lines.append(f"已缓存群号: {', '.join(self._real_origin_cache.keys())}")
+        else:
+            lines.append("已缓存群号: 无")
+
+        lines.append(f"图片渲染: {'可用' if PIL_AVAILABLE else '不可用'}")
+
+        return chr(10).join(lines)
 
     async def terminate(self) -> None:
         """插件终止"""
-        logger.info("[ChanganCat] 插件终止")
+        logger.info("[ChanganCat] 插件终止，清理后台任务...")
+        if self._daily_report_task_ref and not self._daily_report_task_ref.done():
+            self._daily_report_task_ref.cancel()
+            try:
+                await self._daily_report_task_ref
+            except asyncio.CancelledError:
+                pass
+        if self._cleanup_task_ref and not self._cleanup_task_ref.done():
+            self._cleanup_task_ref.cancel()
+            try:
+                await self._cleanup_task_ref
+            except asyncio.CancelledError:
+                pass

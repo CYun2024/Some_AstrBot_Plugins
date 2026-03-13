@@ -52,7 +52,12 @@ class StatsManager:
         return content
 
     def _count_ha_in_text(self, text: str) -> int:
-        """统计文本中包含多少次"哈"（支持哈!哈!哈!这种连续哈气）
+        """统计文本中包含多少次"哈"
+
+        规则：
+        1. 单个"哈"（前后无其他哈）：无论有无标点都算1次
+        2. 连续多个"哈"（≥2个）：每个后面都必须有标点（!！或~～），且最后一个必须是！，才算N次
+        3. 前面有其他文字的不算（如"别哈"、"长安别哈"）
 
         返回：哈气次数
         """
@@ -61,14 +66,50 @@ class StatsManager:
 
         count = 0
         i = 0
-        while i < len(text):
+        n = len(text)
+
+        while i < n:
             if text[i] == '哈':
-                count += 1
-                i += 1
-                while i < len(text) and text[i] in ['!', '！', '~', '～']:
+                # 规则3：检查前面字符，必须是开始/标点/空格/哈，不能是其他文字
+                if i > 0 and text[i-1] not in ['!', '！', '~', '～', ' ', '哈']:
                     i += 1
+                    continue
+
+                # 收集连续的"哈"序列，记录每个哈后面的标点
+                ha_chain = []  # 每个元素：'!' 或 '~' 或 None
+
+                j = i
+                while j < n and text[j] == '哈':
+                    # 检查这个哈后面是否有标点
+                    if j + 1 < n and text[j + 1] in ['!', '！', '~', '～']:
+                        # 记录标点类型
+                        if text[j + 1] in ['!', '！']:
+                            ha_chain.append('!')
+                        else:
+                            ha_chain.append('~')
+                        # 跳过这个哈和所有连续标点（如"哈！！"）
+                        j += 2
+                        while j < n and text[j] in ['!', '！', '~', '～']:
+                            j += 1
+                    else:
+                        # 这个哈后面没有标点
+                        ha_chain.append(None)
+                        j += 1
+
+                # 规则判断
+                if len(ha_chain) == 1:
+                    # 单个哈：算1次（前面已过滤"别哈"情况）
+                    count += 1
+                else:
+                    # 连续多个哈：每个必须有标点，且最后必须是！
+                    if all(p is not None for p in ha_chain) and ha_chain[-1] == '!':
+                        count += len(ha_chain)
+                    # 否则整个序列不算
+
+                i = j  # 跳到序列后继续扫描
             else:
                 i += 1
+
         return count
 
     def is_haqi(self, content: str) -> int:
@@ -218,6 +259,126 @@ class StatsManager:
         except Exception as e:
             logger.error(f"[ChanganCat] 获取图片本地路径失败: {e}")
             return None
+
+    def get_daily_haqi_stats(self, origin: str, days: int = 7) -> Dict:
+        """获取按天分组的哈气统计（最近N天）
+
+        Returns:
+            {
+                "daily_stats": [
+                    {
+                        "date": "2026/03/10",
+                        "ranking": [(user_id, nickname, text_count, meme_count, total_count), ...]
+                    },
+                    ...
+                ],
+                "start_date": "2026/03/10",
+                "end_date": "2026/03/16"
+            }
+        """
+        end_time = datetime.now()
+        start_time = end_time - timedelta(days=days)
+
+        # 获取所有消息
+        messages = self._get_messages_from_morechatplus(
+            origin, 
+            start_time.timestamp(), 
+            end_time.timestamp()
+        )
+
+        # 按天分组统计
+        daily_stats = {}
+
+        for msg in messages:
+            # 确定这条消息属于哪一天
+            msg_time = datetime.fromtimestamp(msg["timestamp"])
+            day_key = msg_time.strftime("%Y/%m/%d")
+
+            if day_key not in daily_stats:
+                daily_stats[day_key] = {}
+
+            user_id = msg["user_id"]
+            nickname = msg["nickname"]
+            content = msg["content"]
+
+            # 统计哈气
+            text_haqi = self.is_haqi(content)
+            meme_haqi = self.count_haqi_memes(content)
+
+            if text_haqi > 0 or meme_haqi > 0:
+                key = (user_id, nickname)
+                if key not in daily_stats[day_key]:
+                    daily_stats[day_key][key] = {"text": 0, "meme": 0}
+                daily_stats[day_key][key]["text"] += text_haqi
+                daily_stats[day_key][key]["meme"] += meme_haqi
+
+        # 转换为列表格式并排序
+        result = []
+        # 按日期排序（从早到晚）
+        for day in sorted(daily_stats.keys()):
+            day_data = daily_stats[day]
+            ranking = []
+            for (user_id, nickname), counts in day_data.items():
+                text_c = counts["text"]
+                meme_c = counts["meme"]
+                total_c = text_c + meme_c
+                ranking.append((user_id, nickname, text_c, meme_c, total_c))
+            # 按总数排序
+            ranking.sort(key=lambda x: -x[4])
+            result.append({
+                "date": day,
+                "ranking": ranking
+            })
+
+        return {
+            "daily_stats": result,
+            "start_date": start_time.strftime("%Y/%m/%d"),
+            "end_date": end_time.strftime("%Y/%m/%d")
+        }
+
+    def format_daily_haqi_report(self, origin: str, group_name: str = "", days: int = 7) -> str:
+        """格式化按天分组的哈气周榜报告"""
+        stats = self.get_daily_haqi_stats(origin, days)
+        daily_stats = stats["daily_stats"]
+
+        lines = []
+        lines.append(f"📊 哈气周榜 ({stats['start_date']} ~ {stats['end_date']})")
+        lines.append("")
+
+        if group_name:
+            lines.append(f"群聊：{group_name}")
+        else:
+            lines.append(f"群聊：{origin}")
+        lines.append("")
+
+        if not daily_stats:
+            lines.append("暂无数据~")
+            return chr(10).join(lines)
+
+        # 遍历每一天
+        for day_data in daily_stats:
+            date_str = day_data["date"]
+            ranking = day_data["ranking"]
+
+            lines.append(f"📅 {date_str}")
+
+            if not ranking:
+                lines.append("  当日无哈气记录")
+            else:
+                medals = ["🥇", "🥈", "🥉"]
+                for i, (user_id, nickname, text_c, meme_c, total_c) in enumerate(ranking[:10]):
+                    medal = medals[i] if i < 3 else f"{i + 1}."
+                    if meme_c > 0:
+                        lines.append(f"  {medal} {nickname} - {total_c}次（{text_c}+{meme_c}）")
+                    else:
+                        lines.append(f"  {medal} {nickname} - {total_c}次")
+
+                if len(ranking) > 10:
+                    lines.append(f"  ... 还有 {len(ranking) - 10} 人")
+
+            lines.append("")
+
+        return chr(10).join(lines)
 
     def get_yesterday_stats(self, origin: str) -> Dict:
         """获取昨日统计（从morechatplus读取）
@@ -416,7 +577,7 @@ class StatsManager:
             else:
                 lines.append(f"{medal} {nickname}（{user_id}）- {total_c}次")
 
-        return "\n".join(lines)
+        return chr(10).join(lines)
 
     def format_daily_report(self, origin: str, group_name: str = "") -> Tuple[str, List[Dict]]:
         """格式化每日报告（从morechatplus获取数据）"""
@@ -459,7 +620,7 @@ class StatsManager:
         else:
             lines.append("🖼️ 今日表情包榜：暂无数据")
 
-        return "\n".join(lines), meme_images
+        return chr(10).join(lines), meme_images
 
     def format_haqi_command_response(self, origin: str, group_name: str = "") -> str:
         """格式化/哈气榜命令响应（从morechatplus获取数据）"""
@@ -490,7 +651,7 @@ class StatsManager:
             lines.append("")
             lines.append(f"💡 当前有 {len(self.config.stats.haqi_meme_ids)} 个哈气表情包计入统计")
 
-        return "\n".join(lines)
+        return chr(10).join(lines)
 
     def format_meme_command_response(self, origin: str, group_name: str = "") -> Tuple[str, List[Dict]]:
         """格式化/表情包榜命令响应"""
@@ -508,10 +669,11 @@ class StatsManager:
 
         if not today_stats:
             lines.append("今日暂无表情包数据~")
-            return "\n".join(lines), []
+            return chr(10).join(lines), []
 
         lines.append(f"今日共发送 {len(today_stats)} 种表情包/图片，以下是发送次数TOP {min(5, len(today_stats))}：")
-        lines.append("\n")
+        lines.append("")
+        lines.append("")
 
         meme_images = []
         valid_count = 0
@@ -531,9 +693,10 @@ class StatsManager:
                 lines.append(f"{i}. 发送次数：{meme['use_count']} 次 (ID:{img_id_short}...无图片)")
 
         if valid_count == 0 and today_stats:
-            lines.append("\n⚠️ 注意：检测到表情包记录但无法获取图片，请检查morechatplus图片缓存配置")
+            lines.append("")
+            lines.append("⚠️ 注意：检测到表情包记录但无法获取图片，请检查morechatplus图片缓存配置")
 
-        return "\n".join(lines), meme_images
+        return chr(10).join(lines), meme_images
 
     def cleanup_old_stats(self):
         """清理过期统计数据"""
