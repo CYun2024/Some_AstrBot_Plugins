@@ -439,6 +439,227 @@
             padding: 2rem;
             color: #94a3b8;
         }
+
+        /* 新增：抓包监控专用样式 */
+        .capture-section { display: none; }
+        .capture-section.active { display: block; }
+
+        .capture-grid {
+            display: grid;
+            grid-template-columns: 400px 1fr;
+            height: calc(100vh - 60px);
+            gap: 0;
+        }
+
+        .capture-sidebar {
+            background: #1e293b;
+            border-right: 1px solid #334155;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .capture-toolbar {
+            padding: 1rem;
+            border-bottom: 1px solid #334155;
+            background: #0f172a;
+            display: flex;
+            gap: 0.5rem;
+            flex-wrap: wrap;
+        }
+
+        .capture-btn {
+            padding: 0.5rem 1rem;
+            background: #3b82f6;
+            border: none;
+            color: white;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.875rem;
+        }
+
+        .capture-btn:hover { background: #2563eb; }
+
+        .capture-btn.secondary {
+            background: #475569;
+        }
+
+        .capture-btn.secondary:hover {
+            background: #334155;
+        }
+
+        .phase-badge {
+            display: inline-block;
+            padding: 0.125rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+
+        .phase-request { background: #f59e0b; color: #0f172a; }
+        .phase-response { background: #10b981; color: white; }
+
+        .capture-list {
+            overflow-y: auto;
+            padding: 0.5rem;
+        }
+
+        .capture-item {
+            background: #334155;
+            border-radius: 8px;
+            padding: 0.75rem;
+            margin-bottom: 0.5rem;
+            cursor: pointer;
+            transition: all 0.2s;
+            border-left: 3px solid transparent;
+        }
+
+        .capture-item:hover { background: #475569; }
+        .capture-item.active { 
+            background: #2563eb; 
+            border-left-color: #60a5fa;
+        }
+        .capture-item.request { border-left-color: #f59e0b; }
+        .capture-item.response { border-left-color: #10b981; }
+
+        .capture-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 0.5rem;
+        }
+
+        .capture-meta {
+            font-size: 0.75rem;
+            color: #94a3b8;
+            display: flex;
+            gap: 0.5rem;
+            flex-wrap: wrap;
+        }
+
+        .capture-preview {
+            font-size: 0.875rem;
+            color: #cbd5e1;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            font-family: monospace;
+        }
+
+        .capture-detail {
+            background: #0f172a;
+            overflow-y: auto;
+            padding: 1.5rem;
+        }
+
+        .detail-card {
+            background: #1e293b;
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin-bottom: 1rem;
+            border: 1px solid #334155;
+        }
+
+        .detail-card h4 {
+            color: #60a5fa;
+            margin-bottom: 1rem;
+            font-size: 0.875rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .raw-json {
+            background: #020617;
+            border: 1px solid #334155;
+            border-radius: 8px;
+            padding: 1rem;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 0.8rem;
+            line-height: 1.6;
+            overflow-x: auto;
+            max-height: 500px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            word-break: break-all;
+            color: #e2e8f0;
+        }
+
+        .prompt-box {
+            background: #1e293b;
+            border-left: 3px solid #f59e0b;
+            padding: 1rem;
+            border-radius: 0 8px 8px 0;
+            margin: 0.5rem 0;
+            white-space: pre-wrap;
+            word-break: break-word;
+            font-family: monospace;
+            font-size: 0.875rem;
+            line-height: 1.6;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+
+        .system-prompt-box {
+            border-left-color: #ec4899;
+            background: #1e293b;
+        }
+
+        .context-list {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+
+        .context-item {
+            background: #334155;
+            padding: 0.75rem;
+            border-radius: 6px;
+            border-left: 2px solid #64748b;
+        }
+
+        .context-role {
+            font-size: 0.75rem;
+            color: #60a5fa;
+            font-weight: 600;
+            margin-bottom: 0.25rem;
+            text-transform: uppercase;
+        }
+
+        .context-content {
+            font-size: 0.875rem;
+            color: #e2e8f0;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+
+        .stat-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 1rem;
+            margin-bottom: 1rem;
+        }
+
+        .stat-box {
+            background: #334155;
+            padding: 1rem;
+            border-radius: 8px;
+            text-align: center;
+        }
+
+        .stat-num {
+            font-size: 1.5rem;
+            font-weight: bold;
+            color: #60a5fa;
+        }
+
+        .stat-desc {
+            font-size: 0.75rem;
+            color: #94a3b8;
+            margin-top: 0.25rem;
+        }
     </style>
     <base target="_blank">
 <base target="_blank">
@@ -449,9 +670,11 @@
         <div class="header-nav">
             <button class="nav-btn active" onclick="showTab('debugger')">调试器</button>
             <button class="nav-btn" onclick="showTab('morechatplus')">MoreChatPlus数据</button>
+            <!-- 新增：抓包监控按钮 -->
+            <button class="nav-btn" onclick="showTab('capture')">抓包监控</button>
         </div>
         <div class="status">
-            <div class="status-dot"></div>
+            <div class="status-dot" id="ws-status"></div>
             <span id="conn-status">已连接</span>
             <span id="record-count" style="margin-left: 1rem; color: #94a3b8;">0 条记录</span>
         </div>
@@ -555,7 +778,37 @@
         </div>
     </div>
 
+    <!-- 新增：抓包监控界面 -->
+    <div id="capture-section" class="capture-section">
+        <div class="capture-grid">
+            <div class="capture-sidebar">
+                <div class="capture-toolbar">
+                    <button class="capture-btn" onclick="clearCaptureData()">🗑️ 清空数据</button>
+                    <button class="capture-btn secondary" onclick="exportCaptureData()">📥 导出JSON</button>
+                    <select id="capture-filter" onchange="filterCapture()" style="padding: 0.5rem; background: #334155; color: #e2e8f0; border: 1px solid #475569; border-radius: 6px;">
+                        <option value="all">全部</option>
+                        <option value="request">仅请求</option>
+                        <option value="response">仅响应</option>
+                    </select>
+                </div>
+                <div class="capture-list" id="capture-list">
+                    <div style="color: #64748b; text-align: center; padding: 2rem;">等待抓包数据...</div>
+                </div>
+            </div>
+            <div class="capture-detail" id="capture-detail">
+                <div class="empty-state">
+                    <div style="font-size: 3rem; margin-bottom: 1rem;">📦</div>
+                    <div>选择左侧抓包记录查看完整请求结构</div>
+                    <div style="font-size: 0.875rem; color: #64748b; margin-top: 0.5rem;">
+                        这里显示经过所有插件处理后的最终LLM请求数据
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <script>
+
         // ===== 调试器核心功能 =====
         let ws, records = [], selectedId = null, currentFilter = 'all';
         const mcpPageSize = 20;
@@ -867,21 +1120,6 @@
         }
 
         // ===== MoreChatPlus 数据功能 =====
-        function showTab(tab) {
-            document.querySelectorAll('.nav-btn').forEach(btn => btn.classList.remove('active'));
-            event.target.classList.add('active');
-            document.getElementById('debugger-section').classList.remove('active');
-            document.getElementById('morechatplus-section').classList.remove('active');
-
-            if (tab === 'debugger') {
-                document.getElementById('debugger-section').classList.add('active');
-            } else {
-                document.getElementById('morechatplus-section').classList.add('active');
-                loadMcpStats();
-                loadMcpOrigins();
-            }
-        }
-
         function showMcpTab(tab) {
             document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
             event.target.classList.add('active');
@@ -991,31 +1229,31 @@
         }
 
         // 切换总结文本的展开/折叠
-function toggleSummaryText(btn) {
-    const container = btn.parentElement;
-    const shortSpan = container.querySelector('.text-short');
-    const fullSpan = container.querySelector('.text-full');
-    const fullText = btn.getAttribute('data-full-text');
+        function toggleSummaryText(btn) {
+            const container = btn.parentElement;
+            const shortSpan = container.querySelector('.text-short');
+            const fullSpan = container.querySelector('.text-full');
+            const fullText = btn.getAttribute('data-full-text');
 
-    if (fullSpan.style.display === 'none' || fullSpan.style.display === '') {
-        // 展开
-        if (!fullSpan.innerHTML) {
-            fullSpan.innerHTML = '<br>' + fullText;
+            if (fullSpan.style.display === 'none' || fullSpan.style.display === '') {
+                // 展开
+                if (!fullSpan.innerHTML) {
+                    fullSpan.innerHTML = '<br>' + fullText;
+                }
+                fullSpan.style.display = 'block';
+                shortSpan.style.display = 'none';
+                btn.textContent = '收起';
+                btn.classList.add('expanded');
+            } else {
+                // 折叠
+                fullSpan.style.display = 'none';
+                shortSpan.style.display = 'inline';
+                btn.textContent = '展开';
+                btn.classList.remove('expanded');
+            }
         }
-        fullSpan.style.display = 'block';
-        shortSpan.style.display = 'none';
-        btn.textContent = '收起';
-        btn.classList.add('expanded');
-    } else {
-        // 折叠
-        fullSpan.style.display = 'none';
-        shortSpan.style.display = 'inline';
-        btn.textContent = '展开';
-        btn.classList.remove('expanded');
-    }
-}
 
-async function loadSummaries() {
+        async function loadSummaries() {
             const container = document.getElementById('summaries-container');
             container.innerHTML = '<div class="loading">加载中...</div>';
             const origin = document.getElementById('summary-origin-select').value;
@@ -1098,6 +1336,248 @@ async function loadSummaries() {
             currentFilter = e.target.value;
             renderSidebar();
         });
+
+
+        // ===== 新增：抓包功能JavaScript =====
+        let captureWs, captureRecords = [], selectedCaptureId = null;
+        let captureFilter = 'all';
+
+        function initCapture() {
+            connectCaptureWebSocket();
+            loadCaptureHistory();
+        }
+
+        function connectCaptureWebSocket() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            captureWs = new WebSocket(`${protocol}//${window.location.host}/ws_capture`);
+
+            captureWs.onopen = () => {
+                document.getElementById('ws-status').style.background = '#10b981';
+                console.log('[Capture] WebSocket已连接');
+            };
+
+            captureWs.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                captureRecords.unshift(data);
+                if (captureRecords.length > 200) captureRecords.pop();
+                renderCaptureList();
+
+                // 如果正在查看相关会话，自动刷新详情
+                if (selectedCaptureId && data.conversation_id) {
+                    const current = captureRecords.find(r => r.id === selectedCaptureId);
+                    if (current && current.conversation_id === data.conversation_id) {
+                        showCaptureDetail(current);
+                    }
+                }
+            };
+
+            captureWs.onclose = () => {
+                document.getElementById('ws-status').style.background = '#ef4444';
+                setTimeout(connectCaptureWebSocket, 3000);
+            };
+        }
+
+        async function loadCaptureHistory() {
+            try {
+                const res = await fetch('/api/capture?limit=100');
+                const data = await res.json();
+                if (Array.isArray(data)) {
+                    captureRecords = data;
+                    renderCaptureList();
+                }
+            } catch (e) {
+                console.error('加载抓包历史失败:', e);
+            }
+        }
+
+        function renderCaptureList() {
+            const filtered = captureRecords.filter(r => captureFilter === 'all' || r.phase === captureFilter);
+            const listEl = document.getElementById('capture-list');
+
+            if (filtered.length === 0) {
+                listEl.innerHTML = '<div style="color: #64748b; text-align: center; padding: 2rem;">暂无抓包记录</div>';
+                return;
+            }
+
+            listEl.innerHTML = filtered.map(record => {
+                const isSelected = record.id === selectedCaptureId;
+                const time = new Date(record.timestamp).toLocaleTimeString();
+                const preview = record.phase === 'request' 
+                    ? (record.extracted_prompt?.substring(0, 40) || '无Prompt')
+                    : (record.response_text?.substring(0, 40) || '无响应');
+
+                return `<div class="capture-item ${record.phase} ${isSelected ? 'active' : ''}" onclick="selectCapture(${record.id})">
+                    <div class="capture-header">
+                        <span class="phase-badge phase-${record.phase}">${record.phase === 'request' ? '⬆️ 请求' : '⬇️ 响应'}</span>
+                        <span style="font-size: 0.75rem; color: #94a3b8;">${time}</span>
+                    </div>
+                    <div class="capture-meta">
+                        <span>${record.sender?.name || 'Unknown'}</span>
+                        <span style="color: #64748b;">${record.model || 'unknown'}</span>
+                    </div>
+                    <div class="capture-preview">${escapeHtml(preview)}${preview.length >= 40 ? '...' : ''}</div>
+                </div>`;
+            }).join('');
+        }
+
+        function selectCapture(id) {
+            selectedCaptureId = id;
+            renderCaptureList();
+            const record = captureRecords.find(r => r.id === id);
+            if (record) showCaptureDetail(record);
+        }
+
+        function showCaptureDetail(record) {
+            const detailEl = document.getElementById('capture-detail');
+
+            if (record.phase === 'request') {
+                detailEl.innerHTML = renderCaptureRequestDetail(record);
+            } else {
+                detailEl.innerHTML = renderCaptureResponseDetail(record);
+            }
+        }
+
+        function renderCaptureRequestDetail(record) {
+            const raw = record.raw_request || {};
+            const contexts = record.contexts || [];
+
+            let html = `<div class="detail-card">
+                <h4>📤 请求概览</h4>
+                <div class="stat-grid">
+                    <div class="stat-box">
+                        <div class="stat-num">${raw.messages?.length || 1}</div>
+                        <div class="stat-desc">Messages总数</div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-num">${contexts.length}</div>
+                        <div class="stat-desc">Context轮数</div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-num">${record.extracted_prompt?.length || 0}</div>
+                        <div class="stat-desc">Prompt长度</div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-num">${record.metadata?.has_images ? '是' : '否'}</div>
+                        <div class="stat-desc">包含图片</div>
+                    </div>
+                </div>
+                <div style="margin-bottom: 0.5rem;"><strong style="color: #60a5fa;">模型:</strong> ${record.model || 'unknown'}</div>
+                <div style="margin-bottom: 0.5rem;"><strong style="color: #60a5fa;">会话ID:</strong> <span style="font-family: monospace; font-size: 0.875rem;">${record.conversation_id}</span></div>
+                <div style="margin-bottom: 0.5rem;"><strong style="color: #60a5fa;">发送者:</strong> ${record.sender?.name} (${record.sender?.id})</div>
+            </div>`;
+
+            // System Prompt
+            if (record.system_prompt) {
+                html += `<div class="detail-card">
+                    <h4>⚙️ System Prompt</h4>
+                    <div class="prompt-box system-prompt-box">${escapeHtml(record.system_prompt)}</div>
+                </div>`;
+            }
+
+            // Contexts
+            if (contexts.length > 0) {
+                html += `<div class="detail-card">
+                    <h4>💬 上下文历史 (${contexts.length}轮)</h4>
+                    <div class="context-list">
+                        ${contexts.map((ctx, idx) => {
+                            const role = ctx.role || 'unknown';
+                            const content = typeof ctx.content === 'string' ? ctx.content : JSON.stringify(ctx.content);
+                            return `<div class="context-item">
+                                <div class="context-role">${role} #${idx + 1}</div>
+                                <div class="context-content">${escapeHtml(content?.substring(0, 200))}${content?.length > 200 ? '...' : ''}</div>
+                            </div>`;
+                        }).join('')}
+                    </div>
+                </div>`;
+            }
+
+            // Final Prompt
+            if (record.extracted_prompt) {
+                html += `<div class="detail-card">
+                    <h4>📝 最终Prompt (经过所有插件处理后的)</h4>
+                    <div class="prompt-box">${escapeHtml(record.extracted_prompt)}</div>
+                </div>`;
+            }
+
+            // Raw Request JSON
+            html += `<div class="detail-card">
+                <h4>🔧 完整原始请求结构 (Raw Request)</h4>
+                <div class="raw-json">${escapeHtml(JSON.stringify(raw, null, 2))}</div>
+            </div>`;
+
+            return html;
+        }
+
+        function renderCaptureResponseDetail(record) {
+            return `<div class="detail-card">
+                <h4>📥 响应详情</h4>
+                <div style="margin-bottom: 1rem;"><strong style="color: #60a5fa;">模型:</strong> ${record.model || 'unknown'}</div>
+                <div style="margin-bottom: 1rem;"><strong style="color: #60a5fa;">Token用量:</strong> <pre style="display: inline; font-family: monospace;">${JSON.stringify(record.usage, null, 2)}</pre></div>
+
+                <h4 style="margin-top: 1.5rem; margin-bottom: 0.5rem; color: #60a5fa;">响应内容:</h4>
+                <div class="prompt-box" style="border-left-color: #10b981; background: #064e3b;">${escapeHtml(record.response_text || '(空)')}</div>
+
+                <h4 style="margin-top: 1.5rem; margin-bottom: 0.5rem; color: #60a5fa;">原始响应结构:</h4>
+                <div class="raw-json">${escapeHtml(JSON.stringify(record.raw_response, null, 2))}</div>
+            </div>`;
+        }
+
+        async function clearCaptureData() {
+            if (!confirm('确定要清空所有抓包数据吗？此操作不可恢复。')) return;
+            try {
+                const res = await fetch('/api/capture/clear', { method: 'POST' });
+                const data = await res.json();
+                if (data.success) {
+                    captureRecords = [];
+                    selectedCaptureId = null;
+                    renderCaptureList();
+                    document.getElementById('capture-detail').innerHTML = '<div class="empty-state"><div style="font-size: 3rem; margin-bottom: 1rem;">🗑️</div><div>数据已清空</div></div>';
+                }
+            } catch (e) {
+                alert('清空失败: ' + e.message);
+            }
+        }
+
+        function exportCaptureData() {
+            const dataStr = JSON.stringify(captureRecords, null, 2);
+            const blob = new Blob([dataStr], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `llm_capture_${new Date().toISOString().slice(0,19).replace(/:/g,'-')}.json`;
+            a.click();
+            URL.revokeObjectURL(url);
+        }
+
+        function filterCapture() {
+            captureFilter = document.getElementById('capture-filter').value;
+            renderCaptureList();
+        }
+
+
+        // 修改：showTab函数支持抓包标签
+        function showTab(tab) {
+            // 隐藏所有section
+            document.getElementById('debugger-section').classList.remove('active');
+            document.getElementById('morechatplus-section').classList.remove('active');
+            document.getElementById('capture-section').classList.remove('active');
+
+            // 重置按钮状态
+            document.querySelectorAll('.nav-btn').forEach(btn => btn.classList.remove('active'));
+            event.target.classList.add('active');
+
+            // 显示对应section
+            if (tab === 'debugger') {
+                document.getElementById('debugger-section').classList.add('active');
+            } else if (tab === 'morechatplus') {
+                document.getElementById('morechatplus-section').classList.add('active');
+                loadMcpStats();
+                loadMcpOrigins();
+            } else if (tab === 'capture') {
+                document.getElementById('capture-section').classList.add('active');
+                initCapture(); // 初始化抓包WebSocket
+            }
+        }
 
         // 启动
         connect();

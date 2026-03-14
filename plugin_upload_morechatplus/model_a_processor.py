@@ -5,7 +5,7 @@ import json
 import re
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 from astrbot.api import logger
@@ -19,15 +19,22 @@ from .model_utils import call_model_with_fallback, ModelCallResult
 
 @dataclass
 class SummaryResult:
-    """总结结果"""
-    summary: str
-    topic_analysis: str
-    suggestions: str
-    should_reply: bool
+    """总结结果（结构化）"""
+    summary: str = ""  # 原始总结文本
+    topic_analysis: str = ""  # 话题分析
+    suggestions: str = ""  # 建议
+    should_reply: bool = False
     reply_target_msg_id: str = ""
     reply_suggestion: str = ""
     used_fallback: bool = False
     provider_id: str = ""
+
+    # 新增结构化字段
+    timestamp: float = 0.0
+    active_topic: str = ""  # 当前活跃话题
+    topic_duration: str = ""  # 持续时间
+    topic_evolution: List[str] = field(default_factory=list)  # 话题演变过程
+    participants: List[Dict] = field(default_factory=list)  # 参与成员列表
 
 
 class ModelAProcessor:
@@ -108,12 +115,9 @@ class ModelAProcessor:
             if result.is_fallback:
                 logger.info(f"[MoreChatPlus] 模型A已切换到备用模型: {result.provider_id}")
 
-            parsed = self._parse_summary_response(result.text)
+            parsed = self._parse_summary_response(result.text, result.provider_id, result.is_fallback)
 
             if parsed:
-                parsed.used_fallback = result.is_fallback
-                parsed.provider_id = result.provider_id
-
                 messages = self.db.get_messages(origin, limit=self.config.context.summary_interval)
                 if len(messages) >= 2:
                     start_msg_id = messages[-1].message_id
@@ -141,74 +145,123 @@ class ModelAProcessor:
             return None
 
     def _build_summary_prompt(self, context_text: str) -> str:
-        """构建总结提示词（严格触发逻辑）"""
+        """构建总结提示词（结构化输出）"""
         trigger_keyword = self.config.active_reply.trigger_keyword
         bot_name = self.config.core.bot_name
         bot_qq_id = self.config.core.bot_qq_id
+        current_time = time.strftime("%Y-%m-%d %H:%M", time.localtime())
 
-        prompt = f"""你是群聊观察员，分析群聊并判定bot是否需要主动回复（非@触发）。
+        prompt = f"""你是群聊话题分析专家。请分析以下群聊上下文，提取关键信息并以结构化JSON格式输出。
 
-## 绝对禁止
-以下词汇严禁出现在输出中：文化、现象、机制、逻辑、无意义、去语义化、符号化、狂欢、延续、沉浸、互演、诉求、过渡、阶段、分析、展开。
-
-
-## 强制语言风格
-- 使用**大白话**，像小学生写日记一样描述
-- **一句话说完**，不要分点论述
-
-## Bot信息
+当前时间：{current_time}
+Bot信息：
 - 名称：{bot_name}
 - QQ：{bot_qq_id}
 - 人设：活泼猫娘，爱说"喵"
 
-## 何时触发（只有这两种）
+## 分析任务
+
+1. **识别当前活跃话题**（15字以内概括）
+2. **追踪话题演变**：从最早到最近，话题是如何发展的（如：GPU选型 → vLLM部署 → 内存碎片问题）
+3. **识别核心参与成员**：找出3-5个主要发言者，分析他们的角色特征
+   - 用户ID（必须准确）
+   - 角色定位（如：资深架构师/算法工程师/实习生）
+   - 发言风格（如：说话简洁/关注细节/常提问）
+   - 当前关注点
+4. **判定是否需要Bot主动回复**
+
+## 输出格式（必须严格遵循JSON格式）
+
+```json
+{{
+  "timestamp": "{current_time}",
+  "active_topic": "当前话题名称（15字内）",
+  "topic_duration": "已持续X分钟",
+  "topic_evolution": ["话题阶段1", "话题阶段2", "当前阶段"],
+  "participants": [
+    {{
+      "user_id": "QQ号",
+      "nickname": "当前昵称",
+      "role": "角色定位",
+      "style": "发言风格",
+      "focus": "当前关注点"
+    }}
+  ],
+  "bot_should_reply": false,
+  "reply_reason": "如果需要回复，说明原因",
+  "reply_suggestion": "建议回复内容（如果should_reply为true）"
+}}
+```
+
+## 触发规则（仅在以下情况设置bot_should_reply为true）
+
 1. 被@且不是问问题（如@bot玩梗、@bot卖萌）
 2. 群友间密集情感互动（互相摸/撅/表白，且bot没参与过）
 
-## 绝不触发（看到就写"不触发"）
-- 复读刷屏（如连续"希腊奶"）→ 不触发
-- 有人问"怎么打BOSS"/"这题怎么做" → 不触发  
+## 绝不触发（看到就设置false）
+- 复读刷屏（如连续"希腊奶"）
+- 有人问攻略/技术问题 → 不触发  
 - 吵架/阴阳怪气 → 不触发
 - 各说各话的日常闲聊 → 不触发
-
-## 输出格式（严格遵循，不得改动）
-
-[场景速描]
-- 当前话题：（绝对客观的描述群友在讨论什么话题，不要评价）
-- 消息特征：（**一句话**，描述谁@了谁，发了什么，如"A发摸摸，B回撅撅"）
-- Bot关联：（是/否，如果被@要说清楚是求助还是玩梗）
-
-[氛围判定]
-（**只选一项**，复制方括号里的文字）：
-- [复读狂欢] 群友重复发相同内容 → 写这个 **绝不触发回复**
-- [求助咨询] 有人问攻略/技术问题 → 写这个 **绝不触发回复**
-- [集中互动] 群友间密集情感互动（摸/撅/表白）且bot没说过话 → 写这个 **可以触发回复**
-- [日常闲聊] 各说各的，或分享链接 → 写这个 **不触发回复**
-- [Bot相关] 有人@bot或讨论bot → 写这个 **看具体情况**
-
-[触发判定]
-是否需要主动回复：
-- 判定结果：[触发 / 不触发]
-- 判定理由：（**一句话**，如"群友在互相摸头，bot没参与，可以回复"或"只是复读梗，不回复"）
-
-**触发检查清单**（全部满足才输出 TRIGGER:{trigger_keyword}）：
-1. 属于[集中互动]且内容友好？
-2. bot最近没说过话？
-3. 不是复读（有变化，如摸摸→摸摸你→使劲摸）？
-
-如果判定为**触发**，必须输出：
-TRIGGER:{trigger_keyword}
-- 参与方式：[加入互动]
-- 建议内容：（具体写一句回复，如"摸摸你喵"或"我也喜欢你喵"）
 
 ---
 
 群聊上下文：
-{context_text}"""
+{context_text}
+
+请直接输出JSON，不要有任何其他文字说明。"""
         return prompt
 
-    def _parse_summary_response(self, text: str) -> Optional[SummaryResult]:
-        """解析总结响应（适配严格触发逻辑）"""
+    def _parse_summary_response(self, text: str, provider_id: str = "", is_fallback: bool = False) -> Optional[SummaryResult]:
+        """解析总结响应（适配结构化JSON）"""
+        try:
+            # 提取JSON部分
+            json_match = re.search(r'```json\s*\n?(.*?)\n?```', text, re.DOTALL)
+            if json_match:
+                json_str = json_match.group(1)
+            else:
+                # 尝试直接找JSON对象
+                json_match = re.search(r'\{[\s\S]*\}', text)
+                if json_match:
+                    json_str = json_match.group(0)
+                else:
+                    json_str = text
+
+            data = json.loads(json_str)
+
+            # 构建SummaryResult
+            result = SummaryResult(
+                summary=f"活跃话题：{data.get('active_topic', '无')}",
+                topic_analysis=f"话题演变：{' → '.join(data.get('topic_evolution', []))}",
+                suggestions=data.get('reply_reason', ''),
+                should_reply=data.get('bot_should_reply', False),
+                reply_suggestion=data.get('reply_suggestion', ''),
+                used_fallback=is_fallback,
+                provider_id=provider_id,
+                timestamp=time.time(),
+                active_topic=data.get('active_topic', ''),
+                topic_duration=data.get('topic_duration', ''),
+                topic_evolution=data.get('topic_evolution', []),
+                participants=data.get('participants', [])
+            )
+
+            # 如果明确有建议的回复目标，尝试提取
+            if result.should_reply and not result.reply_target_msg_id:
+                # 从上下文找最后发言者（非bot）
+                result.reply_target_msg_id = ""
+
+            return result
+
+        except json.JSONDecodeError as e:
+            logger.error(f"[MoreChatPlus] 解析模型A JSON响应失败: {e}, 响应: {text[:200]}")
+            # 回退到旧解析逻辑
+            return self._parse_summary_response_legacy(text, provider_id, is_fallback)
+        except Exception as e:
+            logger.error(f"[MoreChatPlus] 解析总结响应失败: {e}")
+            return None
+
+    def _parse_summary_response_legacy(self, text: str, provider_id: str = "", is_fallback: bool = False) -> Optional[SummaryResult]:
+        """旧版解析逻辑（兼容）"""
         try:
             # 提取场景速描
             summary_match = re.search(
@@ -257,11 +310,6 @@ TRIGGER:{trigger_keyword}
                 if content_match:
                     reply_suggestion = content_match.group(1).strip()
 
-                # 尝试提取目标（从场景速描中找最后发言者）
-                msg_match = re.search(r'msg[：:]?(\d+)', text)
-                if msg_match:
-                    reply_target_msg_id = msg_match.group(1)
-
             return SummaryResult(
                 summary=summary,
                 topic_analysis=topic_analysis,
@@ -269,11 +317,45 @@ TRIGGER:{trigger_keyword}
                 should_reply=should_reply,
                 reply_target_msg_id=reply_target_msg_id,
                 reply_suggestion=reply_suggestion,
+                used_fallback=is_fallback,
+                provider_id=provider_id,
+                timestamp=time.time()
             )
 
         except Exception as e:
-            logger.error(f"[MoreChatPlus] 解析总结响应失败: {e}")
+            logger.error(f"[MoreChatPlus] 旧版解析失败: {e}")
             return None
+
+    def format_summary_for_display(self, result: SummaryResult) -> str:
+        """将总结结果格式化为【最近群聊话题】格式"""
+        if not result:
+            return "暂无话题总结"
+
+        time_str = time.strftime("%Y-%m-%d %H:%M", time.localtime(result.timestamp)) if result.timestamp else "未知时间"
+
+        lines = [
+            f"- 时间：{time_str}",
+        ]
+
+        if result.active_topic:
+            duration = result.topic_duration or ""
+            lines.append(f"- 当前活跃话题：{result.active_topic}（{duration}）" if duration else f"- 当前活跃话题：{result.active_topic}")
+
+        if result.topic_evolution:
+            evolution_str = " → ".join(result.topic_evolution)
+            lines.append(f"- 话题演变：{evolution_str}（当前）")
+
+        if result.participants:
+            lines.append("- 参与成员：")
+            for i, p in enumerate(result.participants[:5], 1):  # 最多显示5人
+                uid = p.get('user_id', '未知')
+                role = p.get('role', '')
+                style = p.get('style', '')
+                nickname = p.get('nickname', '')
+                desc = f"{role}，{style}" if role and style else (role or style or "群友")
+                lines.append(f"  {i}. @{nickname}(uid:{uid}): {desc}")
+
+        return "\n".join(lines)
 
     async def check_nickname_reference(
         self,

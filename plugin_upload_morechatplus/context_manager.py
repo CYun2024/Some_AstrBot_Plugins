@@ -91,106 +91,84 @@ class ContextManager:
         self,
         origin: str,
         limit: int = None,
-        include_summaries: bool = True,
+        include_summaries: bool = False,  # 修改为默认False，新格式中总结单独处理
+        exclude_message_ids: List[str] = None,
     ) -> str:
         """获取格式化的上下文（优化历史总结展示）"""
         if limit is None:
             limit = self.config.context.max_context_messages
 
-        # 获取最近的总结
-        summary_text = ""
-        if include_summaries:
-            summaries = self.db.get_recent_summaries(origin, limit=3)
-            if summaries:
-                summary_parts = []
-                for s in summaries:
-                    time_str = datetime.fromtimestamp(s.timestamp).strftime("%m-%d %H:%M")
-                    # 提取氛围标签（如果存在）
-                    tag = ""
-                    if "[复读狂欢]" in s.topic_analysis:
-                        tag = "[复读]"
-                    elif "[求助咨询]" in s.topic_analysis:
-                        tag = "[求助]"
-                    elif "[集中互动]" in s.topic_analysis:
-                        tag = "[互动]"
-                    elif "[Bot相关]" in s.topic_analysis:
-                        tag = "[Bot]"
+        # 获取消息，排除指定ID
+        messages = self.db.get_messages(origin, limit=limit + (len(exclude_message_ids) if exclude_message_ids else 0))
 
-                    # 提取第一行作为简述
-                    summary_line = s.summary.split('\n')[0] if s.summary else "无"
-                    if summary_line.startswith("- 当前话题："):
-                        summary_line = summary_line.replace("- 当前话题：", "")
-
-                    summary_parts.append(f"[{time_str}]{tag} {summary_line}")
-
-                summary_text = "【历史话题】\n" + "\n".join(summary_parts) + "\n\n【当前对话】\n"
-
-        # 获取消息
-        messages = self.db.get_messages(origin, limit=limit)
+        if exclude_message_ids:
+            messages = [m for m in messages if m.message_id not in exclude_message_ids]
+            messages = messages[:limit]
 
         if not messages:
-            return summary_text + "(暂无消息记录)"
+            return "(暂无消息记录)"
 
         # 格式化消息
         formatted_lines = []
         for msg in reversed(messages):  # 按时间顺序
-            time_str = datetime.fromtimestamp(msg.timestamp).strftime("%H:%M:%S")
+            formatted_lines.append(self.format_message_for_llm(msg))
 
-            # 管理员标记
-            admin_mark = "[管理员]" if msg.is_admin else ""
+        return "\n".join(formatted_lines)
 
-            # 构建消息头 - 修改：显示 msg 编号格式
-            header = f"[{msg.nickname}|{msg.user_id}(user_id)|{time_str}]:(msg:{msg.message_id}){admin_mark}"
+    def get_recent_messages_formatted(
+        self,
+        origin: str,
+        limit: int = 10,
+        exclude_message_id: str = None,
+    ) -> str:
+        """获取最近N条消息的格式化文本（用于【最近10条消息】）"""
+        messages = self.db.get_messages(origin, limit=limit + (1 if exclude_message_id else 0))
 
-            # 引用信息 - 修改：只显示引用ID，不包含内容
-            reply_part = ""
-            if msg.reply_to:
-                reply_part = f" <引用:{msg.reply_to}>"
+        if exclude_message_id:
+            messages = [m for m in messages if m.message_id != exclude_message_id]
 
-            # 内容
-            content = msg.content
+        messages = messages[:limit]
 
-            formatted_lines.append(f"{header}{reply_part} {content}")
+        if not messages:
+            return "(暂无近期消息)"
 
-        return summary_text + "\n".join(formatted_lines)
+        formatted_lines = []
+        for msg in reversed(messages):  # 按时间顺序，从早到晚
+            formatted_lines.append(self.format_message_for_llm(msg))
+
+        return "\n".join(formatted_lines)
 
     def get_context_for_model_a(self, origin: str) -> str:
         """获取给模型A的上下文"""
         limit = self.config.context.model_a_context_messages
-        return self.get_formatted_context(origin, limit=limit)
+        return self.get_formatted_context(origin, limit=limit, include_summaries=False)
 
     def get_new_message_info(
         self,
         origin: str,
         message_id: str,
     ) -> Optional[Tuple[str, str, str]]:
-        """获取新消息的信息"""
-        messages = self.db.get_messages(origin, limit=1)
-        if not messages:
-            return None
+        """获取新消息的信息（用于【最新消息】）"""
+        # 先从数据库获取最新消息
+        messages = self.db.get_messages(origin, limit=5)
 
-        msg = messages[0]
-        if msg.message_id != message_id:
-            # 从缓存中找
+        msg = None
+        for m in messages:
+            if m.message_id == message_id:
+                msg = m
+                break
+
+        # 如果没找到，从缓存找
+        if not msg:
             for cached in reversed(self._message_cache[origin]):
                 if cached.message_id == message_id:
                     msg = cached
                     break
-            else:
-                return None
 
-        time_str = datetime.fromtimestamp(msg.timestamp).strftime("%H:%M:%S")
-        admin_mark = "[管理员]" if msg.is_admin else ""
+        if not msg:
+            return None
 
-        # 修改：显示 msg 编号格式
-        header = f"[{msg.nickname}|{msg.user_id}(user_id)|{time_str}]:(msg:{msg.message_id}){admin_mark}"
-
-        reply_part = ""
-        if msg.reply_to:
-            reply_part = f" <引用:{msg.reply_to}>"
-
-        formatted = f"{header}{reply_part} {msg.content}"
-
+        formatted = self.format_message_for_llm(msg)
         return formatted, msg.user_id, msg.nickname
 
     def should_trigger_summary(self, origin: str) -> bool:
@@ -261,8 +239,8 @@ class ContextManager:
         time_str = datetime.fromtimestamp(msg.timestamp).strftime("%H:%M:%S")
         admin_mark = "[管理员]" if msg.is_admin else ""
 
-        # 修改：显示 msg 编号格式
-        header = f"[{msg.nickname}|{msg.user_id}(user_id)|{time_str}]:(msg:{msg.message_id}){admin_mark}"
+        # 格式: [昵称|user_id|时间]:(msg:消息ID)[管理员标记] <引用:消息ID> 内容
+        header = f"[{msg.nickname}|{msg.user_id}|{time_str}]:(msg:{msg.message_id}){admin_mark}"
 
         reply_part = ""
         if msg.reply_to:
@@ -270,40 +248,43 @@ class ContextManager:
 
         return f"{header}{reply_part} {msg.content}"
 
-    def build_system_prompt(self, origin: str, is_new_topic_hint: bool = True) -> str:
-        """构建系统提示词"""
+    def build_system_prompt(
+        self, 
+        origin: str, 
+        is_mentioned: bool = False,
+        current_user_id: str = "",
+        current_message_id: str = "",
+    ) -> str:
+        """构建系统提示词（新格式）"""
+        mention_hint = "（对方@了你，请回复这条消息）" if is_mentioned else ""
+
         lines = [
-            "你现在处于一个QQ群聊中。",
+            f"【最新消息】{mention_hint}",
+            "{latest_message}",  # 占位符，由调用者替换
             "",
-            "## 消息格式说明",
-            "每条消息的格式为：[昵称|user_id|时间]:(msg:消息ID)[管理员标记] <引用:消息ID> 内容",
-            "例如：[猫猫|128319593(user_id)|19:20:05]:(msg:267518526) <引用:977370735> [at:小死神] 可爱喵~",
+            "【最近10条消息】",
+            "{recent_messages}",  # 占位符
             "",
-            "## 可用标签",
-            "- [at:QQ号] - 表示@某人",
-            "- [image:序号:图片ID] - 表示图片（如 [image:1:img_abc123]）",
-            "- <引用:消息ID> - 表示回复了某条消息",
+            "【最近群聊话题】",
+            "{topic_summary}",  # 占位符，由模型A总结提供
+            "",
+            "【历史上下文（仅供回复参考）】",
+            "{historical_context}",  # 占位符
+            "",
+            "【对话理解规则】",
+            '1. 严格根据user_id识别人物，不要依赖昵称（昵称可能重复或变化）',
+            '2. 关注@提及和回复关系，理解对话链条',
+            '3. 注意时间戳，超过5分钟的发言视为历史上下文，当前焦点在最近5分钟',
+            '4. 当用户说"你刚才说的"、"他提到的"等代词时，结合上下文准确指代',
+            '5. 如果话题切换，请在回复中不要再牵扯旧话题',
+            "",
+            "【其他规则】",
+            f"- 如需@某人，使用[at:QQ号]格式，如果要@发送者，在回复开头使用 [at:{current_user_id}] 来@TA。 如果需要引用这条信息，在开头加上 <引用:{current_message_id}>。",
+            "- 如涉及之前的内容，请根据你的上下文记忆回答，不要虚构不存在的事",
             "",
             "## 可用工具",
             "- morechatplus_get_message(message_id) - 获取指定消息的完整内容",
             "- morechatplus_get_image_vision(image_id) - 获取图片的识图结果",
-            "",
         ]
-
-        if is_new_topic_hint:
-            lines.extend([
-                "## 重要提示",
-                "这可能是一个新的话题，也可能是之前话题的延续。",
-                "请仔细分析上下文，确认话题的连续性。",
-                "如果是新话题，可以直接回复；如果是延续，请注意承接上文。",
-                "",
-            ])
-
-        lines.extend([
-            "## 回复格式",
-            "在回复开头使用 [at:QQ号] 来@你想回复的人",
-            "如果你想引用某条消息，在回复开头使用 <引用:消息ID>",
-            "例如：[at:123456] <引用:267518526> 你的回复内容",
-        ])
 
         return "\n".join(lines)

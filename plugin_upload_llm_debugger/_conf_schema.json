@@ -12,9 +12,15 @@
         "hint": "设置后需要密码才能访问调试面板，建议设置强密码"
     },
     "max_records": {
-        "description": "数据库保留的最大记录数（0为无限）",
+        "description": "数据库保留的最大调试记录数（0为无限）",
         "type": "int",
         "default": 500,
-        "hint": "超过此数量将自动清理旧记录"
+        "hint": "普通调试记录（原功能）的最大保留数量"
+    },
+    "max_capture_records": {
+        "description": "抓包数据保留的最大记录数（0为无限）",
+        "type": "int",
+        "default": 500,
+        "hint": "抓包监控功能（新增）的最大保留数量，存储在独立的 capture.db 中"
     }
 }

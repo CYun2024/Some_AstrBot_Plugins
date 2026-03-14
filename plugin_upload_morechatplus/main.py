@@ -329,7 +329,7 @@ class MoreChatPlusPlugin(star.Star):
             event._morechatplus_processed = True
             return
 
-        # 构建增强后的prompt
+        # 构建增强后的prompt（新格式）
         enhanced_prompt = await self._build_enhanced_prompt(
             event=event,
             original_content=content,
@@ -340,11 +340,7 @@ class MoreChatPlusPlugin(star.Star):
             active_reply_info=active_reply_info,
         )
 
-        # 确保包含Bot名字
-        if self.config.core.bot_name and self.config.core.bot_name not in enhanced_prompt[:50]:
-            enhanced_prompt = f"{self.config.core.bot_name}，请回复：\n\n{enhanced_prompt}"
-
-        logger.info(f"[MoreChatPlus] 增强后的prompt预览: {enhanced_prompt[:200]}...")
+        logger.info(f"[MoreChatPlus] 增强后的prompt预览: {enhanced_prompt[:300]}...")
 
         # 关键修改：不再直接替换消息链，而是将增强后的prompt存储在事件上
         # 供 on_llm_request 使用，确保可靠注入
@@ -355,17 +351,17 @@ class MoreChatPlusPlugin(star.Star):
 
     @filter.on_llm_request()
     async def on_llm_request(self, event: AstrMessageEvent, req):
-        """在LLM请求前注入上下文 - 修复版"""
+        """在LLM请求前注入上下文 - 修复版（清空原生contexts避免重复）"""
         if not self.config.core.enable:
             return
-        
+
         # 检查是否有预处理的增强prompt
         if not hasattr(event, '_morechatplus_enhanced_prompt'):
             return
-            
+
         enhanced_prompt = event._morechatplus_enhanced_prompt
         injected = False
-        
+
         try:
             # 方法1: 直接修改 prompt 属性（AstrBot 最常用）
             if hasattr(req, 'prompt'):
@@ -373,7 +369,7 @@ class MoreChatPlusPlugin(star.Star):
                 req.prompt = enhanced_prompt
                 logger.info(f"[MoreChatPlus] 已注入到 req.prompt | 原长度: {len(str(original))} | 新长度: {len(enhanced_prompt)}")
                 injected = True
-            
+
             # 方法2: 修改 messages 列表（OpenAI格式）
             elif hasattr(req, 'messages') and isinstance(req.messages, list):
                 for i in range(len(req.messages) - 1, -1, -1):
@@ -383,8 +379,8 @@ class MoreChatPlusPlugin(star.Star):
                         logger.info(f"[MoreChatPlus] 已注入到 messages[{i}].content")
                         injected = True
                         break
-            
-            # 方法3: 修改 contexts（历史上下文，关键修复！）
+
+            # 方法3: 修改 contexts（历史上下文）
             elif hasattr(req, 'contexts') and isinstance(req.contexts, list):
                 for i in range(len(req.contexts) - 1, -1, -1):
                     ctx = req.contexts[i]
@@ -393,16 +389,25 @@ class MoreChatPlusPlugin(star.Star):
                         logger.info(f"[MoreChatPlus] 已注入到 contexts[{i}].content")
                         injected = True
                         break
-            
+
             if injected:
                 # 同步更新 event 的 message_str
                 if hasattr(event, 'message_str'):
                     event.message_str = enhanced_prompt
+                
+                # ===== 关键修改：清空原始 contexts，避免上下文重复 =====
+                if hasattr(req, 'contexts'):
+                    original_contexts_len = len(req.contexts)
+                    req.contexts = []  # 清空为[]
+                    # 或者完全删除: delattr(req, 'contexts') （但某些provider可能报错，设为空列表更安全）
+                    logger.info(f"[MoreChatPlus] 已清空原始 contexts（原{original_contexts_len}条）避免与注入的prompt重复")
+                
                 delattr(event, '_morechatplus_enhanced_prompt')
-                logger.info("[MoreChatPlus] 上下文注入成功")
+                logger.info("[MoreChatPlus] 上下文注入成功，原生contexts已清空")
+
             else:
                 logger.error(f"[MoreChatPlus] 注入失败，req属性: {[a for a in dir(req) if not a.startswith('_')]}")
-                
+
         except Exception as e:
             logger.error(f"[MoreChatPlus] 注入异常: {e}")
 
@@ -435,10 +440,6 @@ class MoreChatPlusPlugin(star.Star):
 
                         if temp_path and Path(temp_path).exists():
                             # 保存到插件缓存（自动MD5去重）
-                            # save_image 会：
-                            # 1. 计算MD5检查是否已存在
-                            # 2. 如果存在：删除temp_path，返回已有ID和路径
-                            # 3. 如果不存在：复制到插件目录，删除temp_path，返回新ID和路径
                             img_id, exists, final_path = self.image_cache.save_image(url, temp_path)
                             image_ids.append(img_id)
 
@@ -633,61 +634,93 @@ class MoreChatPlusPlugin(star.Star):
         vision_result: Optional[str] = None,
         active_reply_info: Optional[dict] = None,
     ) -> str:
-        """构建增强后的prompt（区分主动/被动回复）"""
+        """构建增强后的prompt（新上下文格式）"""
         origin = event.unified_msg_origin
 
-        context_text = self.context_manager.get_formatted_context(origin)
-        user_profile = self.user_profile_manager.get_profile_summary(user_id, origin)
-        system_prompt = self.context_manager.build_system_prompt(origin)
+        # 检查是否是@触发
+        is_mentioned = self.config.core.bot_qq_id and f"[at:{self.config.core.bot_qq_id}]" in original_content
 
-        new_message = format_context_message(
-            nickname=nickname,
-            user_id=user_id,
-            timestamp=time.time(),
-            message_id=message_id,
-            content=original_content,
-            is_admin=user_id == self.config.core.admin_user_id,
+        # 1. 获取最新消息（当前消息）
+        latest_message_info = self.context_manager.get_new_message_info(origin, message_id)
+        if latest_message_info:
+            latest_message = latest_message_info[0]
+        else:
+            # 如果找不到，用当前消息构建
+            latest_message = format_context_message(
+                nickname=nickname,
+                user_id=user_id,
+                timestamp=time.time(),
+                message_id=message_id,
+                content=original_content,
+                is_admin=user_id == self.config.core.admin_user_id,
+                reply_to=None,
+            )
+
+        # 添加识图结果到最新消息（如果有）
+        if vision_result:
+            latest_message += f"\n[图片识别结果: {vision_result}]"
+
+        # 2. 获取最近10条消息（不含当前消息）
+        recent_10_messages = self.context_manager.get_recent_messages_formatted(
+            origin=origin,
+            limit=10,
+            exclude_message_id=message_id
         )
 
-        admin_hint = ""
-        if user_id == self.config.core.admin_user_id:
-            admin_hint = "\n\n【重要】这条消息来自管理员，请特别注意。"
+        # 3. 获取最近群聊话题（模型A总结）
+        topic_summary = "暂无话题总结"
+        recent_summaries = self.db.get_recent_summaries(origin, limit=1)
+        if recent_summaries:
+            # 使用新的格式化方法
+            from .model_a_processor import SummaryResult
+            summary_obj = SummaryResult(
+                summary=recent_summaries[0].summary,
+                topic_analysis=recent_summaries[0].topic_analysis,
+                suggestions=recent_summaries[0].suggestions,
+                should_reply=recent_summaries[0].should_reply,
+                timestamp=recent_summaries[0].timestamp,
+                active_topic=recent_summaries[0].topic_analysis.split('\n')[0] if recent_summaries[0].topic_analysis else "未知话题",
+                topic_evolution=[],
+                participants=[]
+            )
+            # 尝试从数据库解析更详细的信息（如果有的话）
+            topic_summary = self.model_a_processor.format_summary_for_display(summary_obj)
+        elif active_reply_info:
+            # 如果有即时的active_reply_info，使用它
+            topic_summary = self.model_a_processor.format_summary_for_display(active_reply_info)
 
-        profile_hint = ""
+        # 4. 获取历史上下文（更早的消息）
+        historical_context = self.context_manager.get_formatted_context(
+            origin=origin,
+            limit=self.config.context.max_context_messages - 10,
+            include_summaries=False,
+            exclude_message_ids=[message_id]
+        )
+
+        # 构建系统提示词（使用模板）
+        system_prompt_template = self.context_manager.build_system_prompt(
+            origin=origin,
+            is_mentioned=is_mentioned,
+            current_user_id=user_id,
+            current_message_id=message_id,
+        )
+
+        # 填充模板
+        enhanced_prompt = system_prompt_template.format(
+            latest_message=latest_message,
+            recent_messages=recent_10_messages,
+            topic_summary=topic_summary,
+            historical_context=historical_context
+        )
+
+        # 添加用户画像（如果有）
+        user_profile = self.user_profile_manager.get_profile_summary(user_id, origin)
         if user_profile:
-            profile_hint = f"\n\n发送者画像: {user_profile}"
+            enhanced_prompt += f"\n\n【发送者画像】{user_profile}"
 
-        vision_hint = ""
-        if vision_result:
-            vision_hint = f"\n\n图片识别结果: {vision_result}"
-
-        # 关键修改：只有主动回复（非@触发）时才附加建议
-        active_reply_hint = ""
-        if active_reply_info:
-            # 检查当前是否是被@触发的（通过检查original_content中是否有[at:bot_qq_id]）
-            is_mentioned = self.config.core.bot_qq_id and f"[at:{self.config.core.bot_qq_id}]" in original_content
-            if not is_mentioned:
-                # 只有主动回复（非@触发）时才附加建议
-                active_reply_hint = (
-                    f"\n\n【主动回复建议】\n"
-                    f"场景分析: {active_reply_info.topic_analysis}\n"
-                    f"回复策略: {active_reply_info.reply_suggestion}"
-                )
-            else:
-                # 被@时不附加建议，让主LLM自行处理
-                logger.debug("[MoreChatPlus] 被@触发，不附加模型A建议")
-
-        enhanced_prompt = f"""{system_prompt}
-
-=== 历史上下文 ===
-{context_text}
-
-=== 当前消息 ===
-{new_message}{admin_hint}{profile_hint}{vision_hint}{active_reply_hint}
-
-请回复这条消息。在回复开头使用 [at:{user_id}] 来@发送者。
-如果需要引用，使用 <引用:{message_id}>。
-"""
+        # 添加管理员标记
+        if user_id == self.config.core.admin_user_id:
+            enhanced_prompt += "\n\n【重要】这条消息来自管理员，请特别注意。"
 
         return enhanced_prompt
 
