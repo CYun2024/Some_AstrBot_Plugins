@@ -33,6 +33,12 @@
                 "hint": "用于识别@bot",
                 "type": "string",
                 "default": ""
+            },
+            "debug": {
+                "description": "调试模式",
+                "hint": "开启后会输出详细调试日志，用于排查问题",
+                "type": "bool",
+                "default": false
             }
         }
     },

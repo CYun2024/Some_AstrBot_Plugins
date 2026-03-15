@@ -67,6 +67,7 @@ class CoreSettings:
     admin_user_id: str = ""
     bot_name: str = "机巧猫"
     bot_qq_id: str = ""
+    debug: bool = False  # 新增：调试日志开关
 
 
 @dataclass(frozen=True)
@@ -150,6 +151,7 @@ def parse_plugin_config(raw: dict[str, Any] | None) -> PluginConfig:
         admin_user_id=_to_str(core_raw.get("admin_user_id"), ""),
         bot_name=_to_str(core_raw.get("bot_name"), "机巧猫"),
         bot_qq_id=_to_str(core_raw.get("bot_qq_id"), ""),
+        debug=_to_bool(core_raw.get("debug"), False),  # 新增
     )
 
     # 模型配置

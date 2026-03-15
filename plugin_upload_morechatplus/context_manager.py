@@ -262,7 +262,7 @@ class ContextManager:
             f"【最新消息】{mention_hint}",
             "{latest_message}",  # 占位符，由调用者替换
             "",
-            "【最近10条消息】",
+            "【最近10条消息(供回复参考，在话题转换时请尽量回复新话题)】",
             "{recent_messages}",  # 占位符
             "",
             "【最近群聊话题】",
