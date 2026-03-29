@@ -698,6 +698,81 @@ class StatsManager:
 
         return chr(10).join(lines), meme_images
 
+    
+    def get_haqi_stats_for_dates(self, origin: str, dates: List[str]) -> Dict[str, Dict]:
+        """获取指定多个日期的哈气统计（用于批量保存）
+
+        Args:
+            origin: 群origin
+            dates: 日期字符串列表 ["2026/03/10", "2026/03/11", ...]
+
+        Returns:
+            {
+                "2026/03/10": {
+                    "total_count": 总消息数,
+                    "ranking": [(user_id, nickname, text_count, meme_count, total_count), ...]
+                },
+                ...
+            }
+        """
+        if not dates:
+            return {}
+
+        try:
+            # 确定时间范围
+            date_objs = [datetime.strptime(d, "%Y/%m/%d") for d in dates]
+            start_time = min(date_objs).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+            end_time = (max(date_objs) + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+
+            # 获取该时间范围的所有消息
+            messages = self._get_messages_from_morechatplus(origin, start_time, end_time)
+
+            # 按日期分组统计
+            daily_stats = {d: {} for d in dates}  # date -> {(user_id, nickname): {"text": 0, "meme": 0}}
+
+            for msg in messages:
+                msg_time = datetime.fromtimestamp(msg["timestamp"])
+                date_key = msg_time.strftime("%Y/%m/%d")
+
+                if date_key not in daily_stats:
+                    continue
+
+                user_id = msg["user_id"]
+                nickname = msg["nickname"]
+                content = msg["content"]
+
+                # 统计哈气
+                text_haqi = self.is_haqi(content)
+                meme_haqi = self.count_haqi_memes(content)
+
+                if text_haqi > 0 or meme_haqi > 0:
+                    key = (user_id, nickname)
+                    if key not in daily_stats[date_key]:
+                        daily_stats[date_key][key] = {"text": 0, "meme": 0}
+                    daily_stats[date_key][key]["text"] += text_haqi
+                    daily_stats[date_key][key]["meme"] += meme_haqi
+
+            # 转换为返回格式
+            result = {}
+            for date_str in dates:
+                day_data = daily_stats.get(date_str, {})
+                ranking = []
+                for (user_id, nickname), counts in day_data.items():
+                    text_c = counts["text"]
+                    meme_c = counts["meme"]
+                    total_c = text_c + meme_c
+                    ranking.append((user_id, nickname, text_c, meme_c, total_c))
+                ranking.sort(key=lambda x: -x[4])
+                result[date_str] = {
+                    "ranking": ranking,
+                    "total_count": len(ranking)
+                }
+
+            return result
+        except Exception as e:
+            logger.error(f"[ChanganCat] 批量获取日期统计失败: {e}")
+            return {}
+
     def cleanup_old_stats(self):
         """清理过期统计数据"""
         deleted = self.db.cleanup_old_records(self.config.database.data_retention_days)

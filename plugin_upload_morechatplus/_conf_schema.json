@@ -44,16 +44,9 @@
     },
     "model_settings": {
         "description": "模型配置",
-        "hint": "配置不同功能使用的模型",
+        "hint": "配置不同功能使用的模型（主LLM通过上下文注入，无需配置）",
         "type": "object",
         "items": {
-            "main_llm_provider": {
-                "description": "主LLM提供商ID",
-                "hint": "用于正常回复的模型，留空使用默认",
-                "type": "string",
-                "_special": "select_provider",
-                "default": ""
-            },
             "model_a_provider": {
                 "description": "模型A提供商ID",
                 "hint": "用于总结上下文和判定主动回复的模型，留空使用默认",
@@ -130,14 +123,14 @@
     },
     "active_reply_settings": {
         "description": "主动回复配置",
-        "hint": "配置主动回复的触发条件",
+        "hint": "配置主动回复的触发条件（开发中，暂时不生效）",
         "type": "object",
         "items": {
             "enable": {
-                "description": "启用主动回复",
-                "hint": "开启后模型A会判定是否需要主动回复",
+                "description": "启用主动回复（开发中，暂时不生效）",
+                "hint": "开启后模型A会判定是否需要主动回复（当前版本此功能开发中，建议保持关闭）",
                 "type": "bool",
-                "default": true
+                "default": false
             },
             "trigger_keyword": {
                 "description": "主动回复触发标记",
@@ -246,7 +239,7 @@
             },
             "main_llm_sec": {
                 "description": "主LLM超时(秒)",
-                "hint": "主回复模型的超时时间",
+                "hint": "主回复模型的超时时间（保留用于兼容）",
                 "type": "float",
                 "default": 60.0
             }

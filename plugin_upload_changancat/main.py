@@ -7,6 +7,7 @@
 - 复读功能（修复表情包复读，从morechatplus读取历史消息）
 - 个人哈气详情查询（支持图片渲染）
 - 哈气周榜（按天分组显示最近7天统计）
+- 哈气趋势图（支持自定义时间范围）
 """
 
 import asyncio
@@ -16,7 +17,7 @@ import aiohttp
 import os
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Dict, Tuple
 
 from astrbot.api import logger, star
 from astrbot.api.event import AstrMessageEvent, filter
@@ -36,6 +37,16 @@ try:
 except ImportError:
     PIL_AVAILABLE = False
     logger.warning("[ChanganCat] PIL库未安装，图片渲染功能将不可用")
+
+# 趋势图生成相关导入
+try:
+    import matplotlib.pyplot as plt
+    import matplotlib.dates as mdates
+    from matplotlib.font_manager import FontProperties
+    MATPLOTLIB_AVAILABLE = True
+except ImportError:
+    MATPLOTLIB_AVAILABLE = False
+    logger.warning("[ChanganCat] matplotlib库未安装，趋势图功能将不可用")
 
 
 class SimpleMessage:
@@ -60,7 +71,7 @@ class ChanganCatPlugin(star.Star):
         )
         self.db = DatabaseManager(plugin_data_dir / "changancat.db")
 
-        # 临时下载目录（用于网络图片）
+        # 临时下载目录（用于网络图片和趋势图）
         self.temp_dir = plugin_data_dir / "temp_images"
         self.temp_dir.mkdir(parents=True, exist_ok=True)
 
@@ -138,8 +149,245 @@ class ChanganCatPlugin(star.Star):
         self._font_cache[size] = font
         return font
 
+    def _setup_matplotlib_font(self):
+        """设置matplotlib中文字体"""
+        if not MATPLOTLIB_AVAILABLE:
+            return False
+
+        try:
+            # 尝试常见中文字体
+            chinese_fonts = [
+                'WenQuanYi Micro Hei',
+                'WenQuanYi Zen Hei', 
+                'SimHei',
+                'Microsoft YaHei',
+                'Noto Sans CJK SC',
+                'Droid Sans Fallback'
+            ]
+
+            # 检查系统中可用的字体
+            available_font = None
+            from matplotlib import font_manager
+            system_fonts = [f.name for f in font_manager.fontManager.ttflist]
+
+            for font in chinese_fonts:
+                if font in system_fonts:
+                    available_font = font
+                    break
+
+            if available_font:
+                plt.rcParams['font.sans-serif'] = [available_font, 'DejaVu Sans']
+            else:
+                # 如果没找到中文字体，使用默认字体并警告
+                logger.warning("[ChanganCat] 未找到系统中文字体，趋势图中文可能显示为方块")
+
+            plt.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
+            return True
+
+        except Exception as e:
+            logger.error(f"[ChanganCat] 设置matplotlib字体失败: {e}")
+            return False
+
+    def _parse_trend_args(self, args_text: str) -> Dict[str, any]:
+        """解析趋势图命令参数
+
+        支持格式：
+        - /哈气趋势 @xxx          -> 默认7天
+        - /哈气趋势 @xxx 14       -> 最近14天
+        - /哈气趋势 @xxx 260310 260312  -> 指定日期范围 YYMMDD
+        """
+        result = {
+            'days': 7,  # 默认7天
+            'start_date': None,
+            'end_date': None,
+            'use_date_range': False
+        }
+
+        if not args_text:
+            return result
+
+        # 移除@并提取纯数字参数
+        parts = args_text.replace('@', '').strip().split()
+
+        # 提取所有6位数字（可能是日期YYMMDD）
+        date_candidates = []
+        other_numbers = []
+
+        for part in parts:
+            if part.isdigit():
+                if len(part) == 6:
+                    # 可能是 YYMMDD 格式
+                    date_candidates.append(part)
+                elif len(part) <= 3:
+                    # 可能是天数（1-3位数字）
+                    other_numbers.append(int(part))
+
+        # 如果有两个6位数字，视为日期范围
+        if len(date_candidates) >= 2:
+            try:
+                # 解析为 YYMMDD -> YYYY/MM/DD
+                def parse_yymmdd(yymmdd):
+                    yy = int(yymmdd[:2])
+                    mm = int(yymmdd[2:4])
+                    dd = int(yymmdd[4:6])
+                    year = 2000 + yy if yy < 50 else 1900 + yy
+                    return f"{year}/{mm:02d}/{dd:02d}"
+
+                result['start_date'] = parse_yymmdd(date_candidates[0])
+                result['end_date'] = parse_yymmdd(date_candidates[1])
+                result['use_date_range'] = True
+
+                # 确保 start <= end
+                if result['start_date'] > result['end_date']:
+                    result['start_date'], result['end_date'] = result['end_date'], result['start_date']
+
+            except Exception as e:
+                logger.error(f"[ChanganCat] 解析日期参数失败: {e}")
+                result['use_date_range'] = False
+
+        # 如果没用日期范围，检查是否有天数参数
+        if not result['use_date_range'] and other_numbers:
+            days = other_numbers[0]
+            if 1 <= days <= 365:
+                result['days'] = days
+
+        return result
+
+    def _generate_trend_chart(self, data_records: List, user_id: str, nickname: str, 
+                             title_suffix: str = "") -> Optional[str]:
+        """生成哈气趋势图（三条折线版本）
+
+        Args:
+            data_records: DailyHaqiRecord 列表
+            user_id: 用户QQ号
+            nickname: 用户昵称
+            title_suffix: 标题后缀（如" (近7日)"）
+
+        Returns:
+            图片保存路径，失败返回None
+        """
+        if not MATPLOTLIB_AVAILABLE:
+            logger.error("[ChanganCat] matplotlib不可用，无法生成趋势图")
+            return None
+
+        if not data_records:
+            logger.error("[ChanganCat] 无数据记录，无法生成趋势图")
+            return None
+
+        try:
+            self._setup_matplotlib_font()
+
+            # 准备数据（按日期排序）
+            sorted_records = sorted(data_records, key=lambda x: x.date)
+            dates = [datetime.strptime(r.date, "%Y/%m/%d") for r in sorted_records]
+            text_counts = [r.text_count for r in sorted_records]
+            meme_counts = [r.meme_count for r in sorted_records]
+            total_counts = [r.text_count + r.meme_count for r in sorted_records]
+
+            # 创建图表（使用双Y轴）
+            fig, ax1 = plt.subplots(figsize=(12, 6), dpi=150)
+
+            # 设置标题
+            full_title = f"{nickname}({user_id})的哈气趋势图{title_suffix}"
+            ax1.set_title(full_title, fontsize=14, fontweight='bold', pad=20)
+
+            # X轴格式化为 MM-DD
+            date_labels = [d.strftime("%m-%d") for d in dates]
+            x_pos = range(len(dates))
+
+            # 绘制三条折线
+            # 1. 文字哈气（红色）
+            line1 = ax1.plot(x_pos, text_counts, 'o-', color='#FF6B6B', 
+                           linewidth=2, markersize=6, label='文字哈气', alpha=0.8)
+
+            # 2. 表情包哈气（青色）
+            line2 = ax1.plot(x_pos, meme_counts, 's-', color='#4ECDC4', 
+                           linewidth=2, markersize=6, label='表情包哈气', alpha=0.8)
+
+            # 3. 总计（黄色/金色，加粗）
+            line3 = ax1.plot(x_pos, total_counts, '^-', color='#FFD93D', 
+                           linewidth=3, markersize=8, label='总计', alpha=0.9, zorder=5)
+
+            # 在数据点上显示数值（只显示总计的数值避免太拥挤）
+            for i, (x, y) in enumerate(zip(x_pos, total_counts)):
+                if y > 0:
+                    ax1.annotate(f'{int(y)}', (x, y), 
+                               textcoords="offset points", xytext=(0, 10),
+                               ha='center', fontsize=9, fontweight='bold', color='#FFD93D')
+
+            # 设置X轴
+            ax1.set_xlabel('日期', fontsize=12)
+            ax1.set_xticks(x_pos)
+            ax1.set_xticklabels(date_labels, rotation=45, ha='right')
+            ax1.set_ylabel('哈气次数', fontsize=12)
+
+            # 添加网格线
+            ax1.grid(True, linestyle='--', alpha=0.3, axis='y')
+            ax1.grid(True, linestyle='--', alpha=0.1, axis='x')
+
+            # 合并图例
+            lines = line1 + line2 + line3
+            labels = [l.get_label() for l in lines]
+            ax1.legend(lines, labels, loc='upper left', frameon=True, fontsize=10)
+
+            # 设置边距
+            plt.tight_layout()
+
+            # 保存图片
+            filename = f"haqi_trend_{user_id}_{int(datetime.now().timestamp())}.png"
+            save_path = self.temp_dir / filename
+
+            plt.savefig(save_path, dpi=150, bbox_inches='tight', 
+                       facecolor='white', edgecolor='none')
+            plt.close(fig)
+
+            logger.info(f"[ChanganCat] 趋势图已生成: {save_path}")
+            return str(save_path)
+
+        except Exception as e:
+            logger.error(f"[ChanganCat] 生成趋势图失败: {e}", exc_info=True)
+            return None
+
+    def _sync_haqi_data(self, origin: str, days: int = 7) -> int:
+        """同步哈气数据到数据库
+
+        获取最近N天数据并保存，但只有最近3天的数据会覆盖更新，
+        3天以前的数据只插入不更新（保留历史）。
+
+        Args:
+            origin: 群origin
+            days: 获取多少天的数据（默认7天）
+
+        Returns:
+            保存的记录总数
+        """
+        # 获取最近N天的日期列表
+        recent_dates = self._get_recent_dates(days)
+
+        # 获取这些天的详细统计数据
+        daily_stats = self.stats_manager.get_haqi_stats_for_dates(origin, recent_dates)
+
+        # 提取 ranking 数据
+        ranking_data = {date: data["ranking"] for date, data in daily_stats.items()}
+
+        # 批量保存（使用3天覆盖策略）
+        saved_result = self.db.save_daily_haqi_stats_batch(origin, ranking_data, max_override_days=3)
+
+        total_saved = sum(saved_result.values())
+        logger.info(f"[ChanganCat] 已同步 {days} 天哈气数据，共 {total_saved} 条记录（仅最近3天覆盖更新）")
+        return total_saved
+
+    def _get_recent_dates(self, days: int = 7) -> List[str]:
+        """获取最近N天的日期字符串列表（YYYY/MM/DD格式）"""
+        dates = []
+        today = datetime.now()
+        for i in range(days, 0, -1):  # 从今天往前数
+            date_obj = today - timedelta(days=i)
+            dates.append(date_obj.strftime("%Y/%m/%d"))
+        return dates
+
     def _render_haqi_detail_image(self, data: dict, save_path: str) -> bool:
-        """渲染哈气详情为图片"""
+        """渲染哈气详情为图片（原有方法保持不变）"""
         if not PIL_AVAILABLE:
             return False
 
@@ -263,7 +511,7 @@ class ChanganCatPlugin(star.Star):
             return False
 
     async def _download_image(self, url: str) -> Optional[str]:
-        """下载网络图片到本地临时目录"""
+        """下载网络图片到本地临时目录（原有方法）"""
         if not url or not url.startswith("http"):
             return None
 
@@ -318,7 +566,7 @@ class ChanganCatPlugin(star.Star):
             logger.error(f"[ChanganCat] 启动清理任务失败: {e}")
 
     async def _daily_report_task(self):
-        """每日报告定时任务"""
+        """每日报告定时任务（原有方法）"""
         logger.info("[ChanganCat] 每日报告任务进入主循环")
 
         await asyncio.sleep(30)
@@ -449,18 +697,13 @@ class ChanganCatPlugin(star.Star):
     async def _send_daily_report_to_group(self, internal_id: str):
         """发送每日报告到指定群（使用真实origin查询和发送）"""
         try:
-            # 获取真实origin（用于查询数据库和发送消息）
             real_origin = self._get_real_origin(internal_id)
             if not real_origin:
                 logger.error(f"[ChanganCat] 无法发送日报到 {internal_id}：未缓存真实origin")
                 return
 
             group_name = self._get_group_name(internal_id)
-
-            # 使用真实origin查询数据（与/哈气榜一致）
             report_text = self.stats_manager.format_haqi_command_response(real_origin, group_name)
-
-            # 使用真实origin发送消息
             await self._send_text_to_origin(internal_id, report_text)
 
             logger.info(f"[ChanganCat] 已发送每日哈气榜到 {internal_id}")
@@ -489,7 +732,6 @@ class ChanganCatPlugin(star.Star):
                     "SELECT DISTINCT origin FROM messages WHERE timestamp >= ?",
                     (yesterday,)
                 ).fetchall()
-                # 转换为内部ID格式
                 origins = []
                 for row in rows:
                     origin = row["origin"]
@@ -599,7 +841,7 @@ class ChanganCatPlugin(star.Star):
             return None
 
     async def _do_repeat(self, event: AstrMessageEvent, repeat_info: dict):
-        """执行复读"""
+        """执行复读（原有方法）"""
         try:
             content = repeat_info["content"]
             image_urls = repeat_info.get("image_urls", [])
@@ -664,9 +906,15 @@ class ChanganCatPlugin(star.Star):
         except Exception as e:
             logger.error(f"[ChanganCat] 复读失败: {e}")
 
-    @filter.command("哈气榜")
-    async def cmd_haqi_ranking(self, event: AstrMessageEvent):
-        """哈气榜命令 - 使用真实origin查询（与数据库存储格式一致）"""
+    @filter.command("哈气趋势")
+    async def cmd_haqi_trend(self, event: AstrMessageEvent):
+        """哈气趋势图命令 - 生成指定用户的哈气趋势图表
+
+        用法：
+        /哈气趋势 @xxx          -> 默认显示最近7天
+        /哈气趋势 @xxx 14       -> 最近14天
+        /哈气趋势 @xxx 260310 260312  -> 指定日期范围 YYMMDD格式
+        """
         if not self.config.core.enable:
             return
 
@@ -675,18 +923,110 @@ class ChanganCatPlugin(star.Star):
             event.stop_event()
             return
 
-        # 使用真实origin查询数据库（恢复原有行为）
+        if not MATPLOTLIB_AVAILABLE:
+            await self._safe_send(event, "趋势图功能需要安装matplotlib库")
+            event.stop_event()
+            return
+
+        # 提取@的目标和参数
+        target_id = None
+        args_text = ""
+
+        for comp in event.get_messages():
+            if isinstance(comp, At):
+                target_id = str(comp.qq)
+            elif isinstance(comp, Plain):
+                args_text = comp.text.replace("/哈气趋势", "").strip()
+
+        if not target_id:
+            help_text = """请@想要查看趋势的群友，例如：
+/哈气趋势 @张三
+也可以指定天数：/哈气趋势 @张三 14
+或指定日期：/哈气趋势 @张三 260310 260312"""
+            await self._safe_send(event, help_text)
+            event.stop_event()
+            return
+
         origin = event.unified_msg_origin
-        # 尝试获取群名（如果已缓存）
+        internal_id = self._extract_internal_id(origin)
+
+        # 解析参数
+        args = self._parse_trend_args(args_text)
+
+        try:
+            # 获取数据
+            if args['use_date_range']:
+                # 使用指定日期范围
+                records = self.db.get_daily_haqi_stats_range(
+                    origin, args['start_date'], args['end_date']
+                )
+                # 筛选特定用户
+                user_records = [r for r in records if r.user_id == target_id]
+                title_suffix = f" ({args['start_date']}~{args['end_date']})"
+            else:
+                # 使用最近N天
+                records = self.db.get_user_haqi_trend(origin, target_id, args['days'])
+                user_records = records
+                title_suffix = f" (近{args['days']}日)"
+
+            if not user_records:
+                # 尝试从昵称映射数据库获取昵称
+                user_info = self.db.get_user_info(origin, target_id)
+                nickname = user_info.nickname if user_info else f"用户{target_id}"
+                await self._safe_send(event, f"{nickname} 在选定时间段内没有哈气记录~")
+                event.stop_event()
+                return
+
+            # 获取用户昵称（优先使用记录中最新的）
+            user_records_sorted = sorted(user_records, key=lambda x: x.timestamp, reverse=True)
+            nickname = user_records_sorted[0].nickname
+
+            # 生成趋势图
+            chart_path = self._generate_trend_chart(
+                user_records, target_id, nickname, title_suffix
+            )
+
+            if chart_path and Path(chart_path).exists():
+                from astrbot.api.message_components import Image as CompImage
+                msg = SimpleMessage([CompImage(file=chart_path)])
+                await self.context.send_message(event.unified_msg_origin, msg)
+                logger.info(f"[ChanganCat] 已发送哈气趋势图 for {target_id}")
+            else:
+                await self._safe_send(event, "生成趋势图失败，请检查日志")
+
+            event.stop_event()
+
+        except Exception as e:
+            logger.error(f"[ChanganCat] 哈气趋势命令出错: {e}", exc_info=True)
+            await self._safe_send(event, f"生成趋势图失败: {e}")
+            event.stop_event()
+
+    @filter.command("哈气榜")
+    async def cmd_haqi_ranking(self, event: AstrMessageEvent):
+        """哈气榜命令 - 显示今日数据并同步最近7天数据（仅最近3天覆盖保存）"""
+        if not self.config.core.enable:
+            return
+
+        if event.get_message_type() != MessageType.GROUP_MESSAGE:
+            await self._safe_send(event, "该命令只能在群聊中使用")
+            event.stop_event()
+            return
+
+        origin = event.unified_msg_origin
         internal_id = self._extract_internal_id(origin)
         group_name = self._get_group_name(internal_id)
 
         try:
-            # 使用真实origin查询数据（因为数据库存储的是aiocqhttp:GroupMessage:XXX格式）
+            # 显示今日哈气榜
             response = self.stats_manager.format_haqi_command_response(origin, group_name)
+
+            # 同步最近7天数据（仅最近3天覆盖，3天前保留）
+            saved_count = self._sync_haqi_data(origin, days=7)
+            logger.info(f"[ChanganCat] /哈气榜 已同步7天数据，共 {saved_count} 条记录")
+
             await self._safe_send(event, response)
-            logger.info(f"[ChanganCat] 已响应/哈气榜命令")
             event.stop_event()
+
         except Exception as e:
             logger.error(f"[ChanganCat] 哈气榜命令出错: {e}")
             await self._safe_send(event, f"获取哈气榜失败: {e}")
@@ -694,7 +1034,7 @@ class ChanganCatPlugin(star.Star):
 
     @filter.command("哈气周榜")
     async def cmd_daily_haqi_ranking(self, event: AstrMessageEvent):
-        """哈气周榜命令 - 按天显示最近7天的哈气统计"""
+        """哈气周榜命令 - 按天显示最近7天的哈气统计，并同步数据（仅最近3天覆盖保存）"""
         if not self.config.core.enable:
             return
 
@@ -708,10 +1048,16 @@ class ChanganCatPlugin(star.Star):
         group_name = self._get_group_name(internal_id)
 
         try:
+            # 显示最近7天分日哈气榜
             response = self.stats_manager.format_daily_haqi_report(origin, group_name, days=7)
+
+            # 同步最近7天数据（仅最近3天覆盖，3天前保留）
+            saved_count = self._sync_haqi_data(origin, days=7)
+            logger.info(f"[ChanganCat] /哈气周榜 已同步7天数据，共 {saved_count} 条记录")
+
             await self._safe_send(event, response)
-            logger.info(f"[ChanganCat] 已响应/哈气周榜命令")
             event.stop_event()
+
         except Exception as e:
             logger.error(f"[ChanganCat] 哈气周榜命令出错: {e}")
             await self._safe_send(event, f"获取哈气周榜失败: {e}")
@@ -766,7 +1112,6 @@ class ChanganCatPlugin(star.Star):
         origin = event.unified_msg_origin
         internal_id = self._extract_internal_id(origin)
 
-        # 确保缓存当前群
         if internal_id not in self._real_origin_cache:
             self._real_origin_cache[internal_id] = origin
             logger.info(f"[ChanganCat] 测试前已缓存当前群: {internal_id}")
@@ -775,7 +1120,6 @@ class ChanganCatPlugin(star.Star):
         logger.info("[ChanganCat] 手动触发每日报告测试")
 
         try:
-            # 只发送当前群
             await self._send_daily_report_to_group(internal_id)
             await self._safe_send(event, "测试发送完成")
         except Exception as e:
@@ -984,7 +1328,7 @@ class ChanganCatPlugin(star.Star):
             logger.error(f"[ChanganCat] 发送消息失败: {e}")
 
     def _get_stats_text(self) -> str:
-        """获取插件统计信息"""
+        """获取插件统计信息（添加数据库统计）"""
         lines = []
         lines.append("📊 ChanganCat 统计信息")
         lines.append("")
@@ -993,11 +1337,24 @@ class ChanganCatPlugin(star.Star):
             import sqlite3
             with sqlite3.connect(self.db.db_path) as conn:
                 conn.row_factory = sqlite3.Row
+
+                # 复读记录数
                 row = conn.execute("SELECT COUNT(*) as cnt FROM repeat_records").fetchone()
                 repeat_count = row["cnt"] if row else 0
                 lines.append(f"复读记录: {repeat_count} 条")
+
+                # 每日哈气统计记录数（新增）
+                row = conn.execute("SELECT COUNT(*) as cnt FROM daily_haqi_stats").fetchone()
+                daily_haqi_count = row["cnt"] if row else 0
+                lines.append(f"每日哈气记录: {daily_haqi_count} 条")
+
+                # 用户映射记录数（新增）
+                row = conn.execute("SELECT COUNT(*) as cnt FROM user_info").fetchone()
+                user_info_count = row["cnt"] if row else 0
+                lines.append(f"用户映射记录: {user_info_count} 条")
+
         except Exception as e:
-            lines.append(f"获取统计失败: {e}")
+            lines.append(f"获取数据库统计失败: {e}")
 
         morechatplus_db_path = (
             Path(get_astrbot_data_path())
@@ -1038,7 +1395,8 @@ class ChanganCatPlugin(star.Star):
         else:
             lines.append("已缓存群号: 无")
 
-        lines.append(f"图片渲染: {'可用' if PIL_AVAILABLE else '不可用'}")
+        lines.append(f"图片渲染(PIL): {'可用' if PIL_AVAILABLE else '不可用'}")
+        lines.append(f"趋势图(matplotlib): {'可用' if MATPLOTLIB_AVAILABLE else '不可用'}")
 
         return chr(10).join(lines)
 

@@ -72,8 +72,7 @@ class CoreSettings:
 
 @dataclass(frozen=True)
 class ModelSettings:
-    """模型配置"""
-    main_llm_provider: str = ""
+    """模型配置（主LLM通过上下文注入，无需配置提供商）"""
     model_a_provider: str = ""
     model_a_fallback_provider: str = ""
     model_b_provider: str = ""
@@ -93,8 +92,8 @@ class ContextSettings:
 
 @dataclass(frozen=True)
 class ActiveReplySettings:
-    """主动回复配置"""
-    enable: bool = True
+    """主动回复配置（开发中，默认关闭）"""
+    enable: bool = False  # 默认关闭，功能开发中
     trigger_keyword: str = "[ACTIVE_REPLY]"
     strict_mode: bool = True
     avoid_controversial: bool = True
@@ -151,13 +150,12 @@ def parse_plugin_config(raw: dict[str, Any] | None) -> PluginConfig:
         admin_user_id=_to_str(core_raw.get("admin_user_id"), ""),
         bot_name=_to_str(core_raw.get("bot_name"), "机巧猫"),
         bot_qq_id=_to_str(core_raw.get("bot_qq_id"), ""),
-        debug=_to_bool(core_raw.get("debug"), False),  # 新增
+        debug=_to_bool(core_raw.get("debug"), False),
     )
 
-    # 模型配置
+    # 模型配置（已移除 main_llm_provider）
     models_raw = raw.get("model_settings", {})
     models = ModelSettings(
-        main_llm_provider=_to_str(models_raw.get("main_llm_provider"), ""),
         model_a_provider=_to_str(models_raw.get("model_a_provider"), ""),
         model_a_fallback_provider=_to_str(models_raw.get("model_a_fallback_provider"), ""),
         model_b_provider=_to_str(models_raw.get("model_b_provider"), ""),
@@ -178,10 +176,10 @@ def parse_plugin_config(raw: dict[str, Any] | None) -> PluginConfig:
         context_max_age_days=_to_int(context_raw.get("context_max_age_days"), 7, 1, 30),
     )
 
-    # 主动回复配置
+    # 主动回复配置（开发中，默认关闭）
     active_reply_raw = raw.get("active_reply_settings", {})
     active_reply = ActiveReplySettings(
-        enable=_to_bool(active_reply_raw.get("enable"), True),
+        enable=_to_bool(active_reply_raw.get("enable"), False),  # 默认关闭
         trigger_keyword=_to_str(active_reply_raw.get("trigger_keyword"), "[ACTIVE_REPLY]"),
         strict_mode=_to_bool(active_reply_raw.get("strict_mode"), True),
         avoid_controversial=_to_bool(active_reply_raw.get("avoid_controversial"), True),

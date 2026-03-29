@@ -1,6 +1,6 @@
 """LLM Debugger
 
-版本: 1.3.4
+版本: 1.3.5 (Fixed)
 作者: 韶虹CYun
 """
 
@@ -23,7 +23,7 @@ except ImportError:
     LLMResponse = None
 
 
-@register("llm_debugger", "韶虹CYun", "LLM 调用监控调试器（带WebUI）", "1.3.4")
+@register("llm_debugger", "韶虹CYun", "LLM 调用监控调试器（带WebUI）", "1.3.5")
 class LLMDebugger(Star):
     """LLM 调用监控调试器（带WebUI）- 支持MoreChatPlus数据查看 + 抓包功能"""
 
@@ -76,7 +76,7 @@ class LLMDebugger(Star):
             import functools
             import base64
         except ImportError as e:
-            logger.error("[LLMDebugger] 缺少依赖库: " + str(e) + "。请安装: pip install aiosqlite quart quart-cors")
+            logger.error("[LLMDebugger] 缺少依赖库: " + str(e) + "，请安装: pip install aiosqlite quart quart-cors")
             return
 
         plugin_config = self.context.get_config("llm_debugger") or {}
@@ -163,7 +163,7 @@ class LLMDebugger(Star):
                 "metadata": {
                     "has_images": self._has_images(req),
                     "req_type": type(req).__name__ if req else None,
-                    "plugin_version": "1.3.4"
+                    "plugin_version": "1.3.5"
                 }
             }
 
@@ -574,6 +574,8 @@ class LLMDebugger(Star):
         app = cors(app)
         app.secret_key = os.urandom(24)
 
+        logger.info("[LLMDebugger] 正在初始化 Web 服务器...")
+
         @app.errorhandler(Exception)
         async def handle_exception(e):
             if isinstance(e, NotFound):
@@ -632,11 +634,13 @@ button{width:100%;padding:0.75rem;background:#3b82f6;color:white;border:none;bor
                     return redirect("/")
                 return await render_template_string(LOGIN_HTML, error="密码错误")
             return await render_template_string(LOGIN_HTML, error="")
+        logger.info("[LLMDebugger] 注册路由: /login")
 
         @app.route("/logout")
         async def logout():
             session.pop("authenticated", None)
             return redirect("/login")
+        logger.info("[LLMDebugger] 注册路由: /logout")
 
         @app.route("/")
         @require_auth
@@ -646,8 +650,9 @@ button{width:100%;padding:0.75rem;background:#3b82f6;color:white;border:none;bor
             except Exception as e:
                 logger.error("[LLMDebugger] 渲染首页失败: " + str(e) + "\n" + traceback.format_exc())
                 return "Internal Server Error", 500
+        logger.info("[LLMDebugger] 注册路由: /")
 
-        @app.route("/api/recent")
+        @app.route("/api/recent", methods=["GET"])
         @require_auth
         async def get_recent():
             try:
@@ -656,9 +661,10 @@ button{width:100%;padding:0.75rem;background:#3b82f6;color:white;border:none;bor
             except Exception as e:
                 logger.error("[LLMDebugger] 获取最近记录失败: " + str(e) + "\n" + traceback.format_exc())
                 return jsonify({"error": str(e)}), 500
+        logger.info("[LLMDebugger] 注册路由: /api/recent")
 
         # ===== MoreChatPlus 数据查看 API =====
-        @app.route("/api/morechatplus/stats")
+        @app.route("/api/morechatplus/stats", methods=["GET"])
         @require_auth
         async def get_morechatplus_stats():
             try:
@@ -666,8 +672,9 @@ button{width:100%;padding:0.75rem;background:#3b82f6;color:white;border:none;bor
                 return jsonify(stats)
             except Exception as e:
                 return jsonify({"error": str(e)}), 500
+        logger.info("[LLMDebugger] 注册路由: /api/morechatplus/stats")
 
-        @app.route("/api/morechatplus/origins")
+        @app.route("/api/morechatplus/origins", methods=["GET"])
         @require_auth
         async def get_morechatplus_origins():
             try:
@@ -675,8 +682,9 @@ button{width:100%;padding:0.75rem;background:#3b82f6;color:white;border:none;bor
                 return jsonify({"origins": origins})
             except Exception as e:
                 return jsonify({"error": str(e)}), 500
+        logger.info("[LLMDebugger] 注册路由: /api/morechatplus/origins")
 
-        @app.route("/api/morechatplus/messages")
+        @app.route("/api/morechatplus/messages", methods=["GET"])
         @require_auth
         async def get_morechatplus_messages():
             try:
@@ -688,8 +696,9 @@ button{width:100%;padding:0.75rem;background:#3b82f6;color:white;border:none;bor
                 return jsonify({"messages": messages, "count": len(messages)})
             except Exception as e:
                 return jsonify({"error": str(e)}), 500
+        logger.info("[LLMDebugger] 注册路由: /api/morechatplus/messages")
 
-        @app.route("/api/morechatplus/profiles")
+        @app.route("/api/morechatplus/profiles", methods=["GET"])
         @require_auth
         async def get_morechatplus_profiles():
             try:
@@ -699,8 +708,9 @@ button{width:100%;padding:0.75rem;background:#3b82f6;color:white;border:none;bor
                 return jsonify({"profiles": profiles, "count": len(profiles)})
             except Exception as e:
                 return jsonify({"error": str(e)}), 500
+        logger.info("[LLMDebugger] 注册路由: /api/morechatplus/profiles")
 
-        @app.route("/api/morechatplus/summaries")
+        @app.route("/api/morechatplus/summaries", methods=["GET"])
         @require_auth
         async def get_morechatplus_summaries():
             try:
@@ -712,9 +722,10 @@ button{width:100%;padding:0.75rem;background:#3b82f6;color:white;border:none;bor
                 return jsonify({"summaries": summaries, "count": len(summaries)})
             except Exception as e:
                 return jsonify({"error": str(e)}), 500
+        logger.info("[LLMDebugger] 注册路由: /api/morechatplus/summaries")
 
         # ========== 新增：抓包API路由 ==========
-        @app.route("/api/capture")
+        @app.route("/api/capture", methods=["GET"])
         @require_auth
         async def get_capture():
             try:
@@ -724,6 +735,7 @@ button{width:100%;padding:0.75rem;background:#3b82f6;color:white;border:none;bor
             except Exception as e:
                 logger.error("[LLMDebugger] 获取抓包记录失败: " + str(e))
                 return jsonify({"error": str(e)}), 500
+        logger.info("[LLMDebugger] 注册路由: /api/capture (GET)")
 
         @app.route("/api/capture/clear", methods=["POST"])
         @require_auth
@@ -733,6 +745,7 @@ button{width:100%;padding:0.75rem;background:#3b82f6;color:white;border:none;bor
                 return jsonify({"success": True, "message": "抓包数据已清空"})
             except Exception as e:
                 return jsonify({"error": str(e)}), 500
+        logger.info("[LLMDebugger] 注册路由: /api/capture/clear (POST)")
 
         # 原有的WebSocket路由
         @app.websocket("/ws")
@@ -749,6 +762,7 @@ button{width:100%;padding:0.75rem;background:#3b82f6;color:white;border:none;bor
                 logger.debug("[LLMDebugger] WebSocket 客户端断开: " + str(e))
             finally:
                 self.unregister_ws_client(ws_obj)
+        logger.info("[LLMDebugger] 注册 WebSocket: /ws")
 
         # ========== 新增：抓包专用WebSocket ==========
         @app.websocket("/ws_capture")
@@ -766,8 +780,10 @@ button{width:100%;padding:0.75rem;background:#3b82f6;color:white;border:none;bor
                 logger.debug("[LLMDebugger] 抓包WebSocket客户端断开: " + str(e))
             finally:
                 self.capture_clients.discard(ws_obj)
+        logger.info("[LLMDebugger] 注册 WebSocket: /ws_capture")
 
         try:
+            logger.info("[LLMDebugger] 启动服务器在端口 " + str(port))
             await app.run_task(
                 host='0.0.0.0',
                 port=port,

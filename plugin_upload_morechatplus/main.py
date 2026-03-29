@@ -3,7 +3,7 @@
 QQ群聊增强插件，提供：
 - 上下文管理和总结
 - 用户画像维护
-- 主动回复判定
+- 主动回复判定（开发中）
 - 图片识别和缓存（插件自主管理存储）
 - 艾特功能
 """
@@ -105,6 +105,7 @@ class MoreChatPlusPlugin(star.Star):
             logger.info(f"[MoreChatPlus] {msg}")
         else:
             logger.debug(f"[MoreChatPlus] {msg}")
+
     async def _delayed_init_debugger(self):
         """延迟初始化 debugger 连接"""
         await asyncio.sleep(3)
@@ -183,7 +184,6 @@ class MoreChatPlusPlugin(star.Star):
 
             # 尝试提取引用信息（从响应中查找<引用:xxx>格式）
             reply_to = ""
-            import re
             ref_match = re.search(r'<引用[:\s]?(\d+)>', reply_text)
             if ref_match:
                 reply_to = ref_match.group(1)
@@ -439,12 +439,14 @@ class MoreChatPlusPlugin(star.Star):
         if should_reply and has_image:
             vision_result = await self._process_vision(image_urls, image_ids, event)
 
-        # 触发总结
-        if self.context_manager.should_trigger_summary(origin):
+        # 触发总结（仅在主动回复功能启用时）
+        if self.config.active_reply.enable and self.context_manager.should_trigger_summary(origin):
             asyncio.create_task(self._trigger_summary(origin))
 
-        # 检查主动回复
-        active_reply_info = self._check_pending_active_reply(origin)
+        # 检查主动回复（仅在主动回复功能启用时）
+        active_reply_info = None
+        if self.config.active_reply.enable:
+            active_reply_info = self._check_pending_active_reply(origin)
 
         if not (should_reply or active_reply_info):
             self._log_debug("无需回复")
@@ -492,7 +494,7 @@ class MoreChatPlusPlugin(star.Star):
 
     @filter.on_llm_request()
     async def on_llm_request(self, event: AstrMessageEvent, req):
-        """在LLM请求前注入上下文"""
+        """在LLM请求前注入上下文（主LLM通过此方法获得上下文，无需配置提供商ID）"""
         if not self.config.core.enable:
             return
         if not hasattr(event, '_morechatplus_enhanced_prompt'):
@@ -649,7 +651,7 @@ class MoreChatPlusPlugin(star.Star):
         return ""
 
     async def _trigger_summary(self, origin: str):
-        """触发上下文总结"""
+        """触发上下文总结（主动回复功能，开发中）"""
         if not self.config.active_reply.enable:
             self.context_manager.reset_counter(origin)
             return
@@ -679,7 +681,7 @@ class MoreChatPlusPlugin(star.Star):
         active_reply_info: Optional[dict] = None,
         is_mentioned: bool = False,
     ) -> str:
-        """构建增强后的prompt"""
+        """构建增强后的prompt（主LLM通过上下文注入，无需指定提供商）"""
         origin = event.unified_msg_origin
 
         # 最新消息
@@ -737,11 +739,14 @@ class MoreChatPlusPlugin(star.Star):
             current_message_id=message_id,
         )
 
-        enhanced_prompt = system_prompt_template.format(
-            latest_message=latest_message,
-            recent_messages=recent_10_messages,
-            topic_summary=topic_summary,
-            historical_context=historical_context
+        enhanced_prompt = system_prompt_template.replace(
+            "{latest_message}", latest_message
+        ).replace(
+            "{recent_messages}", recent_10_messages
+        ).replace(
+            "{topic_summary}", topic_summary
+        ).replace(
+            "{historical_context}", historical_context
         )
 
         # 用户画像
@@ -758,37 +763,375 @@ class MoreChatPlusPlugin(star.Star):
 
         return enhanced_prompt
 
+
+
     # ==================== LLM 工具函数 ====================
 
     @llm_tool(name="morechatplus_get_message")
-    async def tool_get_message(self, event: AstrMessageEvent, message_id: str):
-        """获取指定消息"""
-        return await self.chat_tools.get_message_content(event, message_id)
+    async def tool_get_message(self, event: AstrMessageEvent, message_id: str = ""):
+        """获取指定消息的完整内容。
+        
+        当需要查看某条引用消息或历史消息的详细内容时使用此工具。
+        
+        Args:
+            message_id (str): 消息ID，纯数字格式，如 "267518526"，不需要带 #msg 前缀
+            
+        Returns:
+            str: 消息内容的文本描述，包含发送者、时间、内容等信息
+        """
+        try:
+            logger.info(f"[MoreChatPlus] 工具调用: morechatplus_get_message | 参数: message_id='{message_id}'")
+            if not message_id or not message_id.strip():
+                result = "错误：缺少必需参数 message_id，请提供具体的消息ID"
+                self._cache_tool_result(event, result)
+                return result
+            
+            result_data = await self.chat_tools.get_message_content(event, message_id)
+            
+            # 解析 JSON 转为更易读的文本
+            try:
+                data = json.loads(result_data)
+                if data.get("status") == "error":
+                    result = f"[获取消息失败] {data.get('message', '未知错误')}"
+                else:
+                    result = (f"[消息 #{data.get('message_id')}]\n"
+                             f"发送者: {data.get('nickname')}({data.get('user_id')})\n"
+                             f"时间: {datetime.fromtimestamp(data.get('timestamp', 0)).strftime('%H:%M:%S') if data.get('timestamp') else '未知'}\n"
+                             f"内容: {data.get('content', '无内容')}")
+            except:
+                result = f"[消息内容]\n{result_data}"
+            
+            self._cache_tool_result(event, result)
+            logger.info(f"[MoreChatPlus] 工具结果: {result[:100]}...")
+            return result
+            
+        except Exception as e:
+            error_msg = f"获取消息失败: {str(e)}"
+            logger.error(f"[MoreChatPlus] 工具执行失败: morechatplus_get_message | 错误: {e}", exc_info=True)
+            self._cache_tool_result(event, f"[错误] {error_msg}")
+            return error_msg
 
     @llm_tool(name="morechatplus_get_user_profile")
-    async def tool_get_user_profile(self, event: AstrMessageEvent, user_id: str):
-        """获取用户画像"""
-        return await self.chat_tools.get_user_profile(event, user_id)
+    async def tool_get_user_profile(self, event: AstrMessageEvent, user_id: str = ""):
+        """获取指定用户的画像信息。
+        
+        当你需要了解某个用户的性格、兴趣、与机器人的关系历史时使用此工具。
+        
+        Args:
+            user_id (str): 用户ID（QQ号），如 "13286633"
+            
+        Returns:
+            str: 用户画像的文本描述，包含昵称、性格、兴趣、关系等
+        """
+        try:
+            logger.info(f"[MoreChatPlus] 工具调用: morechatplus_get_user_profile | 参数: user_id='{user_id}'")
+            if not user_id or not user_id.strip():
+                result = "错误：缺少必需参数 user_id，请提供具体的QQ号"
+                self._cache_tool_result(event, result)
+                return result
+            
+            result_data = await self.chat_tools.get_user_profile(event, user_id)
+            
+            try:
+                data = json.loads(result_data)
+                if data.get("status") == "not_found":
+                    result = f"[用户画像] 未找到用户 {user_id} 的画像信息"
+                else:
+                    nicknames = ", ".join(data.get("nicknames", [])) or "未知"
+                    result = (f"[用户 {user_id} 的画像]\n"
+                             f"昵称: {nicknames}\n"
+                             f"性格: {data.get('personality_traits') or '未知'}\n"
+                             f"兴趣: {data.get('interests') or '未知'}\n"
+                             f"常聊话题: {data.get('common_topics') or '未知'}\n"
+                             f"与你的关系: {data.get('relationship_with_bot') or '未知'}")
+            except:
+                result = f"[用户画像]\n{result_data}"
+            
+            self._cache_tool_result(event, result)
+            logger.info(f"[MoreChatPlus] 工具结果: {result[:100]}...")
+            return result
+            
+        except Exception as e:
+            error_msg = f"获取用户画像失败: {str(e)}"
+            logger.error(f"[MoreChatPlus] 工具执行失败: morechatplus_get_user_profile | 错误: {e}", exc_info=True)
+            self._cache_tool_result(event, f"[错误] {error_msg}")
+            return error_msg
 
     @llm_tool(name="morechatplus_query_nickname")
-    async def tool_query_nickname(self, event: AstrMessageEvent, nickname: str):
-        """查询昵称"""
-        return await self.chat_tools.query_nickname(event, nickname)
+    async def tool_query_nickname(self, event: AstrMessageEvent, nickname: str = ""):
+        """查询昵称对应的用户。
+        
+        当你看到群友使用昵称称呼某人，但不确定具体是谁时使用此工具查询。
+        
+        Args:
+            nickname (str): 要查询的昵称（如"小明"、"猫猫"），支持模糊匹配
+            
+        Returns:
+            str: 查询结果，包含匹配的用户列表
+        """
+        try:
+            logger.info(f"[MoreChatPlus] 工具调用: morechatplus_query_nickname | 参数: nickname='{nickname}'")
+            if not nickname or not nickname.strip():
+                result = "错误：缺少必需参数 nickname，请提供要查询的昵称"
+                self._cache_tool_result(event, result)
+                return result
+            
+            result_data = await self.chat_tools.query_nickname(event, nickname)
+            
+            try:
+                data = json.loads(result_data)
+                if data.get("status") == "not_found":
+                    result = f"[昵称查询] 未找到昵称 '{nickname}' 对应的用户"
+                else:
+                    candidates = data.get("candidates", [])
+                    if not candidates:
+                        result = f"[昵称查询] 未找到昵称 '{nickname}' 对应的用户"
+                    else:
+                        lines = [f"[昵称 '{nickname}' 查询结果]"]
+                        for i, c in enumerate(candidates[:5], 1):
+                            nicknames = ", ".join(c.get("nicknames", []))
+                            lines.append(f"{i}. 用户ID: {c.get('user_id')} (曾用昵称: {nicknames})")
+                        result = "\n".join(lines)
+            except:
+                result = f"[昵称查询结果]\n{result_data}"
+            
+            self._cache_tool_result(event, result)
+            logger.info(f"[MoreChatPlus] 工具结果: {result[:100]}...")
+            return result
+            
+        except Exception as e:
+            error_msg = f"查询昵称失败: {str(e)}"
+            logger.error(f"[MoreChatPlus] 工具执行失败: morechatplus_query_nickname | 错误: {e}", exc_info=True)
+            self._cache_tool_result(event, f"[错误] {error_msg}")
+            return error_msg
 
     @llm_tool(name="morechatplus_get_context")
     async def tool_get_context(self, event: AstrMessageEvent, count: int = 20):
-        """获取最近上下文"""
-        return await self.chat_tools.get_recent_context(event, count)
+        """获取最近的上下文消息记录。
+        
+        当需要回顾历史对话或查看之前的聊天内容时使用此工具。
+        
+        Args:
+            count (int): 获取的消息数量，范围 1-50，默认 20 条。建议查看近期对话用 10-20，追溯历史用 30-50
+            
+        Returns:
+            str: 格式化后的历史消息记录
+        """
+        try:
+            logger.info(f"[MoreChatPlus] 工具调用: morechatplus_get_context | 参数: count={count}")
+            # 限制范围防止滥用
+            if count < 1:
+                count = 1
+            elif count > 50:
+                count = 50
+            
+            result_data = await self.chat_tools.get_recent_context(event, count)
+            
+            try:
+                data = json.loads(result_data)
+                context_text = data.get("context", "无内容")
+                result = f"[最近 {data.get('count', 0)} 条上下文]\n{context_text}"
+            except:
+                result = f"[上下文记录]\n{result_data}"
+            
+            self._cache_tool_result(event, result)
+            logger.info(f"[MoreChatPlus] 工具结果长度: {len(result)} 字符")
+            return result
+            
+        except Exception as e:
+            error_msg = f"获取上下文失败: {str(e)}"
+            logger.error(f"[MoreChatPlus] 工具执行失败: morechatplus_get_context | 错误: {e}", exc_info=True)
+            self._cache_tool_result(event, f"[错误] {error_msg}")
+            return error_msg
 
     @llm_tool(name="morechatplus_add_nickname")
-    async def tool_add_nickname(self, event: AstrMessageEvent, user_id: str, nickname: str):
-        """添加用户昵称"""
-        return await self.chat_tools.add_user_nickname(event, user_id, nickname)
+    async def tool_add_nickname(self, event: AstrMessageEvent, user_id: str = "", nickname: str = ""):
+        """为用户添加新的昵称映射。
+        
+        当你发现用户在使用新昵称或需要手动纠正昵称关联时使用此工具。
+        
+        Args:
+            user_id (str): 用户ID（QQ号），如 "13286633"
+            nickname (str): 要添加的新昵称，如 "小猫"
+            
+        Returns:
+            str: 操作结果提示
+        """
+        try:
+            logger.info(f"[MoreChatPlus] 工具调用: morechatplus_add_nickname | 参数: user_id='{user_id}', nickname='{nickname}'")
+            if not user_id or not user_id.strip() or not nickname or not nickname.strip():
+                result = "错误：必须同时提供 user_id（QQ号）和 nickname（昵称）"
+                self._cache_tool_result(event, result)
+                return result
+            
+            result_data = await self.chat_tools.add_user_nickname(event, user_id, nickname)
+            
+            try:
+                data = json.loads(result_data)
+                if data.get("status") == "success":
+                    result = f"[操作成功] 已为用户 {user_id} 添加昵称 '{nickname}'"
+                else:
+                    result = f"[操作失败] {data.get('message', '未知错误')}"
+            except:
+                result = f"[添加昵称结果]\n{result_data}"
+            
+            self._cache_tool_result(event, result)
+            logger.info(f"[MoreChatPlus] 工具结果: {result}")
+            return result
+            
+        except Exception as e:
+            error_msg = f"添加昵称失败: {str(e)}"
+            logger.error(f"[MoreChatPlus] 工具执行失败: morechatplus_add_nickname | 错误: {e}", exc_info=True)
+            self._cache_tool_result(event, f"[错误] {error_msg}")
+            return error_msg
 
     @llm_tool(name="morechatplus_get_image_vision")
-    async def tool_get_image_vision(self, event: AstrMessageEvent, image_id: str):
-        """获取图片的识图结果"""
-        return await self.chat_tools.get_image_vision_result(event, image_id)
+    async def tool_get_image_vision(self, event: AstrMessageEvent, image_id: str = ""):
+        """获取图片的识图结果。如果该图片尚未识别，会自动调用识图API进行识别。
+        
+        当用户询问某张图片的内容，或你需要查看之前识别过的图片信息时使用此工具。
+        
+        Args:
+            image_id (str): 图片的唯一标识ID，格式如 "img_c72430bdf422415b"，
+                           通常可以在上下文中的 [image:x:img_id] 标记中找到
+            
+        Returns:
+            str: 图片内容的文字描述
+        """
+        try:
+            logger.info(f"[MoreChatPlus] 工具调用: morechatplus_get_image_vision | 参数: image_id='{image_id}'")
+            if not image_id or not image_id.strip():
+                result = "错误：缺少必需参数 image_id，请从上下文的 [image:x:img_id] 标记中提取图片ID"
+                self._cache_tool_result(event, result)
+                return result
+            
+            # 1. 先查缓存
+            cached_result = self.image_cache.get_vision_result(image_id)
+            if cached_result:
+                self.image_cache.increment_send_count(image_id)
+                result = f"[图片 {image_id} 识别结果]\n{cached_result}\n[该结果来自缓存]"
+                self._cache_tool_result(event, result)
+                logger.info(f"[MoreChatPlus] 工具返回: 命中缓存 | image_id={image_id}")
+                return result
+            
+            # 2. 缓存未命中，尝试实时识图
+            logger.info(f"[MoreChatPlus] 缓存未命中，开始实时识图: {image_id}")
+            local_path = self.image_cache.get_local_path(image_id)
+            
+            if not local_path or not Path(local_path).exists():
+                result = f"错误：找不到图片文件 {image_id}，可能已被清理或未下载"
+                self._cache_tool_result(event, result)
+                return result
+            
+            # 3. 使用配置的识图模型
+            provider_id = self.config.models.vision_provider
+            provider = None
+            
+            if provider_id:
+                provider = self.context.get_provider_by_id(provider_id)
+                logger.info(f"[MoreChatPlus] 使用配置的视觉模型: {provider_id}")
+            else:
+                provider = self.context.get_using_provider(event.unified_msg_origin)
+                logger.info("[MoreChatPlus] 使用当前对话模型进行识图")
+            
+            if not provider:
+                result = "错误：视觉模型不可用"
+                self._cache_tool_result(event, result)
+                return result
+            
+            # 4. 调用识图API
+            response = await asyncio.wait_for(
+                provider.text_chat(
+                    prompt=self.config.models.vision_prompt,
+                    session_id=f"vision_{image_id}_{int(time.time())}",
+                    image_urls=[local_path],
+                    persist=False,
+                ),
+                timeout=self.config.timeouts.vision_sec,
+            )
+            
+            vision_text = response.completion_text or ""
+            
+            if not vision_text:
+                result = "错误：识图返回为空"
+                self._cache_tool_result(event, result)
+                return result
+            
+            # 5. 存入缓存（防止下次重复识图）
+            self.image_cache.set_vision_result(image_id, vision_text)
+            self.image_cache.increment_send_count(image_id)
+            
+            result = f"[图片 {image_id} 识别结果]\n{vision_text}\n[该结果已缓存，后续查询不会重复识图]"
+            self._cache_tool_result(event, result)
+            
+            logger.info(f"[MoreChatPlus] 实时识图成功并缓存 | image_id={image_id} | 结果长度: {len(vision_text)}")
+            return result
+            
+        except Exception as e:
+            error_msg = f"识图失败: {str(e)}"
+            logger.error(f"[MoreChatPlus] 工具执行失败: morechatplus_get_image_vision | 错误: {e}", exc_info=True)
+            self._cache_tool_result(event, f"[错误] {error_msg}")
+            return error_msg
+
+    def _cache_tool_result(self, event: AstrMessageEvent, result: str):
+        """缓存工具执行结果到 event，供 on_llm_request 使用"""
+        if not hasattr(event, '_morechatplus_tool_results'):
+            event._morechatplus_tool_results = []
+        event._morechatplus_tool_results.append(result)
+
+    @filter.on_llm_request()
+    async def on_llm_request(self, event: AstrMessageEvent, req):
+        """在LLM请求前注入上下文，并追加工具执行结果"""
+        if not self.config.core.enable:
+            return
+        
+        if not hasattr(event, '_morechatplus_enhanced_prompt'):
+            return
+
+        enhanced_prompt = event._morechatplus_enhanced_prompt
+        
+        # 【关键】追加工具执行结果到 prompt
+        if hasattr(event, '_morechatplus_tool_results') and event._morechatplus_tool_results:
+            tool_section = "\n\n【工具执行结果 - 供你参考，请基于这些结果回复】\n" + "\n---\n".join(event._morechatplus_tool_results)
+            enhanced_prompt += tool_section
+            tool_count = len(event._morechatplus_tool_results)
+            logger.info(f"[MoreChatPlus] 已追加 {tool_count} 条工具结果到 prompt")
+            # 清空，避免重复追加（虽然理论上每次请求都是新 event，但以防万一）
+            event._morechatplus_tool_results = []
+
+        injected = False
+
+        try:
+            # 尝试注入到不同格式的请求中
+            if hasattr(req, 'prompt'):
+                req.prompt = enhanced_prompt
+                injected = True
+            elif hasattr(req, 'messages') and isinstance(req.messages, list):
+                for i in range(len(req.messages) - 1, -1, -1):
+                    if isinstance(req.messages[i], dict) and req.messages[i].get('role') == 'user':
+                        req.messages[i]['content'] = enhanced_prompt
+                        injected = True
+                        break
+            elif hasattr(req, 'contexts') and isinstance(req.contexts, list):
+                for i in range(len(req.contexts) - 1, -1, -1):
+                    if isinstance(req.contexts[i], dict) and req.contexts[i].get('role') == 'user':
+                        req.contexts[i]['content'] = enhanced_prompt
+                        injected = True
+                        break
+
+            if injected:
+                if hasattr(event, 'message_str'):
+                    event.message_str = enhanced_prompt
+                # 清空原始上下文，避免重复
+                if hasattr(req, 'contexts'):
+                    req.contexts = []
+                delattr(event, '_morechatplus_enhanced_prompt')
+                self._log_debug("上下文注入成功（含工具结果）")
+            else:
+                logger.error("[MoreChatPlus] 注入失败：未找到合适的注入点")
+                
+        except Exception as e:
+            logger.error(f"[MoreChatPlus] 注入异常: {e}")
 
     async def terminate(self) -> None:
         """插件终止"""

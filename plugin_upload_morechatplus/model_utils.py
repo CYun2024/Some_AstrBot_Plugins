@@ -87,7 +87,7 @@ async def call_model_with_fallback(
                         "phase": "request",
                         "provider_id": actual_id,
                         "model": model_name,
-                        "prompt": prompt,  # 移除截断，上报完整prompt
+                        "prompt": prompt,
                         "source": {"plugin": "morechatplus", "purpose": purpose},
                         "conversation_id": conv_id,
                         "timestamp": time.time(),
@@ -104,7 +104,7 @@ async def call_model_with_fallback(
                     persist=False,
                     **kwargs
                 ),
-                timeout=timeout_sec
+                timeout=timeout_sec,
             )
 
             text = response.completion_text or ""
@@ -117,7 +117,7 @@ async def call_model_with_fallback(
                         "phase": "response",
                         "provider_id": actual_id,
                         "model": model_name,
-                        "response": text,  # 移除截断，上报完整response
+                        "response": text,
                         "usage": usage,
                         "source": {"plugin": "morechatplus", "purpose": purpose},
                         "conversation_id": conv_id,
