@@ -71,26 +71,32 @@ class RepeatManager:
 
     def check_and_record_message(self, origin: str, message_id: str,
                                   user_id: str, content: str,
-                                  image_urls: List[str]) -> Optional[Dict]:
+                                  image_urls: List[str],
+                                  image_info_list: List[Dict] = None) -> Optional[Dict]:
         """检查并记录消息，返回需要复读的信息（兼容实时消息和数据库查询）
 
         Returns:
             {
                 "content": 复读内容,
                 "image_urls": 图片URL列表,
+                "image_info_list": 图片详细信息列表,
                 "is_meme": 是否是表情包
             } 或 None
         """
         if not self.config.repeat.enable:
+            logger.debug(f"[ChanganCat] 复读功能已禁用")
             return None
 
         # 忽略bot自己的消息
         if user_id == self.config.core.bot_qq_id:
+            logger.debug(f"[ChanganCat] 跳过bot自己消息: {user_id}")
             return None
 
         # 忽略空消息
         pure_content = self._extract_pure_content(content)
-        if not pure_content and not self.MEME_PATTERN.search(content):
+        has_meme = self.MEME_PATTERN.search(content) is not None
+        if not pure_content and not has_meme:
+            logger.debug(f"[ChanganCat] 跳过空消息")
             return None
 
         cache = self._get_cache(origin)
@@ -101,8 +107,12 @@ class RepeatManager:
             "user_id": user_id,
             "content": content,
             "image_urls": image_urls,
+            "image_info_list": image_info_list or [],
             "timestamp": time.time()
         })
+
+        logger.debug(f"[ChanganCat] 消息已缓存: origin={origin}, cache_size={len(cache)}, "
+                    f"has_meme={has_meme}, content={content[:50]}...")
 
         # 检查是否需要复读
         return self._check_repeat(origin, cache)
@@ -110,6 +120,7 @@ class RepeatManager:
     def _check_repeat(self, origin: str, cache: deque) -> Optional[Dict]:
         """检查是否需要复读"""
         if len(cache) < self.config.repeat.repeat_threshold:
+            logger.debug(f"[ChanganCat] 缓存不足阈值: {len(cache)} < {self.config.repeat.repeat_threshold}")
             return None
 
         # 统计最近消息中各内容的出现次数
@@ -147,15 +158,20 @@ class RepeatManager:
                 # 判断是否是表情包（检查是否有[image:x:xxx]标记）
                 is_meme = self.MEME_PATTERN.search(content) is not None
 
-                logger.info(f"[ChanganCat] 触发复读: {content[:50]}...")
+                logger.info(f"[ChanganCat] 触发复读: content={content[:50]}..., "
+                           f"count={count}, is_meme={is_meme}, "
+                           f"image_urls={len(msg.get('image_urls', []))}, "
+                           f"image_info_list={len(msg.get('image_info_list', []))}")
 
                 return {
                     "content": content,
                     "image_urls": msg["image_urls"],
+                    "image_info_list": msg.get("image_info_list", []),
                     "is_meme": is_meme,
                     "message_id": msg["message_id"]
                 }
 
+        logger.debug(f"[ChanganCat] 未达复读阈值，content_count={dict(content_count)}")
         return None
 
     def check_repeat_from_morechatplus(self, origin: str) -> Optional[Dict]:
@@ -164,6 +180,8 @@ class RepeatManager:
         查询最近 check_message_count 条消息，如果有 repeat_threshold 条相同则复读
         """
         if not self.config.repeat.enable or not self._morechatplus_db_path:
+            logger.debug(f"[ChanganCat] 数据库复读检查跳过: enable={self.config.repeat.enable}, "
+                        f"db_path={bool(self._morechatplus_db_path)}")
             return None
 
         try:
@@ -181,6 +199,7 @@ class RepeatManager:
                 ).fetchall()
 
                 if len(rows) < self.config.repeat.repeat_threshold:
+                    logger.debug(f"[ChanganCat] 数据库消息不足阈值: {len(rows)} < {self.config.repeat.repeat_threshold}")
                     return None
 
                 # 统计内容
@@ -235,6 +254,7 @@ class RepeatManager:
                         logger.info(f"[ChanganCat] 从数据库触发复读: {info['content'][:50]}...")
                         return info
 
+                logger.debug(f"[ChanganCat] 数据库复读未达阈值: content_count={dict(content_count)}")
                 return None
 
         except Exception as e:

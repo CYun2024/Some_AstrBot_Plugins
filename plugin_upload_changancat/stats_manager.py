@@ -3,7 +3,9 @@
 import json
 import re
 import sqlite3
+import time
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from astrbot.api import logger
@@ -190,6 +192,415 @@ class StatsManager:
                 count += 1
 
         return count
+
+    # ==================== 变身统计 ====================
+
+    def count_kuaibian(self, content: str) -> int:
+        """统计文本中'快变'的出现次数
+
+        规则：匹配'快变'两个字，不管前后是否有文字或标点符号
+        """
+        if not content:
+            return 0
+        # 简单匹配'快变'，不限定前后上下文
+        return content.count('快变')
+
+    def _is_valid_bubian(self, text: str, start: int) -> bool:
+        """判断 text 中从 start 位置开始的 '不变' 是否应该被计数
+
+        规则：
+        1. 禁止前缀（出现在"不变"之前紧邻）：基本、很、太、非常、有点、比较、几乎、完全等
+        2. 禁止后缀（出现在"不变"之后紧邻）：回去了、也可以、是不行的、一下、一点等
+        3. 允许的后缀：标点、语气词、行尾、空格
+        4. 其他情况（如后面紧跟普通汉字）视为短语一部分，不计数
+        """
+        end = start + 2
+        # 获取前后最多20个字符的上下文
+        before = text[max(0, start-20):start]
+        after = text[end:min(len(text), end+20)]
+
+        # ---------- 1. 禁止前缀（出现在"不变"之前紧邻）----------
+        forbidden_prefixes = [
+            '基本', '很', '太', '非常', '有点', '比较', '几乎', '完全',
+            '老是', '总是', '一直', '始终', '仍然', '还是', '依然',
+            '丝毫', '一点儿', '有点', '有些', '极其', '格外', '相当', '颇为'
+        ]
+        for pref in forbidden_prefixes:
+            if before.endswith(pref):
+                return False
+
+        # ---------- 2. 禁止后缀（出现在"不变"之后紧邻）----------
+        forbidden_suffixes = [
+            '回去了', '也可以', '是不行的', '一下', '一点', '也不',
+            '都行', '也好', '也行', '就是了', '就好了', '就可以',
+            '是好的', '是坏的', '变了', '回去', '过来', '下去'
+        ]
+        after_stripped = after.lstrip()  # 忽略开头的空白
+        for suf in forbidden_suffixes:
+            if after_stripped.startswith(suf):
+                return False
+
+        # ---------- 3. 允许的后缀：标点、语气词、行尾、空格 ----------
+        if not after_stripped:  # 行尾
+            return True
+
+        first_char = after_stripped[0]
+        # 语气词集合（可根据实际情况增删）
+        modal_particles = set('啊哦嗯喵啦哟呗嘛呢吧呀哇呵哈嘿耶咯嘞噢')
+        # 常见标点符号
+        punctuations = set('，。！？；：、')
+        if first_char in modal_particles or first_char in punctuations or first_char.isspace():
+            return True
+
+        # 4. 其他情况（如后面紧跟汉字且不是语气词/标点）一律不计数
+        return False
+
+    def count_bubian(self, content: str) -> int:
+        """统计文本中符合条件的"不变"个数
+
+        使用上下文规则判断，排除作为短语一部分的情况
+        """
+        if not content:
+            return 0
+        count = 0
+        start = 0
+        while True:
+            pos = content.find('不变', start)
+            if pos == -1:
+                break
+            if self._is_valid_bubian(content, pos):
+                count += 1
+            start = pos + 2  # 跳过当前"不变"继续搜索
+        return count
+
+    def is_bianshen(self, content: str) -> Tuple[int, int]:
+        """检查消息包含的变身次数
+
+        Returns:
+            (快变次数, 不变次数)
+        """
+        if not content:
+            return 0, 0
+
+        # 清理内容中的标签（引用、at、image），但保留原始文本用于"快变"匹配
+        cleaned = self._clean_content(content)
+
+        kuaibian_count = self.count_kuaibian(content)  # 快变在原始内容中匹配
+        bubian_count = self.count_bubian(cleaned) if cleaned else 0  # 不变在清理后的文本中匹配
+
+        return kuaibian_count, bubian_count
+
+    def get_today_bianshen_stats(self, origin: str) -> Dict:
+        """获取今日变身统计（0点到当前时间，从morechatplus读取）"""
+        today_start = self.get_day_start_timestamp(0)
+        messages = self._get_messages_from_morechatplus(origin, today_start)
+
+        bianshen_count = {}
+        for msg in messages:
+            kb_count, bb_count = self.is_bianshen(msg["content"])
+
+            if kb_count > 0 or bb_count > 0:
+                key = (msg["user_id"], msg["nickname"])
+                if key not in bianshen_count:
+                    bianshen_count[key] = {"kuaibian": 0, "bubian": 0}
+                bianshen_count[key]["kuaibian"] += kb_count
+                bianshen_count[key]["bubian"] += bb_count
+
+        # 格式: (user_id, nickname, kuaibian_count, bubian_count, total_count)
+        ranking = []
+        for (user_id, nickname), counts in bianshen_count.items():
+            kb_c = counts["kuaibian"]
+            bb_c = counts["bubian"]
+            total_c = kb_c + bb_c
+            ranking.append((user_id, nickname, kb_c, bb_c, total_c))
+
+        ranking.sort(key=lambda x: -x[4])
+
+        return {
+            "ranking": ranking,
+            "date": datetime.now().strftime("%Y/%m/%d"),
+            "total_messages": len(messages)
+        }
+
+    def get_weekly_bianshen_stats(self, origin: str) -> Dict:
+        """获取本周变身统计（7天，从morechatplus读取）"""
+        week_start = self.get_day_start_timestamp(7)
+        messages = self._get_messages_from_morechatplus(origin, week_start)
+
+        bianshen_count = {}
+        for msg in messages:
+            kb_count, bb_count = self.is_bianshen(msg["content"])
+
+            if kb_count > 0 or bb_count > 0:
+                key = (msg["user_id"], msg["nickname"])
+                if key not in bianshen_count:
+                    bianshen_count[key] = {"kuaibian": 0, "bubian": 0}
+                bianshen_count[key]["kuaibian"] += kb_count
+                bianshen_count[key]["bubian"] += bb_count
+
+        # 格式: (user_id, nickname, kuaibian_count, bubian_count, total_count)
+        ranking = []
+        for (user_id, nickname), counts in bianshen_count.items():
+            kb_c = counts["kuaibian"]
+            bb_c = counts["bubian"]
+            total_c = kb_c + bb_c
+            ranking.append((user_id, nickname, kb_c, bb_c, total_c))
+
+        ranking.sort(key=lambda x: -x[4])
+
+        return {
+            "ranking": ranking,
+            "start_date": (datetime.now() - timedelta(days=7)).strftime("%Y/%m/%d"),
+            "end_date": (datetime.now() - timedelta(days=1)).strftime("%Y/%m/%d")
+        }
+
+    def get_daily_bianshen_stats(self, origin: str, days: int = 7) -> Dict:
+        """获取按天分组的变身统计（最近N天）
+
+        Returns:
+            {
+                "daily_stats": [
+                    {
+                        "date": "2026/03/10",
+                        "ranking": [(user_id, nickname, kb_count, bb_count, total_count), ...]
+                    },
+                    ...
+                ],
+                "start_date": "2026/03/10",
+                "end_date": "2026/03/16"
+            }
+        """
+        end_time = datetime.now()
+        start_time = end_time - timedelta(days=days)
+
+        messages = self._get_messages_from_morechatplus(
+            origin,
+            start_time.timestamp(),
+            end_time.timestamp()
+        )
+
+        # 按天分组统计
+        daily_stats = {}
+
+        for msg in messages:
+            msg_time = datetime.fromtimestamp(msg["timestamp"])
+            day_key = msg_time.strftime("%Y/%m/%d")
+
+            if day_key not in daily_stats:
+                daily_stats[day_key] = {}
+
+            user_id = msg["user_id"]
+            nickname = msg["nickname"]
+            content = msg["content"]
+
+            kb_count, bb_count = self.is_bianshen(content)
+
+            if kb_count > 0 or bb_count > 0:
+                key = (user_id, nickname)
+                if key not in daily_stats[day_key]:
+                    daily_stats[day_key][key] = {"kuaibian": 0, "bubian": 0}
+                daily_stats[day_key][key]["kuaibian"] += kb_count
+                daily_stats[day_key][key]["bubian"] += bb_count
+
+        # 转换为列表格式并排序
+        result = []
+        for day in sorted(daily_stats.keys()):
+            day_data = daily_stats[day]
+            ranking = []
+            for (user_id, nickname), counts in day_data.items():
+                kb_c = counts["kuaibian"]
+                bb_c = counts["bubian"]
+                total_c = kb_c + bb_c
+                ranking.append((user_id, nickname, kb_c, bb_c, total_c))
+            ranking.sort(key=lambda x: -x[4])
+            result.append({
+                "date": day,
+                "ranking": ranking
+            })
+
+        return {
+            "daily_stats": result,
+            "start_date": start_time.strftime("%Y/%m/%d"),
+            "end_date": end_time.strftime("%Y/%m/%d")
+        }
+
+    def get_weekly_meme_stats(self, origin: str) -> List[Dict]:
+        """获取本周表情包统计（7天，按发送次数排序）"""
+        week_start = self.get_day_start_timestamp(7)
+        messages = self._get_messages_from_morechatplus(origin, week_start)
+        meme_stats = {}
+
+        for msg in messages:
+            content = msg["content"]
+            image_urls = msg["image_urls"]
+
+            memes = self.extract_memes(content)
+            for idx, img_id in memes:
+                url = image_urls[idx - 1] if 0 < idx <= len(image_urls) else ""
+                local_path = self._get_image_local_path(img_id)
+
+                if img_id not in meme_stats:
+                    meme_stats[img_id] = {"count": 0, "url": url, "local_path": local_path}
+                else:
+                    if url and not meme_stats[img_id]["url"]:
+                        meme_stats[img_id]["url"] = url
+                    if local_path and not meme_stats[img_id].get("local_path"):
+                        meme_stats[img_id]["local_path"] = local_path
+
+                meme_stats[img_id]["count"] += 1
+
+        sorted_memes = [
+            {"image_id": img_id, "use_count": info["count"], "image_url": info["url"], "local_path": info.get("local_path", "")}
+            for img_id, info in sorted(meme_stats.items(), key=lambda x: -x[1]["count"])
+        ]
+
+        return sorted_memes
+
+    def format_bianshen_ranking(self, ranking: List[Tuple[str, str, int, int, int]],
+                                 title: str = "变身榜") -> str:
+        """格式化变身排行榜
+
+        Args:
+            ranking: [(user_id, nickname, kuaibian_count, bubian_count, total_count), ...]
+        """
+        if not ranking:
+            return f"{title}：暂无数据"
+
+        lines = [f"{title}："]
+        medals = ["🥇", "🥈", "🥉"]
+
+        for i, (user_id, nickname, kb_c, bb_c, total_c) in enumerate(ranking[:10]):
+            medal = medals[i] if i < 3 else f"{i + 1}."
+            # 显示快变和不变的分解
+            if kb_c > 0 and bb_c > 0:
+                lines.append(f"{medal} {nickname}（{user_id}）- {total_c}次（快变{kb_c}+不变{bb_c}）")
+            elif kb_c > 0:
+                lines.append(f"{medal} {nickname}（{user_id}）- {total_c}次（快变{kb_c}）")
+            elif bb_c > 0:
+                lines.append(f"{medal} {nickname}（{user_id}）- {total_c}次（不变{bb_c}）")
+            else:
+                lines.append(f"{medal} {nickname}（{user_id}）- {total_c}次")
+
+        return chr(10).join(lines)
+
+    def format_bianshen_command_response(self, origin: str, group_name: str = "") -> str:
+        """格式化/变身榜命令响应（从morechatplus获取数据）"""
+        today_stats = self.get_today_bianshen_stats(origin)
+        week_stats = self.get_weekly_bianshen_stats(origin)
+
+        lines = []
+        lines.append(f"📊 {datetime.now().strftime('%Y/%m/%d')} 变身统计榜")
+        lines.append("")
+
+        if group_name:
+            lines.append(f"群聊：{group_name}")
+        else:
+            lines.append(f"群聊：{origin}")
+        lines.append("")
+
+        # 今日变身榜
+        today_lines = self.format_bianshen_ranking(today_stats["ranking"], "📈 今日变身榜")
+        lines.append(today_lines)
+        lines.append("")
+
+        # 本周变身榜
+        weekly_lines = self.format_bianshen_ranking(week_stats["ranking"], "📊 变身周榜")
+        lines.append(weekly_lines)
+
+        return chr(10).join(lines)
+
+    def format_daily_bianshen_report(self, origin: str, group_name: str = "", days: int = 7) -> str:
+        """格式化按天分组的变身周榜报告"""
+        stats = self.get_daily_bianshen_stats(origin, days)
+        daily_stats = stats["daily_stats"]
+
+        lines = []
+        lines.append(f"📊 变身周榜 ({stats['start_date']} ~ {stats['end_date']})")
+        lines.append("")
+
+        if group_name:
+            lines.append(f"群聊：{group_name}")
+        else:
+            lines.append(f"群聊：{origin}")
+        lines.append("")
+
+        if not daily_stats:
+            lines.append("暂无数据~")
+            return chr(10).join(lines)
+
+        # 遍历每一天
+        for day_data in daily_stats:
+            date_str = day_data["date"]
+            ranking = day_data["ranking"]
+
+            lines.append(f"📅 {date_str}")
+
+            if not ranking:
+                lines.append("  当日无变身记录")
+            else:
+                medals = ["🥇", "🥈", "🥉"]
+                for i, (user_id, nickname, kb_c, bb_c, total_c) in enumerate(ranking[:10]):
+                    medal = medals[i] if i < 3 else f"{i + 1}."
+                    if kb_c > 0 and bb_c > 0:
+                        lines.append(f"  {medal} {nickname} - {total_c}次（快变{kb_c}+不变{bb_c}）")
+                    elif kb_c > 0:
+                        lines.append(f"  {medal} {nickname} - {total_c}次（快变{kb_c}）")
+                    elif bb_c > 0:
+                        lines.append(f"  {medal} {nickname} - {total_c}次（不变{bb_c}）")
+                    else:
+                        lines.append(f"  {medal} {nickname} - {total_c}次")
+
+                if len(ranking) > 10:
+                    lines.append(f"  ... 还有 {len(ranking) - 10} 人")
+
+            lines.append("")
+
+        return chr(10).join(lines)
+
+    def format_weekly_meme_command_response(self, origin: str, group_name: str = "") -> Tuple[str, List[Dict]]:
+        """格式化/表情包周榜命令响应"""
+        week_stats = self.get_weekly_meme_stats(origin)
+
+        lines = []
+        lines.append(f"🖼️ {datetime.now().strftime('%Y/%m/%d')} 表情包周榜（近7日）")
+        lines.append("")
+
+        if group_name:
+            lines.append(f"群聊：{group_name}")
+        else:
+            lines.append(f"群聊：{origin}")
+        lines.append("")
+
+        if not week_stats:
+            lines.append("本周暂无表情包数据~")
+            return chr(10).join(lines), []
+
+        lines.append(f"本周共发送 {len(week_stats)} 种表情包/图片，以下是发送次数TOP {min(5, len(week_stats))}：")
+        lines.append("")
+        lines.append("")
+
+        meme_images = []
+        valid_count = 0
+
+        for i, meme in enumerate(week_stats[:5], 1):
+            img_path = meme.get("local_path") or meme.get("image_url")
+            if img_path:
+                valid_count += 1
+                lines.append(f"{i}. 发送次数：{meme['use_count']} 次")
+                meme_images.append({
+                    "path": img_path,
+                    "count": meme["use_count"],
+                    "is_local": bool(meme.get("local_path"))
+                })
+            else:
+                img_id_short = meme["image_id"][:8] if len(meme["image_id"]) > 8 else meme["image_id"]
+                lines.append(f"{i}. 发送次数：{meme['use_count']} 次 (ID:{img_id_short}...无图片)")
+
+        if valid_count == 0 and week_stats:
+            lines.append("")
+            lines.append("⚠️ 注意：检测到表情包记录但无法获取图片，请检查morechatplus图片缓存配置")
+
+        return chr(10).join(lines), meme_images
 
     def get_day_start_timestamp(self, days_ago: int = 0) -> float:
         """获取某天开始的时间戳"""
@@ -870,3 +1281,451 @@ class StatsManager:
             "end_time": end_timestamp,
             "days": days
         }
+
+    # ==================== 表情点赞统计（新增，支持 Face 组件） ====================
+
+    def _extract_group_id(self, origin: str) -> str:
+        """从 origin 中提取纯数字群号
+        
+        支持格式：
+        - "qq_group_123456" -> "123456"
+        - "123456" -> "123456"
+        """
+        import re
+        match = re.search(r'(\d+)$', origin)
+        if match:
+            return match.group(1)
+        return origin  # 已经是纯数字或无法提取
+
+    def _emoji_to_component(self, emoji_id: str, count: int = 1, include_space: bool = True):
+        """将表情 ID 转换为消息组件（Face 或 Plain），并附带次数文本
+        
+        Returns:
+            list: 包含组件和次数文本的列表，便于直接添加到消息链
+        """
+        from astrbot.api.message_components import Plain, Face
+        
+        components = []
+        try:
+            code_point = int(emoji_id)
+            if code_point > 500:
+                # Unicode emoji，使用文本显示
+                components.append(Plain(chr(code_point)))
+            else:
+                # QQ 自定义表情，使用 Face 组件
+                components.append(Face(id=code_point))
+        except ValueError:
+            # 非数字（例如已经是 Unicode 字符），直接文本
+            components.append(Plain(emoji_id))
+        
+        if count > 0:
+            components.append(Plain(f" x{count} "))
+        return components
+
+    def _get_messages_by_ids(self, origin: str, msg_ids: List[str]) -> Dict[str, Dict]:
+        """根据消息ID列表从morechatplus获取消息详情
+        
+        Returns:
+            {msg_id: {"user_id": str, "nickname": str, "content": str}}
+        """
+        if not msg_ids or not self._morechatplus_db_path:
+            return {}
+        
+        try:
+            with sqlite3.connect(self._morechatplus_db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                placeholders = ",".join(["?"] * len(msg_ids))
+                rows = conn.execute(f"""
+                    SELECT message_id, user_id, nickname, content
+                    FROM messages 
+                    WHERE origin = ? AND message_id IN ({placeholders})
+                """, [origin] + msg_ids).fetchall()
+                
+                return {
+                    row["message_id"]: {
+                        "user_id": row["user_id"],
+                        "nickname": row["nickname"],
+                        "content": row["content"]
+                    }
+                    for row in rows
+                }
+        except Exception as e:
+            logger.error(f"[ChanganCat] 批量获取消息失败: {e}")
+            return {}
+
+    def _get_user_nickname(self, origin: str, user_id: str) -> str:
+        """从消息表获取用户最新昵称"""
+        if not self._morechatplus_db_path:
+            return ""
+        try:
+            with sqlite3.connect(self._morechatplus_db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                row = conn.execute(
+                    "SELECT nickname FROM messages WHERE origin = ? AND user_id = ? ORDER BY timestamp DESC LIMIT 1",
+                    (origin, user_id)
+                ).fetchone()
+                return row["nickname"] if row else ""
+        except Exception:
+            return ""
+
+    def _get_users_nickname_batch(self, origin: str, user_ids: List[str]) -> Dict[str, str]:
+        """批量获取用户最新昵称"""
+        if not user_ids or not self._morechatplus_db_path:
+            return {}
+        try:
+            with sqlite3.connect(self._morechatplus_db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                placeholders = ",".join(["?"] * len(user_ids))
+                rows = conn.execute(f"""
+                    SELECT user_id, nickname, MAX(timestamp) as max_ts
+                    FROM messages 
+                    WHERE origin = ? AND user_id IN ({placeholders})
+                    GROUP BY user_id
+                """, [origin] + user_ids).fetchall()
+                return {row["user_id"]: row["nickname"] for row in rows}
+        except Exception:
+            return {}
+
+    def get_today_emoji_stats(self, origin: str) -> Dict:
+        """获取今日表情点赞统计（0点到当前时间）
+        
+        Returns:
+            {
+                "top_message": {
+                    "msg_id": str,
+                    "content": str,
+                    "sender_id": str,
+                    "sender_nickname": str,
+                    "total_likes": int,
+                    "emoji_breakdown_raw": {emoji_id: count, ...}
+                },
+                "top_user": {
+                    "user_id": str,
+                    "nickname": str,
+                    "total_given": int,
+                    "emoji_breakdown_raw": {emoji_id: count, ...}
+                },
+                "summary": {...},
+                "all_users_stats": [...]
+            }
+        """
+        today_start = self.get_day_start_timestamp(0)
+        now = time.time()
+        
+        if not self._morechatplus_db_path:
+            logger.warning("[ChanganCat] morechatplus数据库路径未设置，无法统计表情榜")
+            return self._empty_emoji_stats()
+        
+        # 关键：表情点赞表的 origin 是纯数字群号，需要转换
+        group_id = self._extract_group_id(origin)
+        
+        try:
+            with sqlite3.connect(self._morechatplus_db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                # 检查表是否存在
+                table_check = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='emoji_likes'"
+                ).fetchone()
+                if not table_check:
+                    logger.warning("[ChanganCat] emoji_likes 表不存在，请确保 morechatplus 已正确处理表情点赞事件")
+                    return self._empty_emoji_stats()
+                
+                rows = conn.execute("""
+                    SELECT msg_id, user_id, emoji_id, 
+                           SUM(CASE WHEN is_add = 1 THEN 1 ELSE -1 END) as net_count
+                    FROM emoji_likes 
+                    WHERE origin = ? AND timestamp >= ? AND timestamp < ?
+                    GROUP BY msg_id, user_id, emoji_id
+                    HAVING net_count > 0
+                """, (group_id, today_start, now)).fetchall()
+            
+            logger.info(f"[ChanganCat] 表情榜查询: origin={origin} -> group_id={group_id}, 记录数={len(rows)}")
+            
+            if not rows:
+                return self._empty_emoji_stats()
+            
+            # 聚合数据
+            message_agg = {}
+            user_agg = {}
+            msg_ids_set = set()
+            users_set = set()
+            emojis_set = set()
+            
+            for row in rows:
+                msg_id = row["msg_id"]
+                user_id = row["user_id"]
+                emoji_id = row["emoji_id"]
+                net_count = row["net_count"]
+                
+                if net_count <= 0:
+                    continue
+                
+                msg_ids_set.add(msg_id)
+                users_set.add(user_id)
+                emojis_set.add(emoji_id)
+                
+                if msg_id not in message_agg:
+                    message_agg[msg_id] = {"total": 0, "emojis": {}}
+                message_agg[msg_id]["total"] += net_count
+                message_agg[msg_id]["emojis"][emoji_id] = message_agg[msg_id]["emojis"].get(emoji_id, 0) + net_count
+                
+                if user_id not in user_agg:
+                    user_agg[user_id] = {"total": 0, "emojis": {}, "nickname": ""}
+                user_agg[user_id]["total"] += net_count
+                user_agg[user_id]["emojis"][emoji_id] = user_agg[user_id]["emojis"].get(emoji_id, 0) + net_count
+            
+            # 最受欢迎消息
+            top_message_info = None
+            if message_agg:
+                top_msg_id = max(message_agg.keys(), key=lambda x: message_agg[x]["total"])
+                top_msg_data = message_agg[top_msg_id]
+                # 获取消息发送者信息（使用原始 origin 格式查询消息表）
+                msg_details = self._get_messages_by_ids(origin, list(msg_ids_set))
+                sender_info = msg_details.get(top_msg_id, {})
+                # 原始表情分解（用于 Face 组件）
+                emoji_breakdown_raw = {
+                    eid: cnt
+                    for eid, cnt in sorted(top_msg_data["emojis"].items(), key=lambda x: -x[1])
+                }
+                top_message_info = {
+                    "msg_id": top_msg_id,
+                    "content": sender_info.get("content", "")[:100],
+                    "sender_id": sender_info.get("user_id", "未知"),
+                    "sender_nickname": sender_info.get("nickname", "未知"),
+                    "total_likes": top_msg_data["total"],
+                    "emoji_breakdown_raw": emoji_breakdown_raw,
+                }
+            
+            # 点赞最多的用户
+            top_user_info = None
+            if user_agg:
+                top_user_id = max(user_agg.keys(), key=lambda x: user_agg[x]["total"])
+                top_user_data = user_agg[top_user_id]
+                # 获取用户昵称
+                nickname = self._get_user_nickname(origin, top_user_id)
+                if nickname:
+                    top_user_data["nickname"] = nickname
+                emoji_breakdown_user_raw = {
+                    eid: cnt
+                    for eid, cnt in sorted(top_user_data["emojis"].items(), key=lambda x: -x[1])
+                }
+                top_user_info = {
+                    "user_id": top_user_id,
+                    "nickname": top_user_data.get("nickname", top_user_id),
+                    "total_given": top_user_data["total"],
+                    "emoji_breakdown_raw": emoji_breakdown_user_raw,
+                }
+            
+            # 所有用户统计
+            all_users_stats = []
+            user_nicknames = self._get_users_nickname_batch(origin, list(user_agg.keys()))
+            for uid, data in sorted(user_agg.items(), key=lambda x: -x[1]["total"]):
+                all_users_stats.append({
+                    "user_id": uid,
+                    "nickname": user_nicknames.get(uid, uid),
+                    "total_given": data["total"]
+                })
+            
+            summary = {
+                "total_likes": sum(data["total"] for data in message_agg.values()),
+                "unique_users": len(users_set),
+                "unique_emojis": len(emojis_set),
+                "unique_messages": len(msg_ids_set)
+            }
+            
+            return {
+                "top_message": top_message_info,
+                "top_user": top_user_info,
+                "summary": summary,
+                "all_users_stats": all_users_stats[:10]
+            }
+            
+        except Exception as e:
+            logger.error(f"[ChanganCat] 获取今日表情榜失败: {e}", exc_info=True)
+            return self._empty_emoji_stats()
+
+    def _empty_emoji_stats(self) -> Dict:
+        """返回空的表情榜统计"""
+        return {
+            "top_message": None,
+            "top_user": None,
+            "summary": {"total_likes": 0, "unique_users": 0, "unique_emojis": 0, "unique_messages": 0},
+            "all_users_stats": []
+        }
+
+    def _extract_message_display_components(self, origin: str, content: str) -> Tuple[str, List]:
+        """从消息内容中提取纯文本和可用的图片组件
+
+        Args:
+            origin: 群 origin，用于查询图片缓存
+            content: 原始消息内容（可能包含 [image:...] 标记）
+
+        Returns:
+            (clean_text, image_components): 清理后的纯文本和 Image 组件列表
+        """
+        from astrbot.api.message_components import Image as CompImage
+        if not content:
+            return "", []
+
+        # 提取所有图片标记
+        memes = self.extract_memes(content)
+        image_components = []
+        for idx, img_id in memes:
+            # 获取图片本地路径
+            local_path = self._get_image_local_path(img_id)
+            if local_path and Path(local_path).exists():
+                try:
+                    image_components.append(CompImage(file=local_path))
+                except Exception as e:
+                    logger.error(f"[ChanganCat] 加载图片组件失败 {local_path}: {e}")
+
+        # 移除图片标记，得到纯文本
+        clean_text = self.MEME_PATTERN.sub('', content).strip()
+        # 移除多余的空白
+        clean_text = re.sub(r'\s+', ' ', clean_text)
+        return clean_text, image_components
+
+    def format_emoji_ranking_chain(self, origin: str, group_name: str = "") -> list:
+        """返回消息链（Plain + Face 组件）用于发送
+        
+        Returns:
+            list: 可发送的消息组件列表
+        """
+        from astrbot.api.message_components import Plain, Face
+        
+        stats = self.get_today_emoji_stats(origin)
+        chain = []
+
+        # 标题
+        title = f" {datetime.now().strftime('%Y/%m/%d')} 表情榜（今日）\n\n"
+        if group_name:
+            title += f"群聊：{group_name}\n\n"
+        else:
+            title += f"群聊：{origin}\n\n"
+        chain.append(Plain(title))
+
+        if stats["summary"]["total_likes"] == 0:
+            chain.append(Plain("今日暂无表情记录~"))
+            return chain
+
+        # 最受欢迎消息
+        top_msg = stats.get("top_message")
+        if top_msg:
+            chain.append(Plain("• 最受欢迎消息：\n"))
+            chain.append(Plain(f"    发送者： {top_msg['sender_nickname']} ({top_msg['sender_id']})\n"))
+
+            # 处理消息内容：提取图片和清理文本
+            raw_content = top_msg.get('content', '')
+            clean_text, img_comps = self._extract_message_display_components(origin, raw_content)
+
+            if clean_text:
+                chain.append(Plain(f"    消息详情： {clean_text[:200]}...\n"))
+            elif img_comps:
+                # 纯图片消息，没有文本，显示占位说明
+                chain.append(Plain("    消息详情： [图片消息]\n"))
+            else:
+                # 既无文本也无图片 → 未知消息
+                chain.append(Plain("    消息详情： 可能是群相册、群文件、小程序、较早时间的消息等未在数据库中的消息\n"))
+
+            # 插入图片组件（如果有）
+            for img_comp in img_comps:
+                chain.append(img_comp)
+                chain.append(Plain("\n"))
+
+            chain.append(Plain("     共收到 "))
+            raw_breakdown = top_msg.get("emoji_breakdown_raw", {})
+            for eid, cnt in raw_breakdown.items():
+                chain.extend(self._emoji_to_component(eid, cnt))
+            chain.append(Plain("\n\n"))
+
+        # 今日点赞王
+        top_user = stats.get("top_user")
+        if top_user:
+            chain.append(Plain("喵~\n"))
+            chain.append(Plain(" \n"))
+            chain.append(Plain(f"• 今日表情王： {top_user['nickname']} ({top_user['user_id']})\n"))
+            chain.append(Plain("    共送出 "))
+            raw_breakdown_user = top_user.get("emoji_breakdown_raw", {})
+            for eid, cnt in raw_breakdown_user.items():
+                chain.extend(self._emoji_to_component(eid, cnt))
+            chain.append(Plain("\n\n"))
+
+        # 简要统计（纯文本）
+        summary = stats["summary"]
+        chain.append(Plain("喵~ \n"))
+        chain.append(Plain("• 今日统计：\n"))
+        chain.append(Plain(f"    总净表情数：{summary['total_likes']} 个\n"))
+        chain.append(Plain(f"    参与人数：{summary['unique_users']} 人\n"))
+        chain.append(Plain(f"    表情种类：{summary['unique_emojis']} 种\n"))
+        chain.append(Plain(f"    被贴表情消息：{summary['unique_messages']} 条\n\n"))
+
+        # 群友点赞榜（前5）
+        all_users = stats.get("all_users_stats", [])
+        if all_users:
+            chain.append(Plain(" 群友表情榜（前5）：\n"))
+            medals = ["🥇", "🥈", "🥉"]
+            for i, user in enumerate(all_users[:5]):
+                medal = medals[i] if i < 3 else f"{i+1}."
+                chain.append(Plain(f"   {medal} {user['nickname']} - {user['total_given']} 个\n"))
+
+        return chain
+
+    # 保留纯文本版本以兼容其他调用（可选）
+    def format_emoji_ranking_response(self, origin: str, group_name: str = "") -> str:
+        """纯文本版本的格式（兼容旧代码）"""
+        stats = self.get_today_emoji_stats(origin)
+        lines = []
+        lines.append(f" {datetime.now().strftime('%Y/%m/%d')} 表情榜（今日）")
+        lines.append("")
+        if group_name:
+            lines.append(f"群聊：{group_name}")
+        else:
+            lines.append(f"群聊：{origin}")
+        lines.append("")
+        if stats["summary"]["total_likes"] == 0:
+            lines.append("今日暂无表情记录~")
+            return chr(10).join(lines)
+
+        top_msg = stats.get("top_message")
+        if top_msg:
+            lines.append(" 最受欢迎消息：")
+            # 这里将表情ID转换为文本显示，因为纯文本无法显示Face
+            emoji_parts = [f"[{eid}]x{count}" for eid, count in top_msg.get("emoji_breakdown_raw", {}).items()]
+            emoji_str = "、".join(emoji_parts)
+            lines.append(f"   发送者： {top_msg['sender_nickname']} ({top_msg['sender_id']})")
+            # 纯文本版本中，尝试显示消息内容摘要，但无法显示图片
+            raw_content = top_msg.get('content', '')
+            clean_text, _ = self._extract_message_display_components(origin, raw_content)
+            if clean_text:
+                lines.append(f"   消息详情： {clean_text[:200]}...")
+            elif self.extract_memes(raw_content):
+                lines.append("   消息详情： [图片消息]")
+            else:
+                lines.append("   消息详情： 可能是群相册、群文件、小程序、较早时间的消息等未在数据库中的消息")
+            lines.append(f"   共收到 {top_msg['total_likes']} 个表情（{emoji_str}）")
+            lines.append("")
+        top_user = stats.get("top_user")
+        if top_user:
+            lines.append("")
+            lines.append(" 今日表情王：")
+            emoji_parts = [f"[{eid}]x{count}" for eid, count in top_user.get("emoji_breakdown_raw", {}).items()]
+            emoji_str = "、".join(emoji_parts)
+            lines.append(f"   {top_user['nickname']} ({top_user['user_id']})")
+            lines.append(f"    共送出 {top_user['total_given']} 个表情（{emoji_str}）")
+            lines.append("")
+        summary = stats["summary"]
+        lines.append("")
+        lines.append(" 今日统计：")
+        lines.append(f"   • 总净表情数：{summary['total_likes']} 个")
+        lines.append(f"   • 参与人数：{summary['unique_users']} 人")
+        lines.append(f"   • 表情种类：{summary['unique_emojis']} 种")
+        lines.append(f"   • 被贴表情消息：{summary['unique_messages']} 条")
+        lines.append("")
+        all_users = stats.get("all_users_stats", [])
+        if all_users:
+            lines.append(" 群友表情榜（前5）：")
+            medals = ["🥇", "🥈", "🥉"]
+            for i, user in enumerate(all_users[:5]):
+                medal = medals[i] if i < 3 else f"{i+1}."
+                lines.append(f"   {medal} {user['nickname']} - {user['total_given']} 个")
+        return chr(10).join(lines)

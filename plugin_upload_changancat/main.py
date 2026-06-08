@@ -773,7 +773,8 @@ class ChanganCatPlugin(star.Star):
         if not msg_info:
             return
 
-        message_id, user_id, nickname, content, image_urls = msg_info
+        # 解包新增返回的 image_info_list
+        message_id, user_id, nickname, content, image_urls, image_info_list = msg_info
         real_origin = event.unified_msg_origin
         internal_id = self._extract_internal_id(real_origin)
 
@@ -801,7 +802,7 @@ class ChanganCatPlugin(star.Star):
 
         if self.config.repeat.enable:
             repeat_info = self.repeat_manager.check_and_record_message(
-                internal_id, message_id, user_id, content, image_urls
+                internal_id, message_id, user_id, content, image_urls, image_info_list
             )
 
             if not repeat_info:
@@ -811,7 +812,7 @@ class ChanganCatPlugin(star.Star):
                 await self._do_repeat(event, repeat_info)
 
     async def _extract_message_info(self, event: AstrMessageEvent) -> Optional[tuple]:
-        """提取消息信息"""
+        """提取消息信息（增强图片提取）"""
         try:
             message_id = str(event.message_obj.message_id or "")
             user_id = str(event.get_sender_id() or "")
@@ -819,62 +820,161 @@ class ChanganCatPlugin(star.Star):
 
             content_parts = []
             image_urls = []
+            image_info_list = []  # 新增：存储更详细的图片信息
 
             for comp in event.get_messages():
                 if isinstance(comp, Plain):
                     content_parts.append(comp.text)
                 elif isinstance(comp, Image):
-                    url = str(comp.url or comp.file or "").strip()
-                    if url:
-                        image_urls.append(url)
+                    # 增强图片URL提取，尝试多种属性
+                    url = ""
+
+                    # 尝试各种可能的属性
+                    if hasattr(comp, 'url') and comp.url:
+                        url = str(comp.url).strip()
+                    elif hasattr(comp, 'file') and comp.file:
+                        url = str(comp.file).strip()
+                    elif hasattr(comp, 'path') and comp.path:
+                        url = str(comp.path).strip()
+                    elif hasattr(comp, 'file_name') and comp.file_name:
+                        url = str(comp.file_name).strip()
+
+                    # 记录提取结果用于调试
+                    logger.debug(f"[ChanganCat] 图片组件属性: url={getattr(comp, 'url', None)}, "
+                               f"file={getattr(comp, 'file', None)}, "
+                               f"path={getattr(comp, 'path', None)}, "
+                               f"提取到url={bool(url)}")
+
+                                        # 提取file字段（用于生成稳定的图片ID）
+                    file_id = ""
+                    if hasattr(comp, 'file') and comp.file:
+                        file_id = str(comp.file).strip()
+
+                    # 生成图片ID：优先使用file字段（MD5文件名），回退到URL的MD5
+                    if file_id:
+                        clean_file = file_id.split('.')[0].lower()
+                        img_id = f"img_{clean_file}"
+                    elif url:
                         url_hash = hashlib.md5(url.encode()).hexdigest()
                         img_id = f"url_{url_hash[:16]}"
+                    else:
+                        continue  # 没有可用的图片标识，跳过
+
+                    if url:
+                        image_urls.append(url)
                         content_parts.append(f"[image:{len(image_urls)}:{img_id}]")
+                        image_info_list.append({
+                            "index": len(image_urls),
+                            "url": url,
+                            "id": img_id,
+                            "file_id": file_id,
+                            "is_local": url.startswith("/") or (len(url) > 1 and url[1] == ":")
+                        })
                 elif isinstance(comp, At):
                     content_parts.append(f"[at:{comp.qq}]")
 
             content = " ".join(content_parts)
-            return message_id, user_id, nickname, content, image_urls
+
+            logger.debug(f"[ChanganCat] 提取消息: user={user_id}, "
+                        f"images={len(image_urls)}, content={content[:80]}...")
+
+            return message_id, user_id, nickname, content, image_urls, image_info_list
 
         except Exception as e:
             logger.error(f"[ChanganCat] 提取消息信息失败: {e}")
             return None
 
     async def _do_repeat(self, event: AstrMessageEvent, repeat_info: dict):
-        """执行复读（原有方法）"""
+        """执行复读（增强表情包处理）"""
         try:
             content = repeat_info["content"]
             image_urls = repeat_info.get("image_urls", [])
+            image_info_list = repeat_info.get("image_info_list", [])  # 新增
             is_meme = repeat_info.get("is_meme", False)
             origin = event.unified_msg_origin
 
             from astrbot.api.message_components import Plain, Image as CompImage
 
             chain = []
+            repeat_log = []  # 记录复读详情用于调试
 
             if is_meme:
+                logger.info(f"[ChanganCat] 开始处理表情包复读, content={content[:100]}")
+                logger.info(f"[ChanganCat] image_urls数量={len(image_urls)}, image_info_list={len(image_info_list)}")
+
                 memes = self.stats_manager.extract_memes(content)
+                logger.info(f"[ChanganCat] 提取到表情包标记: {memes}")
 
                 if memes:
                     for idx, img_id in memes:
+                        logger.info(f"[ChanganCat] 处理表情包 #{idx}: id={img_id}")
+
+                        # 策略1: 从 morechatplus image_cache.db 获取本地路径
                         local_path = self.stats_manager._get_image_local_path(img_id)
+                        logger.info(f"[ChanganCat] 策略1 image_cache查询结果: {local_path}")
 
                         if local_path and Path(local_path).exists():
                             try:
                                 chain.append(CompImage(file=local_path))
+                                repeat_log.append(f"本地缓存:{img_id}")
+                                logger.info(f"[ChanganCat] 使用本地缓存发送表情包: {local_path}")
+                                continue  # 成功则处理下一个
                             except Exception as e:
-                                logger.error(f"[ChanganCat] 添加表情包失败: {e}")
-                        else:
-                            if idx <= len(image_urls) and image_urls[idx - 1]:
-                                url = image_urls[idx - 1]
+                                logger.error(f"[ChanganCat] 添加本地表情包失败: {e}")
+
+                        # 策略2: 从 image_info_list 获取（更可靠）
+                        if image_info_list:
+                            # idx 是从1开始的序号
+                            info = None
+                            for img_info in image_info_list:
+                                if img_info["index"] == idx:
+                                    info = img_info
+                                    break
+
+                            if info:
+                                url = info["url"]
+                                logger.info(f"[ChanganCat] 策略2 image_info匹配: url={url[:80] if url else 'None'}...")
+
+                                if info["is_local"] and Path(url).exists():
+                                    chain.append(CompImage(file=url))
+                                    repeat_log.append(f"本地路径:{img_id}")
+                                    logger.info(f"[ChanganCat] 使用本地路径发送: {url}")
+                                    continue
+                                elif url.startswith("http"):
+                                    local_path = await self._download_image(url)
+                                    if local_path:
+                                        chain.append(CompImage(file=local_path))
+                                        repeat_log.append(f"下载:{img_id}")
+                                        logger.info(f"[ChanganCat] 下载后发送: {local_path}")
+                                        continue
+
+                        # 策略3: 从 image_urls 列表按索引获取（兼容旧逻辑）
+                        if idx <= len(image_urls):
+                            url = image_urls[idx - 1]
+                            logger.info(f"[ChanganCat] 策略3 image_urls索引: idx={idx}, url={str(url)[:80] if url else 'None'}...")
+
+                            if url:
                                 if url.startswith("http"):
                                     local_path = await self._download_image(url)
                                     if local_path:
                                         chain.append(CompImage(file=local_path))
+                                        repeat_log.append(f"下载(旧):{img_id}")
+                                        logger.info(f"[ChanganCat] 使用旧逻辑下载发送: {local_path}")
+                                        continue
                                 elif Path(url).exists():
                                     chain.append(CompImage(file=url))
+                                    repeat_log.append(f"本地(旧):{img_id}")
+                                    logger.info(f"[ChanganCat] 使用旧逻辑本地发送: {url}")
+                                    continue
+
+                        # 所有策略都失败
+                        logger.warning(f"[ChanganCat] 表情包 #{idx}({img_id}) 所有发送策略均失败")
+                        repeat_log.append(f"失败:{img_id}")
+
                 else:
-                    for url in image_urls[:3]:
+                    # fallback: 没有提取到表情包标记，但 is_meme=True
+                    logger.warning(f"[ChanganCat] is_meme=True 但未提取到表情包标记，尝试 fallback")
+                    for i, url in enumerate(image_urls[:3]):
                         if not url or not isinstance(url, str):
                             continue
                         try:
@@ -882,14 +982,19 @@ class ChanganCatPlugin(star.Star):
                             if is_local:
                                 if Path(url).exists():
                                     chain.append(CompImage(file=url))
+                                    repeat_log.append(f"fallback本地:{i}")
+                                    logger.info(f"[ChanganCat] fallback本地发送: {url}")
                             else:
                                 local_path = await self._download_image(url)
                                 if local_path:
                                     chain.append(CompImage(file=local_path))
+                                    repeat_log.append(f"fallback下载:{i}")
+                                    logger.info(f"[ChanganCat] fallback下载发送: {local_path}")
                         except Exception as img_e:
-                            logger.error(f"[ChanganCat] 复读图片失败: {img_e}")
+                            logger.error(f"[ChanganCat] fallback复读图片失败: {img_e}")
                             continue
             else:
+                # 纯文本复读
                 clean_content = re.sub(r'\[at:\d+\]', '', content)
                 clean_content = re.sub(r'<引用:\d+>', '', clean_content)
                 clean_content = re.sub(r'\[image:\d+:[^\]]+\]', '[图片]', clean_content)
@@ -897,14 +1002,17 @@ class ChanganCatPlugin(star.Star):
 
                 if clean_content:
                     chain.append(Plain(clean_content))
+                    repeat_log.append(f"文本:{clean_content[:30]}")
 
             if chain:
                 msg = SimpleMessage(chain)
                 await self.context.send_message(origin, msg)
-                logger.info(f"[ChanganCat] 复读消息: {content[:50]}...")
+                logger.info(f"[ChanganCat] 复读成功: {repeat_log}, 共{len(chain)}个组件")
+            else:
+                logger.error(f"[ChanganCat] 复读失败: 没有可发送的内容！原始内容={content[:100]}")
 
         except Exception as e:
-            logger.error(f"[ChanganCat] 复读失败: {e}")
+            logger.error(f"[ChanganCat] 复读失败: {e}", exc_info=True)
 
     @filter.command("哈气趋势")
     async def cmd_haqi_trend(self, event: AstrMessageEvent):
@@ -1088,6 +1196,131 @@ class ChanganCatPlugin(star.Star):
             await self._safe_send(event, f"获取表情包榜失败: {e}")
             event.stop_event()
 
+    @filter.command("表情包周榜")
+    async def cmd_weekly_meme_ranking(self, event: AstrMessageEvent):
+        """表情包周榜命令 - 统计近7日表情包"""
+        if not self.config.core.enable:
+            return
+
+        if event.get_message_type() != MessageType.GROUP_MESSAGE:
+            await self._safe_send(event, "该命令只能在群聊中使用")
+            event.stop_event()
+            return
+
+        origin = event.unified_msg_origin
+        internal_id = self._extract_internal_id(origin)
+        group_name = self._get_group_name(internal_id)
+
+        try:
+            response, meme_images = self.stats_manager.format_weekly_meme_command_response(origin, group_name)
+            await self._send_message_with_images(event.unified_msg_origin, response, meme_images)
+            logger.info(f"[ChanganCat] 已响应/表情包周榜命令")
+            event.stop_event()
+        except Exception as e:
+            logger.error(f"[ChanganCat] 表情包周榜命令出错: {e}")
+            await self._safe_send(event, f"获取表情包周榜失败: {e}")
+            event.stop_event()
+
+    @filter.command("变身榜")
+    async def cmd_bianshen_ranking(self, event: AstrMessageEvent):
+        """变身榜命令 - 统计今日和本周的变身次数（快变+不变）"""
+        if not self.config.core.enable:
+            return
+
+        if event.get_message_type() != MessageType.GROUP_MESSAGE:
+            await self._safe_send(event, "该命令只能在群聊中使用")
+            event.stop_event()
+            return
+
+        origin = event.unified_msg_origin
+        internal_id = self._extract_internal_id(origin)
+        group_name = self._get_group_name(internal_id)
+
+        try:
+            response = self.stats_manager.format_bianshen_command_response(origin, group_name)
+            await self._safe_send(event, response)
+            logger.info(f"[ChanganCat] 已响应/变身榜命令")
+            event.stop_event()
+        except Exception as e:
+            logger.error(f"[ChanganCat] 变身榜命令出错: {e}")
+            await self._safe_send(event, f"获取变身榜失败: {e}")
+            event.stop_event()
+
+    @filter.command("bsb")
+    async def cmd_bianshen_ranking_bsb(self, event: AstrMessageEvent):
+        """变身榜命令别名（/bsb）"""
+        if not self.config.core.enable:
+            return
+
+        if event.get_message_type() != MessageType.GROUP_MESSAGE:
+            await self._safe_send(event, "该命令只能在群聊中使用")
+            event.stop_event()
+            return
+
+        origin = event.unified_msg_origin
+        internal_id = self._extract_internal_id(origin)
+        group_name = self._get_group_name(internal_id)
+
+        try:
+            response = self.stats_manager.format_bianshen_command_response(origin, group_name)
+            await self._safe_send(event, response)
+            logger.info(f"[ChanganCat] 已响应/bsb命令")
+            event.stop_event()
+        except Exception as e:
+            logger.error(f"[ChanganCat] /bsb命令出错: {e}")
+            await self._safe_send(event, f"获取变身榜失败: {e}")
+            event.stop_event()
+
+    @filter.command("变身周榜")
+    async def cmd_daily_bianshen_ranking(self, event: AstrMessageEvent):
+        """变身周榜命令 - 按天显示最近7天的变身统计"""
+        if not self.config.core.enable:
+            return
+
+        if event.get_message_type() != MessageType.GROUP_MESSAGE:
+            await self._safe_send(event, "该命令只能在群聊中使用")
+            event.stop_event()
+            return
+
+        origin = event.unified_msg_origin
+        internal_id = self._extract_internal_id(origin)
+        group_name = self._get_group_name(internal_id)
+
+        try:
+            response = self.stats_manager.format_daily_bianshen_report(origin, group_name, days=7)
+            await self._safe_send(event, response)
+            logger.info(f"[ChanganCat] 已响应/变身周榜命令")
+            event.stop_event()
+        except Exception as e:
+            logger.error(f"[ChanganCat] 变身周榜命令出错: {e}")
+            await self._safe_send(event, f"获取变身周榜失败: {e}")
+            event.stop_event()
+
+    @filter.command("bszb")
+    async def cmd_daily_bianshen_ranking_bszb(self, event: AstrMessageEvent):
+        """变身周榜命令别名（/bszb）"""
+        if not self.config.core.enable:
+            return
+
+        if event.get_message_type() != MessageType.GROUP_MESSAGE:
+            await self._safe_send(event, "该命令只能在群聊中使用")
+            event.stop_event()
+            return
+
+        origin = event.unified_msg_origin
+        internal_id = self._extract_internal_id(origin)
+        group_name = self._get_group_name(internal_id)
+
+        try:
+            response = self.stats_manager.format_daily_bianshen_report(origin, group_name, days=7)
+            await self._safe_send(event, response)
+            logger.info(f"[ChanganCat] 已响应/bszb命令")
+            event.stop_event()
+        except Exception as e:
+            logger.error(f"[ChanganCat] /bszb命令出错: {e}")
+            await self._safe_send(event, f"获取变身周榜失败: {e}")
+            event.stop_event()
+
     @filter.command("changancat_stats")
     async def cmd_stats(self, event: AstrMessageEvent):
         """统计信息命令"""
@@ -1184,6 +1417,39 @@ class ChanganCatPlugin(star.Star):
         except Exception as e:
             logger.error(f"[ChanganCat] 今日哈气命令出错: {e}")
             await self._safe_send(event, f"获取今日哈气详情失败: {e}")
+            event.stop_event()
+
+    @filter.command("表情榜")
+    async def cmd_emoji_ranking(self, event: AstrMessageEvent):
+        """表情榜命令 - 统计今日表情点赞数据（支持QQ原生表情）"""
+        if not self.config.core.enable:
+            return
+
+        if event.get_message_type() != MessageType.GROUP_MESSAGE:
+            await self._safe_send(event, "该命令只能在群聊中使用")
+            event.stop_event()
+            return
+
+        origin = event.unified_msg_origin
+        internal_id = self._extract_internal_id(origin)
+        group_name = self._get_group_name(internal_id)
+
+        try:
+            # 获取消息链（包含 Face 组件）
+            chain = self.stats_manager.format_emoji_ranking_chain(origin, group_name)
+            if not chain:
+                await self._safe_send(event, "生成表情榜失败：消息链为空")
+                event.stop_event()
+                return
+            
+            # 发送消息链
+            msg = SimpleMessage(chain)
+            await self.context.send_message(event.unified_msg_origin, msg)
+            logger.info(f"[ChanganCat] 已响应/表情榜命令（含表情组件）")
+            event.stop_event()
+        except Exception as e:
+            logger.error(f"[ChanganCat] 表情榜命令出错: {e}", exc_info=True)
+            await self._safe_send(event, f"获取表情榜失败: {e}")
             event.stop_event()
 
     @filter.command("七日哈气")

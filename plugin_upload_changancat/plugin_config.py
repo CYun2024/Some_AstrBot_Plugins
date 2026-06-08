@@ -83,12 +83,20 @@ class DatabaseSettings:
 
 
 @dataclass(frozen=True)
+class DebugSettings:
+    """调试设置"""
+    log_level: str = "INFO"
+    enable_repeat_debug: bool = False
+
+
+@dataclass(frozen=True)
 class PluginConfig:
     """插件总配置"""
     core: CoreSettings = field(default_factory=CoreSettings)
     repeat: RepeatSettings = field(default_factory=RepeatSettings)
     stats: StatsSettings = field(default_factory=StatsSettings)
     database: DatabaseSettings = field(default_factory=DatabaseSettings)
+    debug: DebugSettings = field(default_factory=DebugSettings)
 
 
 def parse_plugin_config(raw: dict[str, Any] | None) -> PluginConfig:
@@ -129,9 +137,17 @@ def parse_plugin_config(raw: dict[str, Any] | None) -> PluginConfig:
         data_retention_days=_to_int(database_raw.get("data_retention_days"), 7, 1, 30),
     )
 
+    # 调试设置（新增）
+    debug_raw = raw.get("debug_settings", {})
+    debug = DebugSettings(
+        log_level=_to_str(debug_raw.get("log_level"), "INFO"),
+        enable_repeat_debug=_to_bool(debug_raw.get("enable_repeat_debug"), False),
+    )
+
     return PluginConfig(
         core=core,
         repeat=repeat,
         stats=stats,
         database=database,
+        debug=debug,
     )

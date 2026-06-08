@@ -113,5 +113,24 @@
                 "default": 7
             }
         }
+    },
+    "debug_settings": {
+        "description": "调试设置",
+        "hint": "控制日志输出详细程度，帮助排查问题。修改后需重启插件生效",
+        "type": "object",
+        "items": {
+            "log_level": {
+                "description": "日志级别",
+                "hint": "DEBUG=最详细(排查问题用)，INFO=一般信息(默认)，WARNING=只显示警告，ERROR=只显示错误",
+                "type": "string",
+                "default": "INFO"
+            },
+            "enable_repeat_debug": {
+                "description": "启用复读调试日志",
+                "hint": "开启后会详细记录复读判断和表情包发送的每一步，帮助排查表情包复读问题",
+                "type": "bool",
+                "default": false
+            }
+        }
     }
 }
