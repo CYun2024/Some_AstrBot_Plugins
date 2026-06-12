@@ -1544,6 +1544,145 @@ class StatsManager:
             logger.error(f"[ChanganCat] 获取今日表情榜失败: {e}", exc_info=True)
             return self._empty_emoji_stats()
 
+    def get_weekly_emoji_stats(self, origin: str) -> Dict:
+        """获取本周表情点赞统计（近7日）
+
+        Returns:
+            同 get_today_emoji_stats 格式
+        """
+        week_start = self.get_day_start_timestamp(7)
+        now = time.time()
+
+        if not self._morechatplus_db_path:
+            logger.warning("[ChanganCat] morechatplus数据库路径未设置，无法统计表情周榜")
+            return self._empty_emoji_stats()
+
+        # 关键：表情点赞表的 origin 是纯数字群号，需要转换
+        group_id = self._extract_group_id(origin)
+
+        try:
+            with sqlite3.connect(self._morechatplus_db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                # 检查表是否存在
+                table_check = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='emoji_likes'"
+                ).fetchone()
+                if not table_check:
+                    logger.warning("[ChanganCat] emoji_likes 表不存在，请确保 morechatplus 已正确处理表情点赞事件")
+                    return self._empty_emoji_stats()
+
+                rows = conn.execute("""
+                    SELECT msg_id, user_id, emoji_id, 
+                           SUM(CASE WHEN is_add = 1 THEN 1 ELSE -1 END) as net_count
+                    FROM emoji_likes 
+                    WHERE origin = ? AND timestamp >= ? AND timestamp < ?
+                    GROUP BY msg_id, user_id, emoji_id
+                    HAVING net_count > 0
+                """, (group_id, week_start, now)).fetchall()
+
+            logger.info(f"[ChanganCat] 表情周榜查询: origin={origin} -> group_id={group_id}, 记录数={len(rows)}")
+
+            if not rows:
+                return self._empty_emoji_stats()
+
+            # 聚合数据（与今日统计相同逻辑）
+            message_agg = {}
+            user_agg = {}
+            msg_ids_set = set()
+            users_set = set()
+            emojis_set = set()
+
+            for row in rows:
+                msg_id = row["msg_id"]
+                user_id = row["user_id"]
+                emoji_id = row["emoji_id"]
+                net_count = row["net_count"]
+
+                if net_count <= 0:
+                    continue
+
+                msg_ids_set.add(msg_id)
+                users_set.add(user_id)
+                emojis_set.add(emoji_id)
+
+                if msg_id not in message_agg:
+                    message_agg[msg_id] = {"total": 0, "emojis": {}}
+                message_agg[msg_id]["total"] += net_count
+                message_agg[msg_id]["emojis"][emoji_id] = message_agg[msg_id]["emojis"].get(emoji_id, 0) + net_count
+
+                if user_id not in user_agg:
+                    user_agg[user_id] = {"total": 0, "emojis": {}, "nickname": ""}
+                user_agg[user_id]["total"] += net_count
+                user_agg[user_id]["emojis"][emoji_id] = user_agg[user_id]["emojis"].get(emoji_id, 0) + net_count
+
+            # 最受欢迎消息
+            top_message_info = None
+            if message_agg:
+                top_msg_id = max(message_agg.keys(), key=lambda x: message_agg[x]["total"])
+                top_msg_data = message_agg[top_msg_id]
+                msg_details = self._get_messages_by_ids(origin, list(msg_ids_set))
+                sender_info = msg_details.get(top_msg_id, {})
+                emoji_breakdown_raw = {
+                    eid: cnt
+                    for eid, cnt in sorted(top_msg_data["emojis"].items(), key=lambda x: -x[1])
+                }
+                top_message_info = {
+                    "msg_id": top_msg_id,
+                    "content": sender_info.get("content", "")[:100],
+                    "sender_id": sender_info.get("user_id", "未知"),
+                    "sender_nickname": sender_info.get("nickname", "未知"),
+                    "total_likes": top_msg_data["total"],
+                    "emoji_breakdown_raw": emoji_breakdown_raw,
+                }
+
+            # 点赞最多的用户
+            top_user_info = None
+            if user_agg:
+                top_user_id = max(user_agg.keys(), key=lambda x: user_agg[x]["total"])
+                top_user_data = user_agg[top_user_id]
+                nickname = self._get_user_nickname(origin, top_user_id)
+                if nickname:
+                    top_user_data["nickname"] = nickname
+                emoji_breakdown_user_raw = {
+                    eid: cnt
+                    for eid, cnt in sorted(top_user_data["emojis"].items(), key=lambda x: -x[1])
+                }
+                top_user_info = {
+                    "user_id": top_user_id,
+                    "nickname": top_user_data.get("nickname", top_user_id),
+                    "total_given": top_user_data["total"],
+                    "emoji_breakdown_raw": emoji_breakdown_user_raw,
+                }
+
+            # 所有用户统计
+            all_users_stats = []
+            user_nicknames = self._get_users_nickname_batch(origin, list(user_agg.keys()))
+            for uid, data in sorted(user_agg.items(), key=lambda x: -x[1]["total"]):
+                all_users_stats.append({
+                    "user_id": uid,
+                    "nickname": user_nicknames.get(uid, uid),
+                    "total_given": data["total"]
+                })
+
+            summary = {
+                "total_likes": sum(data["total"] for data in message_agg.values()),
+                "unique_users": len(users_set),
+                "unique_emojis": len(emojis_set),
+                "unique_messages": len(msg_ids_set)
+            }
+
+            return {
+                "top_message": top_message_info,
+                "top_user": top_user_info,
+                "summary": summary,
+                "all_users_stats": all_users_stats[:10]
+            }
+
+        except Exception as e:
+            logger.error(f"[ChanganCat] 获取表情周榜失败: {e}", exc_info=True)
+            return self._empty_emoji_stats()
+
+
     def _empty_emoji_stats(self) -> Dict:
         """返回空的表情榜统计"""
         return {
@@ -1654,6 +1793,93 @@ class StatsManager:
         summary = stats["summary"]
         chain.append(Plain("喵~ \n"))
         chain.append(Plain("• 今日统计：\n"))
+        chain.append(Plain(f"    总净表情数：{summary['total_likes']} 个\n"))
+        chain.append(Plain(f"    参与人数：{summary['unique_users']} 人\n"))
+        chain.append(Plain(f"    表情种类：{summary['unique_emojis']} 种\n"))
+        chain.append(Plain(f"    被贴表情消息：{summary['unique_messages']} 条\n\n"))
+
+        # 群友点赞榜（前5）
+        all_users = stats.get("all_users_stats", [])
+        if all_users:
+            chain.append(Plain(" 群友表情榜（前5）：\n"))
+            medals = ["🥇", "🥈", "🥉"]
+            for i, user in enumerate(all_users[:5]):
+                medal = medals[i] if i < 3 else f"{i+1}."
+                chain.append(Plain(f"   {medal} {user['nickname']} - {user['total_given']} 个\n"))
+
+        return chain
+
+
+
+    def format_weekly_emoji_ranking_chain(self, origin: str, group_name: str = "") -> list:
+        """返回表情周榜消息链（Plain + Face 组件）用于发送
+
+        Returns:
+            list: 可发送的消息组件列表
+        """
+        from astrbot.api.message_components import Plain, Face
+
+        stats = self.get_weekly_emoji_stats(origin)
+        chain = []
+
+        # 标题（显示日期范围）
+        end_date = datetime.now().strftime('%Y/%m/%d')
+        start_date = (datetime.now() - timedelta(days=7)).strftime('%Y/%m/%d')
+        title = f" 表情周榜（{start_date} ~ {end_date}）\n\n"
+        if group_name:
+            title += f"群聊：{group_name}\n\n"
+        else:
+            title += f"群聊：{origin}\n\n"
+        chain.append(Plain(title))
+
+        if stats["summary"]["total_likes"] == 0:
+            chain.append(Plain("本周暂无表情记录~"))
+            return chain
+
+        # 最受欢迎消息
+        top_msg = stats.get("top_message")
+        if top_msg:
+            chain.append(Plain("• 本周最受欢迎消息：\n"))
+            chain.append(Plain(f"    发送者： {top_msg['sender_nickname']} ({top_msg['sender_id']})\n"))
+
+            # 处理消息内容：提取图片和清理文本
+            raw_content = top_msg.get('content', '')
+            clean_text, img_comps = self._extract_message_display_components(origin, raw_content)
+
+            if clean_text:
+                chain.append(Plain(f"    消息详情： {clean_text[:200]}...\n"))
+            elif img_comps:
+                chain.append(Plain("    消息详情： [图片消息]\n"))
+            else:
+                chain.append(Plain("    消息详情： 可能是群相册、群文件、小程序、较早时间的消息等未在数据库中的消息\n"))
+
+            # 插入图片组件（如果有）
+            for img_comp in img_comps:
+                chain.append(img_comp)
+                chain.append(Plain("\n"))
+
+            chain.append(Plain("     共收到 "))
+            raw_breakdown = top_msg.get("emoji_breakdown_raw", {})
+            for eid, cnt in raw_breakdown.items():
+                chain.extend(self._emoji_to_component(eid, cnt))
+            chain.append(Plain("\n\n"))
+
+        # 本周点赞王
+        top_user = stats.get("top_user")
+        if top_user:
+            chain.append(Plain("喵~\n"))
+            chain.append(Plain(" \n"))
+            chain.append(Plain(f"• 本周表情王： {top_user['nickname']} ({top_user['user_id']})\n"))
+            chain.append(Plain("    共送出 "))
+            raw_breakdown_user = top_user.get("emoji_breakdown_raw", {})
+            for eid, cnt in raw_breakdown_user.items():
+                chain.extend(self._emoji_to_component(eid, cnt))
+            chain.append(Plain("\n\n"))
+
+        # 简要统计（纯文本）
+        summary = stats["summary"]
+        chain.append(Plain("喵~ \n"))
+        chain.append(Plain("• 本周统计：\n"))
         chain.append(Plain(f"    总净表情数：{summary['total_likes']} 个\n"))
         chain.append(Plain(f"    参与人数：{summary['unique_users']} 人\n"))
         chain.append(Plain(f"    表情种类：{summary['unique_emojis']} 种\n"))

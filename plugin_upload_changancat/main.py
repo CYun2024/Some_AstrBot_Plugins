@@ -1452,6 +1452,40 @@ class ChanganCatPlugin(star.Star):
             await self._safe_send(event, f"获取表情榜失败: {e}")
             event.stop_event()
 
+
+    @filter.command("表情周榜")
+    async def cmd_emoji_weekly_ranking(self, event: AstrMessageEvent):
+        """表情周榜命令 - 统计近7日表情点赞数据（支持QQ原生表情）"""
+        if not self.config.core.enable:
+            return
+
+        if event.get_message_type() != MessageType.GROUP_MESSAGE:
+            await self._safe_send(event, "该命令只能在群聊中使用")
+            event.stop_event()
+            return
+
+        origin = event.unified_msg_origin
+        internal_id = self._extract_internal_id(origin)
+        group_name = self._get_group_name(internal_id)
+
+        try:
+            # 获取消息链（包含 Face 组件）
+            chain = self.stats_manager.format_weekly_emoji_ranking_chain(origin, group_name)
+            if not chain:
+                await self._safe_send(event, "生成表情周榜失败：消息链为空")
+                event.stop_event()
+                return
+
+            # 发送消息链
+            msg = SimpleMessage(chain)
+            await self.context.send_message(event.unified_msg_origin, msg)
+            logger.info(f"[ChanganCat] 已响应/表情周榜命令（含表情组件）")
+            event.stop_event()
+        except Exception as e:
+            logger.error(f"[ChanganCat] 表情周榜命令出错: {e}", exc_info=True)
+            await self._safe_send(event, f"获取表情周榜失败: {e}")
+            event.stop_event()
+
     @filter.command("七日哈气")
     async def cmd_week_haqi_detail(self, event: AstrMessageEvent):
         """七日哈气详情"""
