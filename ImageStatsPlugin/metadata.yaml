@@ -1,0 +1,6 @@
+# imagestats/metadata.yaml
+name: imagestats
+desc: 图片消息统计插件，自动统计MoreChatPlus数据库中的图片出现次数，对高频图片进行永久存储
+author: CYun2024
+version: 1.0.0
+repo: ''
