@@ -98,7 +98,6 @@ class MoreChatPlusPlugin(star.Star):
         logger.info(f"[MoreChatPlus] 插件初始化完成")
         asyncio.create_task(self._delayed_init_debugger())
 
-
     def _log_debug(self, msg: str):
         """根据配置输出调试日志"""
         if self.config.core.debug:
@@ -261,14 +260,16 @@ class MoreChatPlusPlugin(star.Star):
                 await self._record_bot_message(event)
                 return
 
-            # 处理非Bot消息的at标签转换
-            await self._process_at_tags(event)
-
+            # 处理非Bot消息的at标签转换（根据配置开关）
+            if self.config.core.enable_at_function:
+                await self._process_at_tags(event)
         except Exception as e:
             logger.error(f"[MoreChatPlus] on_decorating_result 失败: {e}", exc_info=True)
 
     async def _process_at_tags(self, event: AstrMessageEvent):
         """处理消息中的at标签转换"""
+        if not self.config.core.enable_at_function:
+            return
         try:
             message_chain = event.get_messages()
             if not message_chain:
@@ -360,10 +361,30 @@ class MoreChatPlusPlugin(star.Star):
     @filter.platform_adapter_type(filter.PlatformAdapterType.ALL)
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_message(self, event: AstrMessageEvent):
-        """处理所有消息"""
+        """处理所有消息和通知事件"""
         if not self.config.core.enable:
             return
 
+        # ========== 1. 识别并处理 notice 事件（表情点赞等） ==========
+        # 尝试获取原始事件数据（兼容不同版本）
+        raw_event = getattr(event, 'raw_event', None)
+        if not raw_event and hasattr(event, 'message_obj') and hasattr(event.message_obj, 'raw_message'):
+            raw_event = event.message_obj.raw_message
+        if not raw_event and isinstance(event, dict):
+            raw_event = event
+
+        # 判断是否为通知事件
+        if raw_event and raw_event.get('post_type') == 'notice':
+            notice_type = raw_event.get('notice_type')
+            if notice_type == 'group_msg_emoji_like':
+                logger.debug("[MoreChatPlus] 捕获表情点赞通知，开始处理")
+                asyncio.create_task(self._handle_emoji_like(raw_event))
+            # 其他类型的通知可以在此扩展
+            # 无论是否处理，都要阻止事件继续传播，避免产生空消息记录
+            event.stop_event()   # 关键调用：停止流水线
+            return
+
+        # ========== 2. 普通消息处理（原有逻辑） ==========
         # 提取基本信息用于日志
         raw_msg = event.message_str or ""
         sender_id = str(event.get_sender_id() or "")
@@ -384,6 +405,12 @@ class MoreChatPlusPlugin(star.Star):
         message_id, user_id, nickname, content, has_image, image_urls, reply_to, image_ids = msg_info
         origin = event.unified_msg_origin
         is_bot_self = user_id == bot_id
+
+        # 过滤无实质内容的消息（安全兜底）
+        if not content.strip() and not has_image and not reply_to:
+            logger.debug("[MoreChatPlus] 消息无实质内容，跳过处理")
+            event._morechatplus_processed = True
+            return
 
         self._log_debug(f"解析: {nickname}({user_id}), is_bot={is_bot_self}")
 
@@ -413,8 +440,12 @@ class MoreChatPlusPlugin(star.Star):
             event._morechatplus_processed = True
             return
 
-        # 检查是否是@bot
-        is_mentioned = bot_id and f"[at:{bot_id}]" in content
+        # 检查是否是@bot（根据配置开关）
+        is_mentioned = False
+        if self.config.core.enable_at_function and bot_id:
+            is_mentioned = f"[at:{bot_id}]" in content
+        elif not self.config.core.enable_at_function:
+            self._log_debug("@功能已关闭，跳过@检测")
 
         # 检查触发词
         should_reply = should_trigger_reply(
@@ -425,12 +456,14 @@ class MoreChatPlusPlugin(star.Star):
         )
 
         # 检查是否引用了bot的消息
-        if reply_to:
+        if reply_to and self.config.core.enable_reply_function:
             is_quote_bot = await self._check_quote_is_bot(origin, reply_to)
             if is_quote_bot:
                 should_reply = True
                 is_mentioned = True
                 logger.info(f"[MoreChatPlus] 检测到引用Bot消息，强制触发回复")
+        elif reply_to and not self.config.core.enable_reply_function:
+            self._log_debug("引用功能已关闭，跳过引用检测")
 
         logger.debug(f"[MoreChatPlus] 决策: is_mentioned={is_mentioned}, should_reply={should_reply}")
 
@@ -465,14 +498,19 @@ class MoreChatPlusPlugin(star.Star):
             is_mentioned=is_mentioned,
         )
 
-        event._morechatplus_enhanced_prompt = enhanced_prompt
-        event._morechatplus_processed = True
+        if self.config.core.enable_prompt_injection:
+            event._morechatplus_enhanced_prompt = enhanced_prompt
 
-        # 非@触发时确保事件传播
-        if should_reply and not is_mentioned:
-            self._log_debug("非@触发，确保LLM调用")
-            if hasattr(event, 'continue_event'):
-                event.continue_event()
+            # 非@触发时确保事件传播
+            if should_reply and not is_mentioned:
+                self._log_debug("非@触发，确保LLM调用")
+                if hasattr(event, 'continue_event'):
+                    event.continue_event()
+
+        else:
+            self._log_debug("提示词注入已关闭，跳过增强prompt")
+
+        event._morechatplus_processed = True
 
     async def _check_quote_is_bot(self, origin: str, reply_to: str) -> bool:
         """检查引用的消息是否是Bot发送的"""
@@ -496,6 +534,8 @@ class MoreChatPlusPlugin(star.Star):
     async def on_llm_request(self, event: AstrMessageEvent, req):
         """在LLM请求前注入上下文（主LLM通过此方法获得上下文，无需配置提供商ID）"""
         if not self.config.core.enable:
+            return
+        if not self.config.core.enable_prompt_injection:
             return
         if not hasattr(event, '_morechatplus_enhanced_prompt'):
             return
@@ -737,6 +777,8 @@ class MoreChatPlusPlugin(star.Star):
             is_mentioned=is_mentioned,
             current_user_id=user_id,
             current_message_id=message_id,
+            enable_at=self.config.core.enable_at_function,
+            enable_reply=self.config.core.enable_reply_function,
         )
 
         enhanced_prompt = system_prompt_template.replace(
@@ -763,19 +805,17 @@ class MoreChatPlusPlugin(star.Star):
 
         return enhanced_prompt
 
-
-
     # ==================== LLM 工具函数 ====================
 
     @llm_tool(name="morechatplus_get_message")
     async def tool_get_message(self, event: AstrMessageEvent, message_id: str = ""):
         """获取指定消息的完整内容。
-        
+
         当需要查看某条引用消息或历史消息的详细内容时使用此工具。
-        
+
         Args:
             message_id (str): 消息ID，纯数字格式，如 "267518526"，不需要带 #msg 前缀
-            
+
         Returns:
             str: 消息内容的文本描述，包含发送者、时间、内容等信息
         """
@@ -785,26 +825,27 @@ class MoreChatPlusPlugin(star.Star):
                 result = "错误：缺少必需参数 message_id，请提供具体的消息ID"
                 self._cache_tool_result(event, result)
                 return result
-            
+
             result_data = await self.chat_tools.get_message_content(event, message_id)
-            
+
             # 解析 JSON 转为更易读的文本
             try:
                 data = json.loads(result_data)
                 if data.get("status") == "error":
                     result = f"[获取消息失败] {data.get('message', '未知错误')}"
                 else:
+                    from datetime import datetime
                     result = (f"[消息 #{data.get('message_id')}]\n"
                              f"发送者: {data.get('nickname')}({data.get('user_id')})\n"
                              f"时间: {datetime.fromtimestamp(data.get('timestamp', 0)).strftime('%H:%M:%S') if data.get('timestamp') else '未知'}\n"
                              f"内容: {data.get('content', '无内容')}")
             except:
                 result = f"[消息内容]\n{result_data}"
-            
+
             self._cache_tool_result(event, result)
             logger.info(f"[MoreChatPlus] 工具结果: {result[:100]}...")
             return result
-            
+
         except Exception as e:
             error_msg = f"获取消息失败: {str(e)}"
             logger.error(f"[MoreChatPlus] 工具执行失败: morechatplus_get_message | 错误: {e}", exc_info=True)
@@ -814,12 +855,12 @@ class MoreChatPlusPlugin(star.Star):
     @llm_tool(name="morechatplus_get_user_profile")
     async def tool_get_user_profile(self, event: AstrMessageEvent, user_id: str = ""):
         """获取指定用户的画像信息。
-        
+
         当你需要了解某个用户的性格、兴趣、与机器人的关系历史时使用此工具。
-        
+
         Args:
             user_id (str): 用户ID（QQ号），如 "13286633"
-            
+
         Returns:
             str: 用户画像的文本描述，包含昵称、性格、兴趣、关系等
         """
@@ -829,9 +870,9 @@ class MoreChatPlusPlugin(star.Star):
                 result = "错误：缺少必需参数 user_id，请提供具体的QQ号"
                 self._cache_tool_result(event, result)
                 return result
-            
+
             result_data = await self.chat_tools.get_user_profile(event, user_id)
-            
+
             try:
                 data = json.loads(result_data)
                 if data.get("status") == "not_found":
@@ -846,11 +887,11 @@ class MoreChatPlusPlugin(star.Star):
                              f"与你的关系: {data.get('relationship_with_bot') or '未知'}")
             except:
                 result = f"[用户画像]\n{result_data}"
-            
+
             self._cache_tool_result(event, result)
             logger.info(f"[MoreChatPlus] 工具结果: {result[:100]}...")
             return result
-            
+
         except Exception as e:
             error_msg = f"获取用户画像失败: {str(e)}"
             logger.error(f"[MoreChatPlus] 工具执行失败: morechatplus_get_user_profile | 错误: {e}", exc_info=True)
@@ -860,12 +901,12 @@ class MoreChatPlusPlugin(star.Star):
     @llm_tool(name="morechatplus_query_nickname")
     async def tool_query_nickname(self, event: AstrMessageEvent, nickname: str = ""):
         """查询昵称对应的用户。
-        
+
         当你看到群友使用昵称称呼某人，但不确定具体是谁时使用此工具查询。
-        
+
         Args:
             nickname (str): 要查询的昵称（如"小明"、"猫猫"），支持模糊匹配
-            
+
         Returns:
             str: 查询结果，包含匹配的用户列表
         """
@@ -875,9 +916,9 @@ class MoreChatPlusPlugin(star.Star):
                 result = "错误：缺少必需参数 nickname，请提供要查询的昵称"
                 self._cache_tool_result(event, result)
                 return result
-            
+
             result_data = await self.chat_tools.query_nickname(event, nickname)
-            
+
             try:
                 data = json.loads(result_data)
                 if data.get("status") == "not_found":
@@ -894,11 +935,11 @@ class MoreChatPlusPlugin(star.Star):
                         result = "\n".join(lines)
             except:
                 result = f"[昵称查询结果]\n{result_data}"
-            
+
             self._cache_tool_result(event, result)
             logger.info(f"[MoreChatPlus] 工具结果: {result[:100]}...")
             return result
-            
+
         except Exception as e:
             error_msg = f"查询昵称失败: {str(e)}"
             logger.error(f"[MoreChatPlus] 工具执行失败: morechatplus_query_nickname | 错误: {e}", exc_info=True)
@@ -908,12 +949,12 @@ class MoreChatPlusPlugin(star.Star):
     @llm_tool(name="morechatplus_get_context")
     async def tool_get_context(self, event: AstrMessageEvent, count: int = 20):
         """获取最近的上下文消息记录。
-        
+
         当需要回顾历史对话或查看之前的聊天内容时使用此工具。
-        
+
         Args:
             count (int): 获取的消息数量，范围 1-50，默认 20 条。建议查看近期对话用 10-20，追溯历史用 30-50
-            
+
         Returns:
             str: 格式化后的历史消息记录
         """
@@ -924,20 +965,20 @@ class MoreChatPlusPlugin(star.Star):
                 count = 1
             elif count > 50:
                 count = 50
-            
+
             result_data = await self.chat_tools.get_recent_context(event, count)
-            
+
             try:
                 data = json.loads(result_data)
                 context_text = data.get("context", "无内容")
                 result = f"[最近 {data.get('count', 0)} 条上下文]\n{context_text}"
             except:
                 result = f"[上下文记录]\n{result_data}"
-            
+
             self._cache_tool_result(event, result)
             logger.info(f"[MoreChatPlus] 工具结果长度: {len(result)} 字符")
             return result
-            
+
         except Exception as e:
             error_msg = f"获取上下文失败: {str(e)}"
             logger.error(f"[MoreChatPlus] 工具执行失败: morechatplus_get_context | 错误: {e}", exc_info=True)
@@ -947,13 +988,13 @@ class MoreChatPlusPlugin(star.Star):
     @llm_tool(name="morechatplus_add_nickname")
     async def tool_add_nickname(self, event: AstrMessageEvent, user_id: str = "", nickname: str = ""):
         """为用户添加新的昵称映射。
-        
+
         当你发现用户在使用新昵称或需要手动纠正昵称关联时使用此工具。
-        
+
         Args:
             user_id (str): 用户ID（QQ号），如 "13286633"
             nickname (str): 要添加的新昵称，如 "小猫"
-            
+
         Returns:
             str: 操作结果提示
         """
@@ -963,9 +1004,9 @@ class MoreChatPlusPlugin(star.Star):
                 result = "错误：必须同时提供 user_id（QQ号）和 nickname（昵称）"
                 self._cache_tool_result(event, result)
                 return result
-            
+
             result_data = await self.chat_tools.add_user_nickname(event, user_id, nickname)
-            
+
             try:
                 data = json.loads(result_data)
                 if data.get("status") == "success":
@@ -974,11 +1015,11 @@ class MoreChatPlusPlugin(star.Star):
                     result = f"[操作失败] {data.get('message', '未知错误')}"
             except:
                 result = f"[添加昵称结果]\n{result_data}"
-            
+
             self._cache_tool_result(event, result)
             logger.info(f"[MoreChatPlus] 工具结果: {result}")
             return result
-            
+
         except Exception as e:
             error_msg = f"添加昵称失败: {str(e)}"
             logger.error(f"[MoreChatPlus] 工具执行失败: morechatplus_add_nickname | 错误: {e}", exc_info=True)
@@ -988,13 +1029,13 @@ class MoreChatPlusPlugin(star.Star):
     @llm_tool(name="morechatplus_get_image_vision")
     async def tool_get_image_vision(self, event: AstrMessageEvent, image_id: str = ""):
         """获取图片的识图结果。如果该图片尚未识别，会自动调用识图API进行识别。
-        
+
         当用户询问某张图片的内容，或你需要查看之前识别过的图片信息时使用此工具。
-        
+
         Args:
             image_id (str): 图片的唯一标识ID，格式如 "img_c72430bdf422415b"，
                            通常可以在上下文中的 [image:x:img_id] 标记中找到
-            
+
         Returns:
             str: 图片内容的文字描述
         """
@@ -1004,7 +1045,7 @@ class MoreChatPlusPlugin(star.Star):
                 result = "错误：缺少必需参数 image_id，请从上下文的 [image:x:img_id] 标记中提取图片ID"
                 self._cache_tool_result(event, result)
                 return result
-            
+
             # 1. 先查缓存
             cached_result = self.image_cache.get_vision_result(image_id)
             if cached_result:
@@ -1013,32 +1054,32 @@ class MoreChatPlusPlugin(star.Star):
                 self._cache_tool_result(event, result)
                 logger.info(f"[MoreChatPlus] 工具返回: 命中缓存 | image_id={image_id}")
                 return result
-            
+
             # 2. 缓存未命中，尝试实时识图
             logger.info(f"[MoreChatPlus] 缓存未命中，开始实时识图: {image_id}")
             local_path = self.image_cache.get_local_path(image_id)
-            
+
             if not local_path or not Path(local_path).exists():
                 result = f"错误：找不到图片文件 {image_id}，可能已被清理或未下载"
                 self._cache_tool_result(event, result)
                 return result
-            
+
             # 3. 使用配置的识图模型
             provider_id = self.config.models.vision_provider
             provider = None
-            
+
             if provider_id:
                 provider = self.context.get_provider_by_id(provider_id)
                 logger.info(f"[MoreChatPlus] 使用配置的视觉模型: {provider_id}")
             else:
                 provider = self.context.get_using_provider(event.unified_msg_origin)
                 logger.info("[MoreChatPlus] 使用当前对话模型进行识图")
-            
+
             if not provider:
                 result = "错误：视觉模型不可用"
                 self._cache_tool_result(event, result)
                 return result
-            
+
             # 4. 调用识图API
             response = await asyncio.wait_for(
                 provider.text_chat(
@@ -1049,24 +1090,24 @@ class MoreChatPlusPlugin(star.Star):
                 ),
                 timeout=self.config.timeouts.vision_sec,
             )
-            
+
             vision_text = response.completion_text or ""
-            
+
             if not vision_text:
                 result = "错误：识图返回为空"
                 self._cache_tool_result(event, result)
                 return result
-            
+
             # 5. 存入缓存（防止下次重复识图）
             self.image_cache.set_vision_result(image_id, vision_text)
             self.image_cache.increment_send_count(image_id)
-            
+
             result = f"[图片 {image_id} 识别结果]\n{vision_text}\n[该结果已缓存，后续查询不会重复识图]"
             self._cache_tool_result(event, result)
-            
+
             logger.info(f"[MoreChatPlus] 实时识图成功并缓存 | image_id={image_id} | 结果长度: {len(vision_text)}")
             return result
-            
+
         except Exception as e:
             error_msg = f"识图失败: {str(e)}"
             logger.error(f"[MoreChatPlus] 工具执行失败: morechatplus_get_image_vision | 错误: {e}", exc_info=True)
@@ -1079,60 +1120,68 @@ class MoreChatPlusPlugin(star.Star):
             event._morechatplus_tool_results = []
         event._morechatplus_tool_results.append(result)
 
-    @filter.on_llm_request()
-    async def on_llm_request(self, event: AstrMessageEvent, req):
-        """在LLM请求前注入上下文，并追加工具执行结果"""
+    @filter.command("cleanmorechat")
+    async def clean_morechat_context(self, event: AstrMessageEvent):
+        """清空当前对话的上下文历史（仅清空注入提示词中的上下文，不清空数据库）
+
+        使用方法：/cleanmorechat
+
+        注意：此命令只清空内存中用于注入到 LLM 的上下文缓存，
+        数据库中的历史记录不会被删除。
+        """
         if not self.config.core.enable:
-            return
-        
-        if not hasattr(event, '_morechatplus_enhanced_prompt'):
+            yield event.plain_result("[MoreChatPlus] 插件已禁用")
             return
 
-        enhanced_prompt = event._morechatplus_enhanced_prompt
-        
-        # 【关键】追加工具执行结果到 prompt
-        if hasattr(event, '_morechatplus_tool_results') and event._morechatplus_tool_results:
-            tool_section = "\n\n【工具执行结果 - 供你参考，请基于这些结果回复】\n" + "\n---\n".join(event._morechatplus_tool_results)
-            enhanced_prompt += tool_section
-            tool_count = len(event._morechatplus_tool_results)
-            logger.info(f"[MoreChatPlus] 已追加 {tool_count} 条工具结果到 prompt")
-            # 清空，避免重复追加（虽然理论上每次请求都是新 event，但以防万一）
-            event._morechatplus_tool_results = []
+        origin = event.unified_msg_origin
 
-        injected = False
+        # 清空内存中的消息缓存
+        if origin in self.context_manager._message_cache:
+            del self.context_manager._message_cache[origin]
 
+        # 重置计数器
+        if origin in self.context_manager._message_counter:
+            self.context_manager._message_counter[origin] = 0
+
+        # 清空待处理的主动回复
+        if origin in self._pending_active_replies:
+            del self._pending_active_replies[origin]
+
+        self._log_debug(f"已清空 {origin} 的上下文缓存")
+        yield event.plain_result("[MoreChatPlus] 已清空当前对话的上下文历史（数据库记录未受影响）")
+
+    # ==================== 表情点赞处理 ====================
+    async def _handle_emoji_like(self, raw: dict):
+        """处理群消息表情点赞"""
         try:
-            # 尝试注入到不同格式的请求中
-            if hasattr(req, 'prompt'):
-                req.prompt = enhanced_prompt
-                injected = True
-            elif hasattr(req, 'messages') and isinstance(req.messages, list):
-                for i in range(len(req.messages) - 1, -1, -1):
-                    if isinstance(req.messages[i], dict) and req.messages[i].get('role') == 'user':
-                        req.messages[i]['content'] = enhanced_prompt
-                        injected = True
-                        break
-            elif hasattr(req, 'contexts') and isinstance(req.contexts, list):
-                for i in range(len(req.contexts) - 1, -1, -1):
-                    if isinstance(req.contexts[i], dict) and req.contexts[i].get('role') == 'user':
-                        req.contexts[i]['content'] = enhanced_prompt
-                        injected = True
-                        break
+            msg_id = str(raw.get('message_id', ''))
+            user_id = str(raw.get('user_id', ''))
+            group_id = str(raw.get('group_id', ''))
+            is_add = raw.get('is_add', True)
+            likes = raw.get('likes', [])
+            if not likes:
+                return
+            # 取第一个表情（事件只包含当前操作的表情）
+            emoji = likes[0]
+            emoji_id = str(emoji.get('emoji_id', ''))
 
-            if injected:
-                if hasattr(event, 'message_str'):
-                    event.message_str = enhanced_prompt
-                # 清空原始上下文，避免重复
-                if hasattr(req, 'contexts'):
-                    req.contexts = []
-                delattr(event, '_morechatplus_enhanced_prompt')
-                self._log_debug("上下文注入成功（含工具结果）")
-            else:
-                logger.error("[MoreChatPlus] 注入失败：未找到合适的注入点")
-                
+            if not msg_id or not user_id or not emoji_id:
+                logger.debug("[MoreChatPlus] 表情点赞数据不完整，跳过")
+                return
+
+            # 保存到数据库
+            self.db.save_emoji_like(
+                msg_id=msg_id,
+                user_id=user_id,
+                emoji_id=emoji_id,
+                is_add=is_add,
+                origin=group_id,
+                timestamp=time.time()
+            )
+            self._log_debug(f"记录表情点赞: msg={msg_id}, user={user_id}, emoji={emoji_id}, is_add={is_add}")
         except Exception as e:
-            logger.error(f"[MoreChatPlus] 注入异常: {e}")
+            logger.error(f"[MoreChatPlus] 处理表情点赞失败: {e}", exc_info=True)
 
     async def terminate(self) -> None:
-        """插件终止"""
+        """插件终止时清理"""
         logger.info("[MoreChatPlus] 插件终止")

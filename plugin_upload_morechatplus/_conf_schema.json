@@ -39,6 +39,24 @@
                 "hint": "开启后会输出详细调试日志，用于排查问题",
                 "type": "bool",
                 "default": false
+                        },
+            "enable_prompt_injection": {
+                "description": "启用提示词和上下文注入",
+                "hint": "关闭后不会在 LLM 请求前注入增强提示词和上下文，LLM 将只收到原始消息",
+                "type": "bool",
+                "default": true
+            },
+            "enable_at_function": {
+                "description": "启用@功能",
+                "hint": "关闭后不会处理消息中的@标签，也不会注入@相关的提示词",
+                "type": "bool",
+                "default": true
+            },
+            "enable_reply_function": {
+                "description": "启用引用功能",
+                "hint": "关闭后不会处理消息中的引用标签，也不会注入引用相关的提示词",
+                "type": "bool",
+                "default": true
             }
         }
     },

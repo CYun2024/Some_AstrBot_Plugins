@@ -124,6 +124,27 @@ class DatabaseManager:
                 )
             """)
 
+            #消息贴表情表
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS emoji_likes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    msg_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    emoji_id TEXT NOT NULL,
+                    is_add INTEGER NOT NULL,
+                    origin TEXT NOT NULL,
+                    timestamp REAL NOT NULL
+                )
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_emoji_likes_msg_id 
+                ON emoji_likes(msg_id, origin)
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_emoji_likes_user 
+                ON emoji_likes(user_id, origin)
+            """)
+
             # 昵称映射表（用于快速查找）
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS nickname_mappings (
@@ -574,3 +595,57 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"[MoreChatPlus] 获取用户列表失败: {e}")
             return []
+
+    # ==================== 消息贴表情方法 ====================
+
+    def save_emoji_like(
+        self,
+        msg_id: str,
+        user_id: str,
+        emoji_id: str,
+        is_add: bool,
+        origin: str,
+        timestamp: float = None,
+    ) -> bool:
+        """保存表情点赞记录"""
+        if timestamp is None:
+            timestamp = time.time()
+        try:
+            with self._lock, self._connect() as conn:
+                conn.execute("""
+                    INSERT INTO emoji_likes (msg_id, user_id, emoji_id, is_add, origin, timestamp)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (msg_id, user_id, emoji_id, 1 if is_add else 0, origin, timestamp))
+                conn.commit()
+                return True
+        except Exception as e:
+            logger.error(f"[MoreChatPlus] 保存表情点赞失败: {e}")
+            return False
+
+    def get_emoji_likes(
+        self,
+        origin: str = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> List[Dict]:
+        """获取表情点赞记录"""
+        try:
+            with self._lock, self._connect() as conn:
+                if origin:
+                    rows = conn.execute("""
+                        SELECT * FROM emoji_likes
+                        WHERE origin = ?
+                        ORDER BY timestamp DESC
+                        LIMIT ? OFFSET ?
+                    """, (origin, limit, offset)).fetchall()
+                else:
+                    rows = conn.execute("""
+                        SELECT * FROM emoji_likes
+                        ORDER BY timestamp DESC
+                        LIMIT ? OFFSET ?
+                    """, (limit, offset)).fetchall()
+                return [dict(row) for row in rows]
+        except Exception as e:
+            logger.error(f"[MoreChatPlus] 获取表情点赞记录失败: {e}")
+            return []
+            

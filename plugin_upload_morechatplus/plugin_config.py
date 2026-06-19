@@ -65,9 +65,12 @@ class CoreSettings:
     enable: bool = True
     trigger_words: List[str] = field(default_factory=list)
     admin_user_id: str = ""
-    bot_name: str = "机巧猫"
+    bot_name: str = "韶梦"
     bot_qq_id: str = ""
     debug: bool = False  # 新增：调试日志开关
+    enable_prompt_injection: bool = True  # 是否注入提示词和上下文
+    enable_at_function: bool = True  # 是否启用@功能
+    enable_reply_function: bool = True  # 是否启用引用功能
 
 
 @dataclass(frozen=True)
@@ -151,6 +154,9 @@ def parse_plugin_config(raw: dict[str, Any] | None) -> PluginConfig:
         bot_name=_to_str(core_raw.get("bot_name"), "机巧猫"),
         bot_qq_id=_to_str(core_raw.get("bot_qq_id"), ""),
         debug=_to_bool(core_raw.get("debug"), False),
+        enable_prompt_injection=_to_bool(core_raw.get("enable_prompt_injection"), True),
+        enable_at_function=_to_bool(core_raw.get("enable_at_function"), True),
+        enable_reply_function=_to_bool(core_raw.get("enable_reply_function"), True),
     )
 
     # 模型配置（已移除 main_llm_provider）

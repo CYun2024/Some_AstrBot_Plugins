@@ -254,6 +254,8 @@ class ContextManager:
         is_mentioned: bool = False,
         current_user_id: str = "",
         current_message_id: str = "",
+        enable_at: bool = True,
+        enable_reply: bool = True,
     ) -> str:
         """构建系统提示词（新格式）"""
         mention_hint = "（对方@了你，请回复这条消息）" if is_mentioned else ""
@@ -278,8 +280,10 @@ class ContextManager:
             '4. 当用户说"你刚才说的"、"他提到的"等代词时，结合上下文准确指代',
             '5. 如果话题切换，请在回复中不要再牵扯旧话题',
             "",
-            "【其他规则】",
-            f"- 如需@某人，使用[at:QQ号]格式，如果要@发送者，在回复开头使用 [at:{current_user_id}] 来@TA。 如果需要引用这条信息，在开头加上 <引用:{current_message_id}>。",
+            "",
+            "【格式规则】",
+            f"- 如需@某人，使用[at:QQ号]格式，如果要@发送者，在回复开头使用 [at:{current_user_id}] 来@TA。",
+            f"- 如果需要引用这条信息，在开头加上 <引用:{current_message_id}>。",
             "- 如涉及之前的内容，请根据你的上下文记忆回答，不要虚构不存在的事",
             "",
                         "",
@@ -300,4 +304,12 @@ class ContextManager:
             "【重要规则】当你需要调用工具时，必须严格按照上述JSON格式提供参数，不能留空！",
         ]
 
-        return "\n".join(lines)
+        # 根据开关过滤@和引用相关提示词
+        filtered_lines = []
+        for line in lines:
+            if not enable_at and ("[at:" in line or "@某人" in line or "@发送者" in line or "@TA" in line):
+                continue
+            if not enable_reply and ("<引用:" in line or "引用这条信息" in line):
+                continue
+            filtered_lines.append(line)
+        return "\n".join(filtered_lines)
