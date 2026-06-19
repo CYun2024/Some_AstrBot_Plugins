@@ -3,7 +3,7 @@ import json
 import sqlite3
 import sys
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
 import aiohttp
@@ -13,6 +13,10 @@ from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 import astrbot.api.message_components as Comp
+from astrbot.api import AstrBotConfig
+from .llm_analyzer import LLMPostAnalyzer
+from .image_analyzer import ImagePostAnalyzer
+from .memory_db import UserMemoryDB
 
 # 插件配置默认值 - 使用相对插件目录的路径
 DEFAULT_PROGRAM_PATH = "heibox-comment-bot-master"
@@ -26,11 +30,90 @@ def clean_html_tags(text: str) -> str:
     return cleaned
 
 
+def get_today_window() -> tuple[int, int]:
+    """
+    获取今日帖子的时间窗口：昨天22:00 ~ 今天22:00（北京时间）
+    返回 (window_start, window_end) 的 UTC timestamp
+    """
+    now_bj = datetime.now(timezone(timedelta(hours=8)))
+    today_22 = now_bj.replace(hour=22, minute=0, second=0, microsecond=0)
+
+    if now_bj.hour >= 22:
+        # 今天22:00之后，窗口是今天22:00 ~ 明天22:00
+        window_start = today_22
+        window_end = today_22 + timedelta(days=1)
+    else:
+        # 今天22:00之前，窗口是昨天22:00 ~ 今天22:00
+        window_start = today_22 - timedelta(days=1)
+        window_end = today_22
+
+    return (
+        int(window_start.astimezone(timezone.utc).timestamp()),
+        int(window_end.astimezone(timezone.utc).timestamp())
+    )
+
+
+def get_analysis_window() -> tuple[int, int]:
+    """
+    获取分析窗口：固定为昨天22:00 ~ 今天22:00（北京时间）
+    用于 LLM 每日分析，不受当前时间影响
+    返回 (window_start, window_end) 的 UTC timestamp
+    """
+    now_bj = datetime.now(timezone(timedelta(hours=8)))
+    today_22 = now_bj.replace(hour=22, minute=0, second=0, microsecond=0)
+
+    # 固定窗口：昨天22:00 ~ 今天22:00
+    window_start = today_22 - timedelta(days=1)
+    window_end = today_22
+
+    return (
+        int(window_start.astimezone(timezone.utc).timestamp()),
+        int(window_end.astimezone(timezone.utc).timestamp())
+    )
+
+
+def ts_to_bj_str(timestamp: int) -> str:
+    """时间戳转北京时间字符串"""
+    dt = datetime.fromtimestamp(timestamp, tz=timezone(timedelta(hours=8)))
+    return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+
 @register("heiboxyard", "YourName", "小黑盒帖子自动拉取插件", "1.0.0", "https://github.com/your/repo")
 class HeiboxYard(Star):
-    def __init__(self, context: Context):
+    def __init__(self, context: Context, config: AstrBotConfig = None):
         super().__init__(context)
         self.context = context
+
+        # 读取配置（AstrBot 会自动传入 config）
+        if config is None:
+            config = {}
+        self.config = config
+
+        # 原有配置
+        self.interval_hours = config.get("interval_hours", 2)
+        self.feed_topic_ids = config.get("feed_topic_ids", [486620])
+        self.topic_fetch_interval_minutes = config.get("topic_fetch_interval_minutes", 5)
+        self.content_fetch_interval_seconds = config.get("content_fetch_interval_seconds", 30)
+
+        # 确保 feed_topic_ids 是列表
+        if isinstance(self.feed_topic_ids, str):
+            try:
+                self.feed_topic_ids = [int(x.strip()) for x in self.feed_topic_ids.split(",") if x.strip()]
+            except ValueError:
+                self.feed_topic_ids = [486620]
+        elif not isinstance(self.feed_topic_ids, list):
+            self.feed_topic_ids = [486620]
+
+        # LLM 分析配置
+        self.llm_analysis_enabled = config.get("llm_analysis_enabled", True)
+        self.llm_analysis_time = config.get("llm_analysis_time", "22:30")
+        self.llm_provider_id = config.get("llm_provider_id", "")
+        self.vision_provider_id = config.get("vision_provider_id", "")
+        self.llm_analysis_batch_size = config.get("llm_analysis_batch_size", 8)
+        self.llm_analysis_batch_interval = config.get("llm_analysis_batch_interval_seconds", 5)
+
+        logger.info(f"配置加载: interval_hours={self.interval_hours}, feed_topic_ids={self.feed_topic_ids}")
+        logger.info(f"LLM分析: enabled={self.llm_analysis_enabled}, time={self.llm_analysis_time}")
 
         raw_path = self.plugin_config.get("program_path", DEFAULT_PROGRAM_PATH) if hasattr(self, 'plugin_config') else DEFAULT_PROGRAM_PATH
 
@@ -53,10 +136,30 @@ class HeiboxYard(Star):
         self.image_dir.mkdir(exist_ok=True)
         self._init_db()
 
+        # 初始化图片分析器
+        self.image_analyzer = ImagePostAnalyzer(
+            context=self.context,
+            db_path=self.db_path,
+            vision_provider_id=self.vision_provider_id if self.vision_provider_id else None
+        )
+
+        # 初始化用户记忆库
+        self.memory_db = UserMemoryDB(self.db_path)
+
+        # 初始化 LLM 分析器（传入图片分析器和记忆库）
+        self.llm_analyzer = LLMPostAnalyzer(
+            context=self.context,
+            db_path=self.db_path,
+            chat_provider_id=self.llm_provider_id if self.llm_provider_id else None,
+            memory_db=self.memory_db,
+            image_analyzer=self.image_analyzer
+        )
+
         self._fetch_event = asyncio.Event()
         self._lock = asyncio.Lock()
         self._bg_task = asyncio.create_task(self._background_loop())
         self._nightly_task = asyncio.create_task(self._nightly_fetch_loop())
+        self._llm_analysis_task = asyncio.create_task(self._llm_analysis_loop())
 
     def _ensure_table_schema(self, conn):
         """确保表结构完整，自动修复缺失字段"""
@@ -71,8 +174,12 @@ class HeiboxYard(Star):
             migrations.append("ALTER TABLE posts ADD COLUMN userid INTEGER DEFAULT 0")
         if "username" not in existing_cols:
             migrations.append("ALTER TABLE posts ADD COLUMN username TEXT")
+        if "avatar" not in existing_cols:
+            migrations.append("ALTER TABLE posts ADD COLUMN avatar TEXT")
         if "topics" not in existing_cols:
             migrations.append("ALTER TABLE posts ADD COLUMN topics TEXT")
+        if "window_start" not in existing_cols:
+            migrations.append("ALTER TABLE posts ADD COLUMN window_start INTEGER")
 
         for sql in migrations:
             cur.execute(sql)
@@ -87,7 +194,6 @@ class HeiboxYard(Star):
         conn = sqlite3.connect(self.db_path)
         cur = conn.cursor()
 
-        # 帖子表
         cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='posts'")
         table_exists = cur.fetchone() is not None
 
@@ -96,46 +202,39 @@ class HeiboxYard(Star):
                 CREATE TABLE posts (
                     link_id INTEGER PRIMARY KEY,
                     daily_no INTEGER,
+                    window_start INTEGER,
                     title TEXT,
                     create_at INTEGER,
                     userid INTEGER,
                     username TEXT,
+                    avatar TEXT,
                     topics TEXT,
                     content TEXT,
                     image_urls TEXT,
                     fetched_at TEXT
                 )
             """)
-            cur.execute("CREATE INDEX idx_posts_date ON posts(create_at)")
+            cur.execute("CREATE INDEX idx_posts_window ON posts(window_start)")
+            cur.execute("CREATE INDEX idx_posts_window_no ON posts(window_start, daily_no)")
             logger.info("帖子表初始化完成")
         else:
             self._ensure_table_schema(conn)
-            cur.execute("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_posts_date'")
+            cur.execute("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_posts_window'")
             if not cur.fetchone():
-                cur.execute("CREATE INDEX idx_posts_date ON posts(create_at)")
-
-        # 用户表 - 缓存用户信息
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                userid INTEGER PRIMARY KEY,
-                username TEXT,
-                avatar TEXT,
-                updated_at TEXT
-            )
-        """)
+                cur.execute("CREATE INDEX idx_posts_window ON posts(window_start)")
+            cur.execute("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_posts_window_no'")
+            if not cur.fetchone():
+                cur.execute("CREATE INDEX idx_posts_window_no ON posts(window_start, daily_no)")
 
         conn.commit()
         conn.close()
 
-    def _get_next_daily_no(self, conn, date_timestamp: int) -> int:
-        """获取指定日期的下一个 daily_no"""
+    def _get_next_daily_no(self, conn, window_start: int) -> int:
+        """获取指定时间窗口的下一个 daily_no"""
         cur = conn.cursor()
-        today_start = int(datetime.fromtimestamp(date_timestamp, tz=timezone.utc).replace(
-            hour=0, minute=0, second=0, microsecond=0).timestamp())
-        today_end = today_start + 86400
         cur.execute(
-            "SELECT MAX(daily_no) FROM posts WHERE create_at >= ? AND create_at < ?",
-            (today_start, today_end)
+            "SELECT MAX(daily_no) FROM posts WHERE window_start = ?",
+            (window_start,)
         )
         result = cur.fetchone()[0]
         return (result or 0) + 1
@@ -179,11 +278,12 @@ class HeiboxYard(Star):
             "stderr": stderr.decode("utf-8", errors="ignore")
         }
 
-    async def _fetch_feed(self) -> list[dict]:
+    async def _fetch_feed(self, topic_id: int) -> list[dict]:
+        """获取指定社区的推荐流（只返回 link_id 和 modify_at）"""
         args = [
             "src/main.py",
             "--get-feed-ids",
-            "--feed-topic-id", "486620",
+            "--feed-topic-id", str(topic_id),
             "--feed-limit", "10",
             "--feed-detail"
         ]
@@ -197,15 +297,40 @@ class HeiboxYard(Star):
             logger.error(f"解析 feed JSON 失败: {e}\n输出: {result['stdout'][:500]}")
             return []
 
-    async def _fetch_content(self, link_id: int) -> Optional[tuple[str, list[str]]]:
-        """获取帖子内容"""
-        args = ["src/main.py", "--get-post-content", "--link-id", str(link_id)]
+    async def _fetch_link_detail(self, link_id: int) -> Optional[dict]:
+        """通过 link.py 获取帖子完整信息（包含真实发布时间、作者、正文）"""
+        script_path = self.program_path / "src" / "link.py"
+        if not script_path.exists():
+            script_path = self.program_path / "link.py"
+
+        if not script_path.exists():
+            logger.error(f"link.py 不存在，已查找: {self.program_path / 'src' / 'link.py'}")
+            return None
+
+        args = [str(script_path), "--link-id", str(link_id)]
         result = await self._run_command(args)
         if not result["success"]:
-            logger.error(f"拉取内容失败 link_id={link_id}: {result['stderr']}")
+            logger.warning(f"拉取帖子详情失败 link_id={link_id}: {result['stderr'][:200]}")
             return None
         try:
-            blocks = json.loads(result["stdout"])
+            data = json.loads(result["stdout"])
+            if "error" in data:
+                logger.warning(f"link.py 返回错误 link_id={link_id}: {data['error']}")
+                return None
+            return data
+        except Exception as e:
+            logger.warning(f"解析帖子详情失败 link_id={link_id}: {e}")
+            return None
+
+    def _parse_content(self, content_raw: str) -> tuple[str, list[str]]:
+        """解析帖子正文，返回 (文本内容, 图片URL列表)"""
+        if not content_raw:
+            return "", []
+        try:
+            blocks = json.loads(content_raw)
+            if not isinstance(blocks, list):
+                return str(content_raw), []
+
             text_parts, image_urls = [], []
             for block in blocks:
                 if block.get("type") == "text":
@@ -215,247 +340,171 @@ class HeiboxYard(Star):
                     if url:
                         image_urls.append(url)
             return "\n".join(text_parts).strip(), image_urls
-        except json.JSONDecodeError as e:
-            logger.error(f"解析内容 JSON 失败 link_id={link_id}: {e}")
-            return None
-
-    async def _fetch_owner_info(self, link_id: int) -> Optional[dict]:
-        """获取帖主信息 - 通过 link_owner_simple.py 脚本"""
-        script_path = self.program_path / "src" / "link_owner_simple.py"
-        if not script_path.exists():
-            script_path = self.program_path / "link_owner_simple.py"
-
-        if not script_path.exists():
-            logger.warning(f"link_owner_simple.py 不存在，已查找: {self.program_path / 'src' / 'link_owner_simple.py'}")
-            return None
-
-        args = [str(script_path), "--link-id", str(link_id)]
-        result = await self._run_command(args)
-        if not result["success"]:
-            logger.warning(f"获取帖主信息失败 link_id={link_id}: {result['stderr'][:200]}")
-            return None
-        try:
-            data = json.loads(result["stdout"])
-            if "error" in data:
-                logger.warning(f"获取帖主信息返回错误 link_id={link_id}: {data['error']}")
-                return None
-            return {
-                "userid": data.get("userid"),
-                "username": data.get("username"),
-                "avatar": data.get("avatar")
-            }
-        except Exception as e:
-            logger.warning(f"解析帖主信息失败 link_id={link_id}: {e}")
-            return None
-
-    async def _update_user_cache(self, userid: int, username: str, avatar: str):
-        """更新用户缓存表"""
-        if not userid:
-            return
-        conn = sqlite3.connect(self.db_path)
-        cur = conn.cursor()
-        cur.execute(
-            """INSERT INTO users (userid, username, avatar, updated_at)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(userid) DO UPDATE SET
-                    username = excluded.username,
-                    avatar = excluded.avatar,
-                    updated_at = excluded.updated_at""",
-            (userid, username or "", avatar or "", datetime.now(timezone.utc).isoformat())
-        )
-        conn.commit()
-        conn.close()
-        logger.info(f"用户缓存更新: userid={userid}, username={username}")
-
-    async def _get_cached_username(self, userid: int) -> Optional[str]:
-        """从缓存获取用户名"""
-        if not userid:
-            return None
-        conn = sqlite3.connect(self.db_path)
-        cur = conn.cursor()
-        cur.execute("SELECT username FROM users WHERE userid = ?", (userid,))
-        row = cur.fetchone()
-        conn.close()
-        return row[0] if row else None
+        except:
+            return str(content_raw), []
 
     async def _process_new_posts(self, feed_items: list[dict]):
+        """处理新帖子：筛选时间窗口内的帖子，再用link.py拉取详情"""
         if not feed_items:
+            logger.info("feed 为空，没有新帖子")
+            return
+        if not feed_items:
+            logger.info("feed 为空，没有新帖子")
             return
 
-        conn = sqlite3.connect(self.db_path)
-        self._ensure_table_schema(conn)
-        cur = conn.cursor()
+        window_start, window_end = get_today_window()
+        logger.info(f"今日时间窗口: {ts_to_bj_str(window_start)} ~ {ts_to_bj_str(window_end)} (北京时间)")
 
-        # 先检查哪些帖子需要处理
-        new_items = []
+        # 第一步：筛选 feed 中 modify_at 在窗口内的帖子
+        candidate_link_ids = []
         for item in feed_items:
+            modify_at = item.get("create_at", 0)  # feed 里的 create_at 实际是 modify_at（最新评论时间）
             link_id = item["link_id"]
-            cur.execute("SELECT link_id, content, image_urls, username FROM posts WHERE link_id = ?", (link_id,))
-            existing = cur.fetchone()
 
-            if existing is None:
-                new_items.append({"item": item, "status": "new"})
+            if window_start <= modify_at < window_end:
+                candidate_link_ids.append(link_id)
+                logger.info(f"Feed 中 link_id={link_id} modify_at={ts_to_bj_str(modify_at)} 在窗口内，将拉取详情")
             else:
-                _, content, image_urls, username = existing
-                missing = []
-                if not content:
-                    missing.append("content")
-                if not image_urls:
-                    missing.append("images")
-                if not username:
-                    missing.append("username")
-                if missing:
-                    new_items.append({"item": item, "status": "update", "missing": missing})
-                    logger.info(f"帖子 link_id={link_id} 缺失数据: {missing}，将重新拉取")
+                logger.info(f"Feed 中 link_id={link_id} modify_at={ts_to_bj_str(modify_at)} 不在窗口内，跳过")
 
-        conn.close()
-
-        if not new_items:
-            logger.info("没有新帖子或需要更新的帖子")
+        if not candidate_link_ids:
+            logger.info("没有候选帖子需要拉取详情")
             return
 
-        # 处理新帖子和需要更新的帖子
-        for entry in new_items:
-            item = entry["item"]
-            status = entry["status"]
-            link_id = item["link_id"]
-            title = item.get("title", "")
-            create_at = item["create_at"]
-            userid = item.get("userid", 0)
+        # 第二步：逐个拉取帖子详情（带间隔）
+        processed_count = 0
+        for idx, link_id in enumerate(candidate_link_ids):
+            # 检查是否已完整拉取过
+            conn = sqlite3.connect(self.db_path)
+            self._ensure_table_schema(conn)
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT link_id, content, image_urls, window_start FROM posts WHERE link_id = ?",
+                (link_id,)
+            )
+            existing = cur.fetchone()
+            conn.close()
 
-            topics_list = item.get("topics", [])
-            topics_names = [t.get("name", "") for t in topics_list if t.get("name")]
+            if existing:
+                _, content, image_urls, old_window = existing
+                if content and image_urls and old_window == window_start:
+                    logger.info(f"link_id={link_id} 已完整拉取且在同一窗口，跳过")
+                    continue
+                elif content and image_urls:
+                    logger.info(f"link_id={link_id} 已拉取但窗口不同 ({old_window} vs {window_start})，重新处理")
+
+            # 拉取详情
+            detail = await self._fetch_link_detail(link_id)
+            if not detail:
+                logger.warning(f"拉取详情失败 link_id={link_id}，跳过")
+                continue
+
+            # 获取真实发布时间
+            real_create_at = detail.get("create_at", 0)
+            real_create_str = detail.get("create_at_str", "")
+
+            # 判断真实发布时间是否在窗口内
+            in_window = window_start <= real_create_at < window_end
+
+            # 解析内容
+            content_raw = detail.get("content", "")
+            content_text, image_urls = self._parse_content(content_raw)
+
+            # 下载图片
+            saved_images = []
+            for i, img_url in enumerate(image_urls):
+                ext = ".png"
+                if ".jpg" in img_url or ".jpeg" in img_url:
+                    ext = ".jpg"
+                elif ".webp" in img_url:
+                    ext = ".webp"
+                filename = f"{link_id}_{i}{ext}"
+                saved = await self._download_image(img_url, filename)
+                if saved:
+                    saved_images.append(str(saved))
+
+            # 分析图片内容（串行，一张接一张）
+            if saved_images:
+                logger.info(f"开始分析 link_id={link_id} 的 {len(saved_images)} 张图片")
+                await self.image_analyzer.analyze_images(link_id, saved_images)
+
+            # 处理 topics
+            topics_list = detail.get("topics", [])
+            topics_names = [t.get("name", "") for t in topics_list if isinstance(t, dict) and t.get("name")]
             topics_str = json.dumps(topics_names, ensure_ascii=False)
 
+            # 入库
             conn = sqlite3.connect(self.db_path)
             self._ensure_table_schema(conn)
             cur = conn.cursor()
 
-            if status == "new":
-                daily_no = self._get_next_daily_no(conn, create_at)
-                cur.execute(
-                    "INSERT OR REPLACE INTO posts (link_id, daily_no, title, create_at, userid, topics) VALUES (?, ?, ?, ?, ?, ?)",
-                    (link_id, daily_no, title, create_at, userid, topics_str)
-                )
-                logger.info(f"新帖子入库: daily_no={daily_no}, link_id={link_id}, title={title}")
+            if in_window:
+                # 在窗口内：分配 daily_no，计入今日帖子
+                daily_no = self._get_next_daily_no(conn, window_start)
+                cur.execute("""
+                    INSERT OR REPLACE INTO posts 
+                    (link_id, daily_no, window_start, title, create_at, userid, username, avatar, topics, content, image_urls, fetched_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    link_id, daily_no, window_start,
+                    detail.get("title", ""), real_create_at,
+                    detail.get("userid", 0), detail.get("username", ""), detail.get("avatar", ""),
+                    topics_str, content_text, json.dumps(saved_images, ensure_ascii=False),
+                    datetime.now(timezone.utc).isoformat()
+                ))
+                logger.info(f"✅ 帖子入库(今日): daily_no=#{daily_no}, link_id={link_id}, "
+                           f"发布时间={real_create_str}, 作者={detail.get('username', '')}")
             else:
-                cur.execute("SELECT daily_no FROM posts WHERE link_id = ?", (link_id,))
-                row = cur.fetchone()
-                daily_no = row[0] if row else self._get_next_daily_no(conn, create_at)
-                cur.execute(
-                    "UPDATE posts SET title = ?, create_at = ?, userid = ?, topics = ? WHERE link_id = ?",
-                    (title, create_at, userid, topics_str, link_id)
-                )
-                logger.info(f"更新帖子: daily_no={daily_no}, link_id={link_id}, 缺失: {entry.get('missing', [])}")
+                # 不在窗口内：也存，但不分配 daily_no（daily_no=NULL），不计入今日
+                cur.execute("""
+                    INSERT OR REPLACE INTO posts 
+                    (link_id, daily_no, window_start, title, create_at, userid, username, avatar, topics, content, image_urls, fetched_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    link_id, None, None,
+                    detail.get("title", ""), real_create_at,
+                    detail.get("userid", 0), detail.get("username", ""), detail.get("avatar", ""),
+                    topics_str, content_text, json.dumps(saved_images, ensure_ascii=False),
+                    datetime.now(timezone.utc).isoformat()
+                ))
+                logger.info(f"📌 帖子入库(归档): link_id={link_id}, 发布时间={real_create_str}, "
+                           f"不在窗口 {ts_to_bj_str(window_start)}~{ts_to_bj_str(window_end)}")
 
             conn.commit()
             conn.close()
+            processed_count += 1
 
-        # 获取帖主信息并更新用户缓存
-        processed_userids = set()
-        for entry in new_items:
-            item = entry["item"]
-            link_id = item["link_id"]
-            userid = item.get("userid", 0)
+            # 间隔拉取
+            if idx < len(candidate_link_ids) - 1:
+                wait_sec = self.content_fetch_interval_seconds
+                logger.info(f"等待 {wait_sec} 秒后拉取下一个...")
+                await asyncio.sleep(wait_sec)
 
-            if userid and userid not in processed_userids:
-                cached_name = await self._get_cached_username(userid)
-                if cached_name:
-                    conn = sqlite3.connect(self.db_path)
-                    self._ensure_table_schema(conn)
-                    cur = conn.cursor()
-                    cur.execute("UPDATE posts SET username = ? WHERE userid = ?", (cached_name, userid))
-                    conn.commit()
-                    conn.close()
-                    logger.info(f"使用缓存用户名: {cached_name} (userid={userid})")
-                else:
-                    owner_info = await self._fetch_owner_info(link_id)
-                    if owner_info and owner_info.get("username"):
-                        username = owner_info.get("username", "")
-                        avatar = owner_info.get("avatar", "")
-                        actual_userid = owner_info.get("userid", userid)
-
-                        await self._update_user_cache(actual_userid, username, avatar)
-
-                        conn = sqlite3.connect(self.db_path)
-                        self._ensure_table_schema(conn)
-                        cur = conn.cursor()
-                        cur.execute("UPDATE posts SET username = ? WHERE userid = ?", (username, userid))
-                        conn.commit()
-                        conn.close()
-                        logger.info(f"获取到帖主信息: {username} (userid={userid})")
-                    else:
-                        logger.warning(f"帖主信息获取失败: link_id={link_id}, userid={userid}")
-
-                processed_userids.add(userid)
-                await asyncio.sleep(1)
-
-        # 拉取帖子内容（带间隔）
-        conn = sqlite3.connect(self.db_path)
-        self._ensure_table_schema(conn)
-        cur = conn.cursor()
-
-        link_ids = [entry["item"]["link_id"] for entry in new_items]
-        placeholders = ",".join(["?"] * len(link_ids))
-        cur.execute(
-            f"SELECT link_id, daily_no FROM posts WHERE link_id IN ({placeholders}) AND (fetched_at IS NULL OR content IS NULL OR content = '') ORDER BY daily_no",
-            link_ids
-        )
-        to_fetch = cur.fetchall()
-        conn.close()
-
-        if not to_fetch:
-            logger.info("没有需要拉取内容的帖子")
-            return
-
-        logger.info(f"需要拉取内容的帖子数: {len(to_fetch)}")
-        for idx, (link_id, daily_no) in enumerate(to_fetch):
-            logger.info(f"({idx+1}/{len(to_fetch)}) 拉取内容 daily_no={daily_no}, link_id={link_id}")
-            result = await self._fetch_content(link_id)
-            if result:
-                content, image_urls = result
-
-                saved_images = []
-                for i, img_url in enumerate(image_urls):
-                    ext = ".png"
-                    if ".jpg" in img_url or ".jpeg" in img_url:
-                        ext = ".jpg"
-                    elif ".webp" in img_url:
-                        ext = ".webp"
-                    filename = f"{link_id}_{i}{ext}"
-                    saved = await self._download_image(img_url, filename)
-                    if saved:
-                        saved_images.append(str(saved))
-
-                conn = sqlite3.connect(self.db_path)
-                self._ensure_table_schema(conn)
-                cur = conn.cursor()
-                cur.execute(
-                    "UPDATE posts SET content = ?, image_urls = ?, fetched_at = ? WHERE link_id = ?",
-                    (content, json.dumps(saved_images, ensure_ascii=False),
-                     datetime.now(timezone.utc).isoformat(), link_id)
-                )
-                conn.commit()
-                conn.close()
-                logger.info(f"成功拉取 daily_no={daily_no}, link_id={link_id}, 图片数={len(saved_images)}")
-            else:
-                logger.warning(f"拉取内容失败 link_id={link_id}")
-
-            if idx < len(to_fetch) - 1:
-                logger.info(f"等待 30 秒后拉取下一个...")
-                await asyncio.sleep(30)
+        logger.info(f"本次共处理 {processed_count} 个帖子")
 
     async def _fetch_and_process(self):
         async with self._lock:
             logger.info("开始执行刷取任务")
-            feed_items = await self._fetch_feed()
-            if feed_items:
-                await self._process_new_posts(feed_items)
+
+            all_feed_items = []
+            for i, topic_id in enumerate(self.feed_topic_ids):
+                logger.info(f"正在检索社区 {topic_id} ({i+1}/{len(self.feed_topic_ids)})")
+                feed_items = await self._fetch_feed(topic_id)
+                if feed_items:
+                    all_feed_items.extend(feed_items)
+
+                if i < len(self.feed_topic_ids) - 1:
+                    wait_min = self.topic_fetch_interval_minutes
+                    logger.info(f"等待 {wait_min} 分钟后检索下一个社区...")
+                    await asyncio.sleep(wait_min * 60)
+
+            if all_feed_items:
+                await self._process_new_posts(all_feed_items)
             logger.info("刷取任务完成")
 
     async def _background_loop(self):
-        """常规后台循环：每4小时拉取一次"""
-        INTERVAL = 4 * 3600
+        """常规后台循环：按配置间隔拉取"""
+        INTERVAL = self.interval_hours * 3600
         while True:
             try:
                 await asyncio.wait_for(self._fetch_event.wait(), timeout=INTERVAL)
@@ -467,16 +516,16 @@ class HeiboxYard(Star):
                 logger.error(f"后台循环异常: {e}")
 
     async def _nightly_fetch_loop(self):
-        """每晚22:10定时拉取"""
+        """每晚22:10定时拉取（北京时间）"""
         while True:
             try:
-                now = datetime.now(timezone.utc)
-                target = now.replace(hour=22, minute=10, second=0, microsecond=0)
-                if target <= now:
-                    target = target + __import__('datetime').timedelta(days=1)
+                now_bj = datetime.now(timezone(timedelta(hours=8)))
+                target = now_bj.replace(hour=22, minute=10, second=0, microsecond=0)
+                if target <= now_bj:
+                    target = target + timedelta(days=1)
 
-                wait_seconds = (target - now).total_seconds()
-                logger.info(f"定时拉取: 等待 {wait_seconds/3600:.1f} 小时到 {target.strftime('%Y-%m-%d %H:%M:%S')} UTC")
+                wait_seconds = (target - now_bj).total_seconds()
+                logger.info(f"定时拉取: 等待 {wait_seconds/3600:.1f} 小时到 {target.strftime('%Y-%m-%d %H:%M:%S')} 北京时间")
                 await asyncio.sleep(wait_seconds)
 
                 logger.info("执行每晚22:10定时拉取")
@@ -497,48 +546,156 @@ class HeiboxYard(Star):
 
     @filter.command("重置今日")
     async def cmd_reset_today(self, event: AstrMessageEvent):
-        """清空今日数据并重新拉取"""
-        today_start = int(datetime.now(timezone.utc).replace(
-            hour=0, minute=0, second=0, microsecond=0).timestamp())
+        """重新拉取今日窗口的所有帖子详情并覆盖原数据"""
+        window_start, window_end = get_today_window()
 
         conn = sqlite3.connect(self.db_path)
         self._ensure_table_schema(conn)
         cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM posts WHERE create_at >= ?", (today_start,))
-        count = cur.fetchone()[0]
 
-        if count > 0:
-            cur.execute("DELETE FROM posts WHERE create_at >= ?", (today_start,))
-            conn.commit()
-            logger.info(f"已清空今日 {count} 条帖子数据")
+        # 获取今日窗口的所有 link_id
+        cur.execute(
+            "SELECT link_id, daily_no FROM posts WHERE window_start = ? ORDER BY daily_no",
+            (window_start,)
+        )
+        existing_posts = cur.fetchall()
         conn.close()
 
-        yield event.plain_result(f"🗑️ 已清空今日 {count} 条数据，开始重新拉取...")
-        asyncio.create_task(self._fetch_and_process())
+        if not existing_posts:
+            yield event.plain_result("📭 当前时间窗口内还没有帖子，无法重置。")
+            return
+
+        count = len(existing_posts)
+        yield event.plain_result(f"🔄 开始重置今日 {count} 条帖子，逐个重新拉取详情并覆盖...")
+
+        # 启动后台任务执行重置
+        asyncio.create_task(self._reset_today_posts(existing_posts, window_start))
+
+    async def _reset_today_posts(self, existing_posts: list[tuple[int, int]], window_start: int):
+        """后台执行重置：用已知 link_id 重新拉取详情并覆盖"""
+        success_count = 0
+        fail_count = 0
+
+        for idx, (link_id, old_daily_no) in enumerate(existing_posts):
+            logger.info(f"重置进度 {idx+1}/{len(existing_posts)}: 重新拉取 link_id={link_id} (原编号 #{old_daily_no})")
+
+            # 拉取详情
+            detail = await self._fetch_link_detail(link_id)
+            if not detail:
+                logger.warning(f"重置失败 link_id={link_id}，拉取详情失败")
+                fail_count += 1
+                continue
+
+            # 获取真实发布时间
+            real_create_at = detail.get("create_at", 0)
+            real_create_str = detail.get("create_at_str", "")
+
+            # 判断真实发布时间是否仍在窗口内
+            window_start_cur, window_end_cur = get_today_window()
+            in_window = window_start_cur <= real_create_at < window_end_cur
+
+            # 解析内容
+            content_raw = detail.get("content", "")
+            content_text, image_urls = self._parse_content(content_raw)
+
+            # 删除旧的图片分析记录（强制重新分析）
+            conn = sqlite3.connect(self.db_path)
+            cur = conn.cursor()
+            cur.execute("DELETE FROM image_analyses WHERE link_id = ?", (link_id,))
+            conn.commit()
+            conn.close()
+
+            # 重新下载图片
+            saved_images = []
+            for i, img_url in enumerate(image_urls):
+                ext = ".png"
+                if ".jpg" in img_url or ".jpeg" in img_url:
+                    ext = ".jpg"
+                elif ".webp" in img_url:
+                    ext = ".webp"
+                filename = f"{link_id}_{i}{ext}"
+                saved = await self._download_image(img_url, filename)
+                if saved:
+                    saved_images.append(str(saved))
+
+            # 重新分析图片内容
+            if saved_images:
+                logger.info(f"开始重新分析 link_id={link_id} 的 {len(saved_images)} 张图片")
+                await self.image_analyzer.analyze_images(link_id, saved_images)
+
+            # 处理 topics
+            topics_list = detail.get("topics", [])
+            topics_names = [t.get("name", "") for t in topics_list if isinstance(t, dict) and t.get("name")]
+            topics_str = json.dumps(topics_names, ensure_ascii=False)
+
+            # 覆盖入库：保留原 daily_no
+            conn = sqlite3.connect(self.db_path)
+            self._ensure_table_schema(conn)
+            cur = conn.cursor()
+
+            if in_window:
+                cur.execute("""
+                    INSERT OR REPLACE INTO posts
+                    (link_id, daily_no, window_start, title, create_at, userid, username, avatar, topics, content, image_urls, fetched_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    link_id, old_daily_no, window_start,
+                    detail.get("title", ""), real_create_at,
+                    detail.get("userid", 0), detail.get("username", ""), detail.get("avatar", ""),
+                    topics_str, content_text, json.dumps(saved_images, ensure_ascii=False),
+                    datetime.now(timezone.utc).isoformat()
+                ))
+                logger.info(f"✅ 帖子重置成功: daily_no=#{old_daily_no}, link_id={link_id}, "
+                           f"发布时间={real_create_str}, 作者={detail.get('username', '')}")
+            else:
+                # 如果帖子已不在当前窗口，移出今日（daily_no=NULL, window_start=NULL）
+                cur.execute("""
+                    INSERT OR REPLACE INTO posts
+                    (link_id, daily_no, window_start, title, create_at, userid, username, avatar, topics, content, image_urls, fetched_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    link_id, None, None,
+                    detail.get("title", ""), real_create_at,
+                    detail.get("userid", 0), detail.get("username", ""), detail.get("avatar", ""),
+                    topics_str, content_text, json.dumps(saved_images, ensure_ascii=False),
+                    datetime.now(timezone.utc).isoformat()
+                ))
+                logger.info(f"📌 帖子已移出今日窗口: link_id={link_id}, 发布时间={real_create_str}")
+
+            conn.commit()
+            conn.close()
+            success_count += 1
+
+            # 间隔拉取
+            if idx < len(existing_posts) - 1:
+                wait_sec = self.content_fetch_interval_seconds
+                logger.info(f"等待 {wait_sec} 秒后处理下一个...")
+                await asyncio.sleep(wait_sec)
+
+        logger.info(f"重置任务完成: 成功 {success_count}/{len(existing_posts)}, 失败 {fail_count}")
 
     @filter.command("今日帖子")
     async def cmd_today_posts(self, event: AstrMessageEvent):
-        today_start = int(datetime.now(timezone.utc).replace(
-            hour=0, minute=0, second=0, microsecond=0).timestamp())
+        window_start, window_end = get_today_window()
 
         conn = sqlite3.connect(self.db_path)
         self._ensure_table_schema(conn)
         cur = conn.cursor()
         cur.execute(
-            "SELECT link_id, daily_no, title, create_at, userid, username, topics, content "
-            "FROM posts WHERE create_at >= ? ORDER BY daily_no",
-            (today_start,)
+            "SELECT link_id, daily_no, title, create_at, userid, username, avatar, topics, content "
+            "FROM posts WHERE window_start = ? ORDER BY daily_no",
+            (window_start,)
         )
         rows = cur.fetchall()
         conn.close()
 
         if not rows:
-            yield event.plain_result("📭 今天还没有拉取到帖子。")
+            yield event.plain_result("📭 当前时间窗口内还没有拉取到帖子。")
             return
 
-        lines = ["📋 今日帖子列表：\n"]
-        for link_id, daily_no, title, create_at, userid, username, topics, content in rows:
-            dt = datetime.fromtimestamp(create_at, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        lines = [f"📋 今日帖子列表（{ts_to_bj_str(window_start)} ~ {ts_to_bj_str(window_end)}）：\n"]
+        for link_id, daily_no, title, create_at, userid, username, avatar, topics, content in rows:
+            dt_str = ts_to_bj_str(create_at)
             title_display = title if title else "(无标题)"
             author_display = username if username else f"用户{userid}"
 
@@ -559,7 +716,7 @@ class HeiboxYard(Star):
                 f"   ID: {link_id}\n"
                 f"   标题: {title_display}\n"
                 f"   作者: {author_display}\n"
-                f"   时间: {dt}\n"
+                f"   时间: {dt_str}\n"
                 f"   标签: {topics_display}\n"
                 f"   内容:\n{content_display}\n"
             )
@@ -580,16 +737,15 @@ class HeiboxYard(Star):
             yield event.plain_result("❌ 帖子编号必须是数字")
             return
 
-        today_start = int(datetime.now(timezone.utc).replace(
-            hour=0, minute=0, second=0, microsecond=0).timestamp())
+        window_start, window_end = get_today_window()
 
         conn = sqlite3.connect(self.db_path)
         self._ensure_table_schema(conn)
         cur = conn.cursor()
         cur.execute(
-            "SELECT link_id, daily_no, title, create_at, userid, username, topics, content, image_urls "
-            "FROM posts WHERE create_at >= ? AND daily_no = ?",
-            (today_start, daily_no)
+            "SELECT link_id, daily_no, title, create_at, userid, username, avatar, topics, content, image_urls "
+            "FROM posts WHERE window_start = ? AND daily_no = ?",
+            (window_start, daily_no)
         )
         row = cur.fetchone()
         conn.close()
@@ -598,8 +754,8 @@ class HeiboxYard(Star):
             yield event.plain_result(f"❌ 今日没有找到编号为 #{daily_no} 的帖子")
             return
 
-        link_id, daily_no, title, create_at, userid, username, topics, content, image_urls = row
-        dt = datetime.fromtimestamp(create_at, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        link_id, daily_no, title, create_at, userid, username, avatar, topics, content, image_urls = row
+        dt_str = ts_to_bj_str(create_at)
         title_display = title if title else "(无标题)"
         author_display = username if username else f"用户{userid}"
 
@@ -619,7 +775,7 @@ class HeiboxYard(Star):
             f"ID: {link_id}\n"
             f"标题: {title_display}\n"
             f"作者: {author_display}\n"
-            f"时间: {dt}\n"
+            f"时间: {dt_str}\n"
             f"标签: {topics_display}\n"
             f"━━━━━━━━━━━━━━\n"
             f"{content_cleaned}"
@@ -669,17 +825,154 @@ class HeiboxYard(Star):
         else:
             yield event.plain_result("⚠️ 未生成二维码图片，请检查程序日志。")
 
+
+    # ==================== LLM 分析 ====================
+
+    async def _llm_analysis_loop(self):
+        """LLM 分析定时循环"""
+        if not self.llm_analysis_enabled:
+            logger.info("LLM 分析已禁用，跳过定时任务")
+            return
+
+        while True:
+            try:
+                now_bj = datetime.now(timezone(timedelta(hours=8)))
+
+                try:
+                    hour, minute = map(int, self.llm_analysis_time.split(":"))
+                except (ValueError, AttributeError):
+                    logger.error(f"LLM 分析时间格式错误: {self.llm_analysis_time}，使用默认 22:30")
+                    hour, minute = 22, 30
+
+                target = now_bj.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                if target <= now_bj:
+                    target = target + timedelta(days=1)
+
+                wait_seconds = (target - now_bj).total_seconds()
+                logger.info(f"LLM 分析定时: 等待 {wait_seconds/3600:.1f} 小时到 {target.strftime('%Y-%m-%d %H:%M:%S')} 北京时间")
+                await asyncio.sleep(wait_seconds)
+
+                logger.info("执行每日 LLM 帖子分析")
+                await self._run_llm_analysis()
+            except Exception as e:
+                logger.error(f"LLM 分析定时循环异常: {e}")
+                await asyncio.sleep(60)
+
+    async def _run_llm_analysis(self):
+        """执行 LLM 分析"""
+        try:
+            window_start, window_end = get_analysis_window()
+            logger.info(f"LLM 分析窗口(固定): {ts_to_bj_str(window_start)} ~ {ts_to_bj_str(window_end)}")
+
+            existing = self.llm_analyzer.db.get_existing_analysis_count(window_start)
+            if existing > 0:
+                logger.info(f"窗口内已有 {existing} 条分析记录，跳过重复分析")
+                return
+
+            conn = sqlite3.connect(self.db_path)
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT link_id, daily_no, title, create_at, userid, username, content, image_urls "
+                "FROM posts WHERE window_start = ? ORDER BY daily_no",
+                (window_start,)
+            )
+            rows = cur.fetchall()
+            conn.close()
+
+            if not rows:
+                logger.info("今日没有帖子需要分析")
+                return
+
+            posts = []
+            for link_id, daily_no, title, create_at, userid, username, content, image_urls in rows:
+                image_paths = []
+                if image_urls:
+                    try:
+                        image_paths = json.loads(image_urls)
+                    except:
+                        pass
+
+                # 获取图片描述
+                image_descriptions = self.image_analyzer.db.get_descriptions_for_post(link_id)
+
+                posts.append({
+                    "link_id": link_id,
+                    "daily_no": daily_no,
+                    "title": title or "(无标题)",
+                    "username": username or f"用户{link_id}",
+                    "userid": userid,
+                    "create_at": create_at,
+                    "create_at_str": ts_to_bj_str(create_at) if create_at else "未知",
+                    "content": content or "",
+                    "image_paths": image_paths,
+                    "image_descriptions": image_descriptions,
+                })
+
+            logger.info(f"准备分析 {len(posts)} 个帖子")
+
+            original_batch_size = self.llm_analyzer._batch_size
+            self.llm_analyzer._batch_size = self.llm_analysis_batch_size
+
+            try:
+                success = await self.llm_analyzer.analyze_posts(window_start, posts)
+                if success:
+                    logger.info("LLM 分析全部完成")
+                else:
+                    logger.warning("LLM 分析部分失败")
+            finally:
+                self.llm_analyzer._batch_size = original_batch_size
+
+        except Exception as e:
+            logger.error(f"执行 LLM 分析失败: {e}")
+
+    @filter.command("分析今日帖子")
+    async def cmd_analyze_today(self, event: AstrMessageEvent):
+        """手动触发昨日22:00~今日22:00帖子的 LLM 分析"""
+        window_start, window_end = get_analysis_window()
+        yield event.plain_result(
+            f"🤖 正在启动 LLM 分析（窗口: {ts_to_bj_str(window_start)} ~ {ts_to_bj_str(window_end)}），请稍候..."
+        )
+        asyncio.create_task(self._run_llm_analysis())
+
+    @filter.command("今日分析")
+    async def cmd_today_analysis(self, event: AstrMessageEvent):
+        """查看昨日22:00~今日22:00帖子的 LLM 分析报告"""
+        try:
+            window_start, window_end = get_analysis_window()
+            report = await self.llm_analyzer.get_report(window_start)
+
+            if not report:
+                yield event.plain_result("📭 今日还没有 LLM 分析报告，请先执行 /分析今日帖子")
+                return
+
+            lines = [f"📊 帖子 LLM 分析评论（{ts_to_bj_str(window_start)} ~ {ts_to_bj_str(window_end)}）\n"]
+
+            for item in report:
+                lines.append(
+                    f"━━━━━━━━━━━━━━\n"
+                    f"📌 编号: #{item['daily_no']} | {item['title']}\n"
+                    f"   作者: {item['username']}\n"
+                    f"   📝 AI评论: {item.get('comment', 'N/A')}\n"
+                    f"   🏷️ 标签: {', '.join(item.get('tags', [])) or 'N/A'}\n"
+                )
+
+            lines.append(f"\n📈 共 {len(report)} 条评论")
+            yield event.plain_result("\n".join(lines))
+        except Exception as e:
+            logger.error(f"获取分析报告失败: {e}")
+            yield event.plain_result(f"❌ 获取分析报告失败: {e}")
+
     async def terminate(self):
         """插件卸载/停用时调用"""
-        if self._bg_task and not self._bg_task.done():
-            self._bg_task.cancel()
-            try:
-                await self._bg_task
-            except asyncio.CancelledError:
-                pass
-        if self._nightly_task and not self._nightly_task.done():
-            self._nightly_task.cancel()
-            try:
-                await self._nightly_task
-            except asyncio.CancelledError:
-                pass
+        for task_name, task in [
+            ("bg_task", getattr(self, '_bg_task', None)),
+            ("nightly_task", getattr(self, '_nightly_task', None)),
+            ("llm_analysis_task", getattr(self, '_llm_analysis_task', None)),
+        ]:
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                logger.info(f"已取消任务: {task_name}")

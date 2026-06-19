@@ -1,0 +1,66 @@
+{
+  "interval_hours": {
+    "description": "两次检索推荐流任务的间隔时间（小时）",
+    "type": "int",
+    "default": 2,
+    "hint": "常规后台循环的拉取间隔"
+  },
+  "feed_topic_ids": {
+    "description": "检索推荐流的社区ID列表",
+    "type": "list",
+    "default": [
+      486620
+    ],
+    "hint": "填写多个社区ID，每个ID为整数"
+  },
+  "topic_fetch_interval_minutes": {
+    "description": "多个社区之间检索的间隔时间（分钟）",
+    "type": "int",
+    "default": 5,
+    "hint": "多个社区分开检索时的间隔"
+  },
+  "content_fetch_interval_seconds": {
+    "description": "帖子内容拉取的间隔时间（秒）",
+    "type": "int",
+    "default": 30,
+    "hint": "拉取帖子内容时的间隔"
+  },
+  "llm_analysis_enabled": {
+    "description": "是否启用每日 LLM 帖子分析",
+    "type": "bool",
+    "default": true,
+    "hint": "关闭后不会进行 LLM 分析"
+  },
+  "llm_analysis_time": {
+    "description": "每日 LLM 分析触发时间（北京时间，格式 HH:MM）",
+    "type": "string",
+    "default": "22:30",
+    "hint": "例如 22:30 表示每晚22:30执行"
+  },
+  "llm_provider_id": {
+    "description": "LLM Provider ID（用于帖子分析任务）",
+    "type": "string",
+    "_special": "select_provider",
+    "default": "",
+    "hint": "选择用于帖子分析的 LLM Provider。留空则使用当前会话的默认 Provider"
+  },
+  "vision_provider_id": {
+    "description": "视觉模型 Provider ID（用于图片分析）",
+    "type": "string",
+    "_special": "select_provider",
+    "default": "",
+    "hint": "选择用于图片分析的视觉模型 Provider。留空则使用当前会话的默认 Provider"
+  },
+  "llm_analysis_batch_size": {
+    "description": "每批提交给 LLM 分析的帖子数量",
+    "type": "int",
+    "default": 8,
+    "hint": "建议 5-10，太多可能导致 token 超限"
+  },
+  "llm_analysis_batch_interval_seconds": {
+    "description": "LLM 分析批次之间的间隔（秒）",
+    "type": "int",
+    "default": 5,
+    "hint": "避免请求过快"
+  }
+}
