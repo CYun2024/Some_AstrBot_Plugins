@@ -194,6 +194,11 @@ class ImagePostAnalyzer:
         # 注册图片到数据库
         self.db.register_images(link_id, image_paths)
 
+        # 限制最多分析 5 张图片
+        image_paths = image_paths[:5]
+        if len(image_paths) < len(image_paths):
+            logger.info(f"图片数量超过5张，仅分析前5张")
+
         descriptions = []
         for idx, img_path in enumerate(image_paths):
             p = Path(img_path)

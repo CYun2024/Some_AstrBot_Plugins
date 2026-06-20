@@ -96,28 +96,22 @@ class UserMemoryDB:
 
             # 统计用户历史数据
             cur.execute("""
-                SELECT COUNT(*), AVG(score), GROUP_CONCAT(tags), GROUP_CONCAT(sentiment)
+                SELECT COUNT(*)
                 FROM user_memories WHERE userid = ?
             """, (userid,))
             row = cur.fetchone()
             post_count = row[0] or 0
-            avg_score = row[1] or 0
-            tags_str = row[2] or ""
-            sentiments_str = row[3] or ""
+            avg_score = 0  # 新版评论模式不再评分，固定为0
 
-            # 提取常见标签
-            all_tags = []
-            for t in tags_str.split(","):
-                try:
-                    tag_list = json.loads(f"[{t}]") if t else []
-                    all_tags.extend(tag_list)
-                except:
-                    pass
-            from collections import Counter
-            common_tags = [t for t, _ in Counter(all_tags).most_common(5)]
+            # 标签统计（当前版本已禁用 LLM 标签生成，保留空列表兼容）
+            common_tags = []
 
-            # 提取主要情感
-            sentiments = [s for s in sentiments_str.split(",") if s]
+            # 逐行读取情感
+            cur.execute("""
+                SELECT sentiment FROM user_memories
+                WHERE userid = ? AND sentiment IS NOT NULL AND sentiment != ''
+            """, (userid,))
+            sentiments = [row[0] for row in cur.fetchall()]
             common_sentiment = Counter(sentiments).most_common(1)
             common_sentiment = common_sentiment[0][0] if common_sentiment else "neutral"
 
@@ -157,8 +151,8 @@ class UserMemoryDB:
                     "title": row[1],
                     "content_summary": row[2],
                     "ai_comment": row[3],
-                    "score": row[4],
-                    "sentiment": row[5],
+                    "score": row[4] or 0,
+                    "sentiment": row[5] or "neutral",
                     "tags": json.loads(row[6]) if row[6] else [],
                     "created_at": row[7],
                 })
@@ -206,8 +200,7 @@ class UserMemoryDB:
         if profile:
             lines.append(f"【{username} 的历史画像】")
             lines.append(f"- 历史发帖数: {profile['post_count']}")
-            lines.append(f"- 平均评分: {profile['avg_score']:.1f}/10")
-            lines.append(f"- 常见标签: {', '.join(profile['common_tags']) or '无'}")
+            # lines.append(f"- 常见标签: {', '.join(profile['common_tags']) or '无'}")  # 已禁用
             lines.append(f"- 主要情感倾向: {profile['common_sentiment']}")
 
         if history:

@@ -23,10 +23,16 @@ DEFAULT_PROGRAM_PATH = "heibox-comment-bot-master"
 
 
 def clean_html_tags(text: str) -> str:
-    """清洗文本中的 <xxx> 标签"""
+    """清洗文本中的 HTML 标签
+
+    将 HTML 标签替换为空格，避免标签移除后文字粘连
+    """
     if not text:
         return text
-    cleaned = re.sub(r'<[^>]+>', '', text)
+    # 先把标签替换为空格，避免文字粘连
+    cleaned = re.sub(r'<[^>]+>', ' ', text)
+    # 清理多余空格和换行
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
     return cleaned
 
 
@@ -323,7 +329,12 @@ class HeiboxYard(Star):
             return None
 
     def _parse_content(self, content_raw: str) -> tuple[str, list[str]]:
-        """解析帖子正文，返回 (文本内容, 图片URL列表)"""
+        """解析帖子正文，返回 (文本内容, 图片URL列表)
+
+        支持小黑盒两种内容格式:
+        - 旧格式: type="text" 的纯文本块
+        - 新格式: type="html" 的 HTML 富文本块
+        """
         if not content_raw:
             return "", []
         try:
@@ -333,21 +344,22 @@ class HeiboxYard(Star):
 
             text_parts, image_urls = [], []
             for block in blocks:
-                if block.get("type") == "text":
-                    text_parts.append(block.get("text", ""))
-                elif block.get("type") == "img":
+                block_type = block.get("type", "")
+                # 同时处理 text 和 html 两种文本类型
+                if block_type in ("text", "html"):
+                    text = block.get("text", "")
+                    if text:
+                        text_parts.append(text)
+                elif block_type == "img":
                     url = block.get("url")
                     if url:
                         image_urls.append(url)
             return "\n".join(text_parts).strip(), image_urls
-        except:
+        except Exception:
             return str(content_raw), []
 
     async def _process_new_posts(self, feed_items: list[dict]):
         """处理新帖子：筛选时间窗口内的帖子，再用link.py拉取详情"""
-        if not feed_items:
-            logger.info("feed 为空，没有新帖子")
-            return
         if not feed_items:
             logger.info("feed 为空，没有新帖子")
             return
@@ -482,6 +494,25 @@ class HeiboxYard(Star):
 
         logger.info(f"本次共处理 {processed_count} 个帖子")
 
+    async def _fetch_feed_with_retry(self, topic_id: int) -> list[dict]:
+        """获取社区推荐流，支持空列表重试（5min -> 10min -> 20min）"""
+        retry_delays = [0, 300, 600, 1200]  # 立即、5分钟、10分钟、20分钟
+
+        for attempt, delay in enumerate(retry_delays):
+            if delay > 0:
+                logger.info(f"社区 {topic_id} 第 {attempt} 次重试，等待 {delay//60} 分钟后...")
+                await asyncio.sleep(delay)
+
+            feed_items = await self._fetch_feed(topic_id)
+            if feed_items:
+                logger.info(f"社区 {topic_id} 获取到 {len(feed_items)} 条 feed")
+                return feed_items
+
+            logger.warning(f"社区 {topic_id} 返回空列表（第 {attempt+1}/{len(retry_delays)} 次尝试）")
+
+        logger.error(f"社区 {topic_id} 多次重试后仍返回空列表，放弃本次获取")
+        return []
+
     async def _fetch_and_process(self):
         async with self._lock:
             logger.info("开始执行刷取任务")
@@ -489,7 +520,7 @@ class HeiboxYard(Star):
             all_feed_items = []
             for i, topic_id in enumerate(self.feed_topic_ids):
                 logger.info(f"正在检索社区 {topic_id} ({i+1}/{len(self.feed_topic_ids)})")
-                feed_items = await self._fetch_feed(topic_id)
+                feed_items = await self._fetch_feed_with_retry(topic_id)
                 if feed_items:
                     all_feed_items.extend(feed_items)
 
@@ -590,9 +621,9 @@ class HeiboxYard(Star):
             real_create_at = detail.get("create_at", 0)
             real_create_str = detail.get("create_at_str", "")
 
-            # 判断真实发布时间是否仍在窗口内
-            window_start_cur, window_end_cur = get_today_window()
-            in_window = window_start_cur <= real_create_at < window_end_cur
+            # 判断真实发布时间是否仍在窗口内（使用传入的 window_start 保持一致）
+            window_end = window_start + 24 * 3600
+            in_window = window_start <= real_create_at < window_end
 
             # 解析内容
             content_raw = detail.get("content", "")
@@ -932,7 +963,15 @@ class HeiboxYard(Star):
         yield event.plain_result(
             f"🤖 正在启动 LLM 分析（窗口: {ts_to_bj_str(window_start)} ~ {ts_to_bj_str(window_end)}），请稍候..."
         )
-        asyncio.create_task(self._run_llm_analysis())
+
+        async def _run_with_feedback():
+            try:
+                await self._run_llm_analysis()
+                logger.info("手动 LLM 分析任务完成")
+            except Exception as e:
+                logger.error(f"手动 LLM 分析任务失败: {e}")
+
+        asyncio.create_task(_run_with_feedback())
 
     @filter.command("今日分析")
     async def cmd_today_analysis(self, event: AstrMessageEvent):
@@ -953,7 +992,6 @@ class HeiboxYard(Star):
                     f"📌 编号: #{item['daily_no']} | {item['title']}\n"
                     f"   作者: {item['username']}\n"
                     f"   📝 AI评论: {item.get('comment', 'N/A')}\n"
-                    f"   🏷️ 标签: {', '.join(item.get('tags', [])) or 'N/A'}\n"
                 )
 
             lines.append(f"\n📈 共 {len(report)} 条评论")
@@ -961,6 +999,88 @@ class HeiboxYard(Star):
         except Exception as e:
             logger.error(f"获取分析报告失败: {e}")
             yield event.plain_result(f"❌ 获取分析报告失败: {e}")
+
+
+    @filter.command("修改评价")
+    async def cmd_update_comment(self, event: AstrMessageEvent):
+        """手动修改指定今日帖子的 AI 评价
+        用法: /修改评价 <帖子编号> <新评价内容>
+        例如: /修改评价 3 这个帖子写得真不错，学到了很多炼金技巧！
+        """
+        msg = event.message_str.strip()
+        parts = msg.split(None, 2)  # 最多分3段: 命令, daily_no, 评论内容
+
+        if len(parts) < 3:
+            yield event.plain_result(
+                "❌ 用法: /修改评价 <帖子编号> <新评价内容>\n"
+                "例如: /修改评价 3 这个帖子写得真不错呢，学到了很多炼金技巧喵~"
+            )
+            return
+
+        try:
+            daily_no = int(parts[1])
+        except ValueError:
+            yield event.plain_result("❌ 帖子编号必须是数字")
+            return
+
+        new_comment = parts[2].strip()
+        if not new_comment:
+            yield event.plain_result("❌ 评价内容不能为空")
+            return
+
+        window_start, window_end = get_analysis_window()
+
+        # 先检查帖子是否存在
+        conn = sqlite3.connect(self.db_path)
+        self._ensure_table_schema(conn)
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT link_id, title, username FROM posts WHERE window_start = ? AND daily_no = ?",
+            (window_start, daily_no)
+        )
+        post_row = cur.fetchone()
+        conn.close()
+
+        if not post_row:
+            yield event.plain_result(f"❌ 今日窗口内没有找到编号为 #{daily_no} 的帖子")
+            return
+
+        link_id, title, username = post_row
+
+        # 更新评论
+        success = self.llm_analyzer.db.update_comment(window_start, daily_no, new_comment)
+
+        if success:
+            yield event.plain_result(
+                f"✅ 已成功修改评价！\n"
+                f"📌 帖子 #{daily_no} | {title or '(无标题)'}\n"
+                f"   作者: {username or '未知'}\n"
+                f"   📝 新评价: {new_comment}"
+            )
+        else:
+            # 如果 llm_analyses 表中没有该记录，尝试插入一条
+            try:
+                conn = sqlite3.connect(self.db_path)
+                cur = conn.cursor()
+                cur.execute("""
+                    INSERT OR REPLACE INTO llm_analyses
+                    (window_start, daily_no, link_id, title, username, comment, analyzed_at, model_used)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    window_start, daily_no, link_id, title or "", username or "",
+                    new_comment, datetime.now(timezone.utc).isoformat(), "manual"
+                ))
+                conn.commit()
+                conn.close()
+                yield event.plain_result(
+                    f"✅ 已为帖子 #{daily_no} 新建评价记录！\n"
+                    f"📌 {title or '(无标题)'} | 作者: {username or '未知'}\n"
+                    f"   📝 新评价: {new_comment}"
+                )
+            except Exception as e:
+                logger.error(f"插入新评价记录失败: {e}")
+                yield event.plain_result(f"❌ 修改评价失败: {e}")
+
 
     async def terminate(self):
         """插件卸载/停用时调用"""
