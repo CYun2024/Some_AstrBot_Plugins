@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>庭院社区晚报 第{{ issue_no }}期</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        
+        body {
+            font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+            min-height: 100vh;
+            padding: 20px;
+            color: #e0e0e0;
+        }
+        
+        .report-container {
+            max-width: 800px;
+            margin: 0 auto;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 16px;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            overflow: hidden;
+        }
+        
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 40px 30px;
+            text-align: center;
+            position: relative;
+        }
+        
+        .header::after {
+            content: "";
+            position: absolute;
+            bottom: 0;
+            left: 0; right: 0;
+            height: 4px;
+            background: linear-gradient(90deg, #f093fb, #f5576c, #4facfe, #00f2fe);
+        }
+        
+        .issue-badge {
+            display: inline-block;
+            background: rgba(255,255,255,0.2);
+            padding: 6px 16px;
+            border-radius: 20px;
+            font-size: 14px;
+            margin-bottom: 12px;
+            letter-spacing: 2px;
+        }
+        
+        .report-title {
+            font-size: 32px;
+            font-weight: bold;
+            color: #fff;
+            text-shadow: 0 2px 10px rgba(0,0,0,0.3);
+            margin-bottom: 8px;
+        }
+        
+        .report-date {
+            font-size: 16px;
+            color: rgba(255,255,255,0.8);
+        }
+        
+        .stats-bar {
+            display: flex;
+            justify-content: center;
+            gap: 40px;
+            padding: 20px;
+            background: rgba(0,0,0,0.2);
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+        }
+        
+        .stat-item { text-align: center; }
+        .stat-number {
+            font-size: 28px;
+            font-weight: bold;
+            color: #4facfe;
+        }
+        .stat-label {
+            font-size: 12px;
+            color: #888;
+            margin-top: 4px;
+        }
+        
+        .content { padding: 30px; }
+        
+        .section-title {
+            font-size: 20px;
+            color: #f5576c;
+            margin: 30px 0 20px;
+            padding-left: 12px;
+            border-left: 4px solid #f5576c;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .section-title::before { content: "✦"; }
+        
+        .footer {
+            text-align: center;
+            padding: 30px;
+            border-top: 1px solid rgba(255,255,255,0.05);
+            color: #666;
+            font-size: 12px;
+        }
+        
+        .goodnight {
+            font-size: 18px;
+            color: #f5576c;
+            margin-bottom: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="report-container">
+        <div class="header">
+            <div class="issue-badge">第 {{ issue_no }} 期</div>
+            <h1 class="report-title">{{ community_name }} 晚报</h1>
+            <div class="report-date">{{ report_date }}</div>
+        </div>
+        
+        <div class="stats-bar">
+            <div class="stat-item">
+                <div class="stat-number">{{ total_posts }}</div>
+                <div class="stat-label">今日帖子</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-number">{{ total_images }}</div>
+                <div class="stat-label">图片分享</div>
+            </div>
+        </div>
+        
+        <div class="content">
+            <div class="section-title">今日热帖</div>
+            {{ posts_html | safe }}
+        </div>
+        
+        <div class="footer">
+            <div class="goodnight">🌙 晚安，庭院见</div>
+            <div>生成时间: {{ generation_time }}</div>
+        </div>
+    </div>
+</body>
+</html>

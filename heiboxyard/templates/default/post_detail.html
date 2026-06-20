@@ -1,0 +1,130 @@
+{% for post in posts %}
+<div class="post-card post-detail">
+    <div class="post-header">
+        <img src="{{ post.avatar_data }}" class="avatar" alt="头像">
+        <div class="author-info">
+            <div class="author-name">{{ post.username }}</div>
+            <div class="post-time">{{ post.create_at_str }}</div>
+        </div>
+        <div class="post-no">#{{ post.daily_no }}</div>
+    </div>
+    
+    <h3 class="post-title">{{ post.title }}</h3>
+    
+    <div class="post-content">{{ post.content }}</div>
+    
+    <div class="ai-comment">
+        <div class="comment-label">💬 韶梦说</div>
+        <div class="comment-text">{{ post.comment }}</div>
+    </div>
+    
+    {% if post.image_data_list %}
+    <div class="post-images">
+        {% for img_data in post.image_data_list %}
+        <img src="{{ img_data }}" class="post-image" alt="帖子图片">
+        {% endfor %}
+    </div>
+    {% endif %}
+</div>
+{% endfor %}
+
+<style>
+.post-detail {
+    background: rgba(255,255,255,0.08);
+    border-radius: 12px;
+    padding: 24px;
+    margin-bottom: 24px;
+    border: 1px solid rgba(255,255,255,0.1);
+}
+
+.post-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 16px;
+}
+
+.avatar {
+    width: 48px;
+    height: 48px;
+    border-radius: 50%;
+    border: 2px solid rgba(102, 126, 234, 0.5);
+    object-fit: cover;
+}
+
+.author-info { flex: 1; }
+
+.author-name {
+    font-size: 16px;
+    font-weight: bold;
+    color: #fff;
+}
+
+.post-time {
+    font-size: 12px;
+    color: #888;
+    margin-top: 2px;
+}
+
+.post-no {
+    font-size: 24px;
+    font-weight: bold;
+    color: rgba(102, 126, 234, 0.5);
+    font-style: italic;
+}
+
+.post-title {
+    font-size: 18px;
+    color: #4facfe;
+    margin-bottom: 12px;
+    line-height: 1.4;
+}
+
+.post-content {
+    font-size: 14px;
+    color: #ccc;
+    line-height: 1.6;
+    margin-bottom: 16px;
+    max-height: 120px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    display: -webkit-box;
+    -webkit-line-clamp: 4;
+    -webkit-box-orient: vertical;
+}
+
+.ai-comment {
+    background: linear-gradient(135deg, rgba(245, 87, 108, 0.1), rgba(102, 126, 234, 0.1));
+    border-left: 3px solid #f5576c;
+    padding: 16px;
+    border-radius: 0 8px 8px 0;
+    margin-bottom: 16px;
+}
+
+.comment-label {
+    font-size: 12px;
+    color: #f5576c;
+    margin-bottom: 8px;
+    font-weight: bold;
+}
+
+.comment-text {
+    font-size: 14px;
+    color: #e0e0e0;
+    line-height: 1.6;
+    font-style: italic;
+}
+
+.post-images {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 8px;
+}
+
+.post-image {
+    width: 100%;
+    border-radius: 8px;
+    object-fit: cover;
+    max-height: 300px;
+}
+</style>

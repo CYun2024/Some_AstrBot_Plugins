@@ -1,0 +1,81 @@
+{% if posts %}
+<div class="brief-section">
+    <div class="section-title">更多帖子</div>
+    
+    {% for post in posts %}
+    <div class="post-brief">
+        <div class="brief-left">
+            <img src="{{ post.avatar_data }}" class="brief-avatar" alt="头像">
+            <div class="brief-info">
+                <div class="brief-title">{{ post.title }}</div>
+                <div class="brief-meta">
+                    <span>{{ post.username }}</span>
+                    <span class="brief-dot">•</span>
+                    <span>{{ post.create_at_str }}</span>
+                </div>
+            </div>
+        </div>
+        <div class="brief-comment">{{ post.comment }}</div>
+    </div>
+    {% endfor %}
+</div>
+{% endif %}
+
+<style>
+.brief-section { margin-top: 20px; }
+
+.post-brief {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 16px;
+    background: rgba(255,255,255,0.03);
+    border-radius: 8px;
+    margin-bottom: 12px;
+    border: 1px solid rgba(255,255,255,0.05);
+}
+
+.brief-left {
+    display: flex;
+    gap: 10px;
+    flex: 1;
+    min-width: 0;
+}
+
+.brief-avatar {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    object-fit: cover;
+}
+
+.brief-info { min-width: 0; }
+
+.brief-title {
+    font-size: 14px;
+    color: #fff;
+    font-weight: 500;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.brief-meta {
+    font-size: 12px;
+    color: #666;
+    margin-top: 4px;
+}
+
+.brief-dot { margin: 0 6px; }
+
+.brief-comment {
+    font-size: 13px;
+    color: #aaa;
+    font-style: italic;
+    max-width: 300px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+</style>
