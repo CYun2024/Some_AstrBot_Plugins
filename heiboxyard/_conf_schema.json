@@ -62,5 +62,35 @@
     "type": "int",
     "default": 5,
     "hint": "避免请求过快"
+  },
+  "evening_report_enabled": {
+    "description": "是否启用每日晚报生成",
+    "type": "bool",
+    "default": true,
+    "hint": "关闭后不会生成晚报"
+  },
+  "evening_report_auto_send": {
+    "description": "定时自动发送晚报到目标群",
+    "type": "bool",
+    "default": false,
+    "hint": "打开后，到达设定时间会主动发送到目标群；关闭则只生成保存到本地，不发到群里"
+  },
+  "evening_report_time": {
+    "description": "每日晚报生成时间（北京时间，格式 HH:MM）",
+    "type": "string",
+    "default": "23:00",
+    "hint": "例如 23:00 表示每晚23:00生成"
+  },
+  "evening_report_format": {
+    "description": "晚报输出格式",
+    "type": "string",
+    "default": "image",
+    "hint": "image=渲染为PNG图片, html=保存HTML文件到本地"
+  },
+  "evening_report_target_group": {
+    "description": "晚报发送目标群ID",
+    "type": "string",
+    "default": "",
+    "hint": "在目标群内执行 /sid 获取完整会话ID（如 onebot:GroupMessage:123456789）"
   }
 }

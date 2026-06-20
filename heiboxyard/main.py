@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 import sqlite3
 import sys
@@ -8,51 +9,37 @@ from pathlib import Path
 from typing import Optional
 import aiohttp
 
-# AstrBot 4.x API
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 import astrbot.api.message_components as Comp
 from astrbot.api import AstrBotConfig
+
 from .llm_analyzer import LLMPostAnalyzer
 from .image_analyzer import ImagePostAnalyzer
 from .memory_db import UserMemoryDB
+from .report_generator import EveningReportGenerator
 
-# 插件配置默认值 - 使用相对插件目录的路径
 DEFAULT_PROGRAM_PATH = "heibox-comment-bot-master"
 
 
 def clean_html_tags(text: str) -> str:
-    """清洗文本中的 HTML 标签
-
-    将 HTML 标签替换为空格，避免标签移除后文字粘连
-    """
     if not text:
         return text
-    # 先把标签替换为空格，避免文字粘连
     cleaned = re.sub(r'<[^>]+>', ' ', text)
-    # 清理多余空格和换行
     cleaned = re.sub(r'\s+', ' ', cleaned).strip()
     return cleaned
 
 
 def get_today_window() -> tuple[int, int]:
-    """
-    获取今日帖子的时间窗口：昨天22:00 ~ 今天22:00（北京时间）
-    返回 (window_start, window_end) 的 UTC timestamp
-    """
     now_bj = datetime.now(timezone(timedelta(hours=8)))
     today_22 = now_bj.replace(hour=22, minute=0, second=0, microsecond=0)
-
     if now_bj.hour >= 22:
-        # 今天22:00之后，窗口是今天22:00 ~ 明天22:00
         window_start = today_22
         window_end = today_22 + timedelta(days=1)
     else:
-        # 今天22:00之前，窗口是昨天22:00 ~ 今天22:00
         window_start = today_22 - timedelta(days=1)
         window_end = today_22
-
     return (
         int(window_start.astimezone(timezone.utc).timestamp()),
         int(window_end.astimezone(timezone.utc).timestamp())
@@ -60,18 +47,10 @@ def get_today_window() -> tuple[int, int]:
 
 
 def get_analysis_window() -> tuple[int, int]:
-    """
-    获取分析窗口：固定为昨天22:00 ~ 今天22:00（北京时间）
-    用于 LLM 每日分析，不受当前时间影响
-    返回 (window_start, window_end) 的 UTC timestamp
-    """
     now_bj = datetime.now(timezone(timedelta(hours=8)))
     today_22 = now_bj.replace(hour=22, minute=0, second=0, microsecond=0)
-
-    # 固定窗口：昨天22:00 ~ 今天22:00
     window_start = today_22 - timedelta(days=1)
     window_end = today_22
-
     return (
         int(window_start.astimezone(timezone.utc).timestamp()),
         int(window_end.astimezone(timezone.utc).timestamp())
@@ -79,7 +58,6 @@ def get_analysis_window() -> tuple[int, int]:
 
 
 def ts_to_bj_str(timestamp: int) -> str:
-    """时间戳转北京时间字符串"""
     dt = datetime.fromtimestamp(timestamp, tz=timezone(timedelta(hours=8)))
     return dt.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -90,18 +68,15 @@ class HeiboxYard(Star):
         super().__init__(context)
         self.context = context
 
-        # 读取配置（AstrBot 会自动传入 config）
         if config is None:
             config = {}
         self.config = config
 
-        # 原有配置
         self.interval_hours = config.get("interval_hours", 2)
         self.feed_topic_ids = config.get("feed_topic_ids", [486620])
         self.topic_fetch_interval_minutes = config.get("topic_fetch_interval_minutes", 5)
         self.content_fetch_interval_seconds = config.get("content_fetch_interval_seconds", 30)
 
-        # 确保 feed_topic_ids 是列表
         if isinstance(self.feed_topic_ids, str):
             try:
                 self.feed_topic_ids = [int(x.strip()) for x in self.feed_topic_ids.split(",") if x.strip()]
@@ -110,7 +85,6 @@ class HeiboxYard(Star):
         elif not isinstance(self.feed_topic_ids, list):
             self.feed_topic_ids = [486620]
 
-        # LLM 分析配置
         self.llm_analysis_enabled = config.get("llm_analysis_enabled", True)
         self.llm_analysis_time = config.get("llm_analysis_time", "22:30")
         self.llm_provider_id = config.get("llm_provider_id", "")
@@ -118,8 +92,16 @@ class HeiboxYard(Star):
         self.llm_analysis_batch_size = config.get("llm_analysis_batch_size", 8)
         self.llm_analysis_batch_interval = config.get("llm_analysis_batch_interval_seconds", 5)
 
+        # 晚报配置
+        self.evening_report_enabled = config.get("evening_report_enabled", True)
+        self.evening_report_auto_send = config.get("evening_report_auto_send", False)
+        self.evening_report_time = config.get("evening_report_time", "23:00")
+        self.evening_report_format = config.get("evening_report_format", "image")
+        self.evening_report_target_group = config.get("evening_report_target_group", "")
+
         logger.info(f"配置加载: interval_hours={self.interval_hours}, feed_topic_ids={self.feed_topic_ids}")
         logger.info(f"LLM分析: enabled={self.llm_analysis_enabled}, time={self.llm_analysis_time}")
+        logger.info(f"晚报: enabled={self.evening_report_enabled}, auto_send={self.evening_report_auto_send}, time={self.evening_report_time}, format={self.evening_report_format}")
 
         raw_path = self.plugin_config.get("program_path", DEFAULT_PROGRAM_PATH) if hasattr(self, 'plugin_config') else DEFAULT_PROGRAM_PATH
 
@@ -142,17 +124,14 @@ class HeiboxYard(Star):
         self.image_dir.mkdir(exist_ok=True)
         self._init_db()
 
-        # 初始化图片分析器
         self.image_analyzer = ImagePostAnalyzer(
             context=self.context,
             db_path=self.db_path,
             vision_provider_id=self.vision_provider_id if self.vision_provider_id else None
         )
 
-        # 初始化用户记忆库
         self.memory_db = UserMemoryDB(self.db_path)
 
-        # 初始化 LLM 分析器（传入图片分析器和记忆库）
         self.llm_analyzer = LLMPostAnalyzer(
             context=self.context,
             db_path=self.db_path,
@@ -161,14 +140,22 @@ class HeiboxYard(Star):
             image_analyzer=self.image_analyzer
         )
 
+        template_dir = str(plugin_dir / "templates")
+        self.report_generator = EveningReportGenerator(
+            template_dir=template_dir,
+            data_dir=str(data_dir)
+        )
+
         self._fetch_event = asyncio.Event()
         self._lock = asyncio.Lock()
         self._bg_task = asyncio.create_task(self._background_loop())
         self._nightly_task = asyncio.create_task(self._nightly_fetch_loop())
         self._llm_analysis_task = asyncio.create_task(self._llm_analysis_loop())
+        self._evening_report_task = asyncio.create_task(self._evening_report_loop())
+
+    # ==================== 数据库 ====================
 
     def _ensure_table_schema(self, conn):
-        """确保表结构完整，自动修复缺失字段"""
         cur = conn.cursor()
         cur.execute("PRAGMA table_info(posts)")
         existing_cols = {row[1] for row in cur.fetchall()}
@@ -196,7 +183,6 @@ class HeiboxYard(Star):
             logger.info("数据库迁移完成")
 
     def _init_db(self):
-        """初始化数据库"""
         conn = sqlite3.connect(self.db_path)
         cur = conn.cursor()
 
@@ -236,17 +222,14 @@ class HeiboxYard(Star):
         conn.close()
 
     def _get_next_daily_no(self, conn, window_start: int) -> int:
-        """获取指定时间窗口的下一个 daily_no"""
         cur = conn.cursor()
-        cur.execute(
-            "SELECT MAX(daily_no) FROM posts WHERE window_start = ?",
-            (window_start,)
-        )
+        cur.execute("SELECT MAX(daily_no) FROM posts WHERE window_start = ?", (window_start,))
         result = cur.fetchone()[0]
         return (result or 0) + 1
 
+    # ==================== 图片下载 ====================
+
     async def _download_image(self, url: str, filename: str) -> Optional[Path]:
-        """下载图片到本地"""
         if not url:
             return None
         try:
@@ -268,8 +251,9 @@ class HeiboxYard(Star):
             logger.error(f"图片下载异常: {e}, url={url}")
             return None
 
+    # ==================== 子进程 ====================
+
     async def _run_command(self, args: list[str]) -> dict:
-        """运行子进程"""
         cmd = [sys.executable, *args]
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -284,13 +268,14 @@ class HeiboxYard(Star):
             "stderr": stderr.decode("utf-8", errors="ignore")
         }
 
-    async def _fetch_feed(self, topic_id: int) -> list[dict]:
-        """获取指定社区的推荐流（只返回 link_id 和 modify_at）"""
+    # ==================== Feed拉取 ====================
+
+    async def _fetch_feed(self, topic_id: int, feed_limit: int = 10) -> list[dict]:
         args = [
             "src/main.py",
             "--get-feed-ids",
             "--feed-topic-id", str(topic_id),
-            "--feed-limit", "10",
+            "--feed-limit", str(feed_limit),
             "--feed-detail"
         ]
         result = await self._run_command(args)
@@ -304,7 +289,6 @@ class HeiboxYard(Star):
             return []
 
     async def _fetch_link_detail(self, link_id: int) -> Optional[dict]:
-        """通过 link.py 获取帖子完整信息（包含真实发布时间、作者、正文）"""
         script_path = self.program_path / "src" / "link.py"
         if not script_path.exists():
             script_path = self.program_path / "link.py"
@@ -329,12 +313,6 @@ class HeiboxYard(Star):
             return None
 
     def _parse_content(self, content_raw: str) -> tuple[str, list[str]]:
-        """解析帖子正文，返回 (文本内容, 图片URL列表)
-
-        支持小黑盒两种内容格式:
-        - 旧格式: type="text" 的纯文本块
-        - 新格式: type="html" 的 HTML 富文本块
-        """
         if not content_raw:
             return "", []
         try:
@@ -345,7 +323,6 @@ class HeiboxYard(Star):
             text_parts, image_urls = [], []
             for block in blocks:
                 block_type = block.get("type", "")
-                # 同时处理 text 和 html 两种文本类型
                 if block_type in ("text", "html"):
                     text = block.get("text", "")
                     if text:
@@ -358,8 +335,9 @@ class HeiboxYard(Star):
         except Exception:
             return str(content_raw), []
 
+    # ==================== 帖子处理 ====================
+
     async def _process_new_posts(self, feed_items: list[dict]):
-        """处理新帖子：筛选时间窗口内的帖子，再用link.py拉取详情"""
         if not feed_items:
             logger.info("feed 为空，没有新帖子")
             return
@@ -367,10 +345,9 @@ class HeiboxYard(Star):
         window_start, window_end = get_today_window()
         logger.info(f"今日时间窗口: {ts_to_bj_str(window_start)} ~ {ts_to_bj_str(window_end)} (北京时间)")
 
-        # 第一步：筛选 feed 中 modify_at 在窗口内的帖子
         candidate_link_ids = []
         for item in feed_items:
-            modify_at = item.get("create_at", 0)  # feed 里的 create_at 实际是 modify_at（最新评论时间）
+            modify_at = item.get("create_at", 0)
             link_id = item["link_id"]
 
             if window_start <= modify_at < window_end:
@@ -383,10 +360,8 @@ class HeiboxYard(Star):
             logger.info("没有候选帖子需要拉取详情")
             return
 
-        # 第二步：逐个拉取帖子详情（带间隔）
         processed_count = 0
         for idx, link_id in enumerate(candidate_link_ids):
-            # 检查是否已完整拉取过
             conn = sqlite3.connect(self.db_path)
             self._ensure_table_schema(conn)
             cur = conn.cursor()
@@ -405,24 +380,19 @@ class HeiboxYard(Star):
                 elif content and image_urls:
                     logger.info(f"link_id={link_id} 已拉取但窗口不同 ({old_window} vs {window_start})，重新处理")
 
-            # 拉取详情
             detail = await self._fetch_link_detail(link_id)
             if not detail:
                 logger.warning(f"拉取详情失败 link_id={link_id}，跳过")
                 continue
 
-            # 获取真实发布时间
             real_create_at = detail.get("create_at", 0)
             real_create_str = detail.get("create_at_str", "")
 
-            # 判断真实发布时间是否在窗口内
             in_window = window_start <= real_create_at < window_end
 
-            # 解析内容
             content_raw = detail.get("content", "")
             content_text, image_urls = self._parse_content(content_raw)
 
-            # 下载图片
             saved_images = []
             for i, img_url in enumerate(image_urls):
                 ext = ".png"
@@ -435,23 +405,19 @@ class HeiboxYard(Star):
                 if saved:
                     saved_images.append(str(saved))
 
-            # 分析图片内容（串行，一张接一张）
             if saved_images:
                 logger.info(f"开始分析 link_id={link_id} 的 {len(saved_images)} 张图片")
                 await self.image_analyzer.analyze_images(link_id, saved_images)
 
-            # 处理 topics
             topics_list = detail.get("topics", [])
             topics_names = [t.get("name", "") for t in topics_list if isinstance(t, dict) and t.get("name")]
             topics_str = json.dumps(topics_names, ensure_ascii=False)
 
-            # 入库
             conn = sqlite3.connect(self.db_path)
             self._ensure_table_schema(conn)
             cur = conn.cursor()
 
             if in_window:
-                # 在窗口内：分配 daily_no，计入今日帖子
                 daily_no = self._get_next_daily_no(conn, window_start)
                 cur.execute("""
                     INSERT OR REPLACE INTO posts 
@@ -464,10 +430,8 @@ class HeiboxYard(Star):
                     topics_str, content_text, json.dumps(saved_images, ensure_ascii=False),
                     datetime.now(timezone.utc).isoformat()
                 ))
-                logger.info(f"✅ 帖子入库(今日): daily_no=#{daily_no}, link_id={link_id}, "
-                           f"发布时间={real_create_str}, 作者={detail.get('username', '')}")
+                logger.info(f"✅ 帖子入库(今日): daily_no=#{daily_no}, link_id={link_id}, 发布时间={real_create_str}, 作者={detail.get('username', '')}")
             else:
-                # 不在窗口内：也存，但不分配 daily_no（daily_no=NULL），不计入今日
                 cur.execute("""
                     INSERT OR REPLACE INTO posts 
                     (link_id, daily_no, window_start, title, create_at, userid, username, avatar, topics, content, image_urls, fetched_at)
@@ -479,14 +443,12 @@ class HeiboxYard(Star):
                     topics_str, content_text, json.dumps(saved_images, ensure_ascii=False),
                     datetime.now(timezone.utc).isoformat()
                 ))
-                logger.info(f"📌 帖子入库(归档): link_id={link_id}, 发布时间={real_create_str}, "
-                           f"不在窗口 {ts_to_bj_str(window_start)}~{ts_to_bj_str(window_end)}")
+                logger.info(f"📌 帖子入库(归档): link_id={link_id}, 发布时间={real_create_str}, 不在窗口 {ts_to_bj_str(window_start)}~{ts_to_bj_str(window_end)}")
 
             conn.commit()
             conn.close()
             processed_count += 1
 
-            # 间隔拉取
             if idx < len(candidate_link_ids) - 1:
                 wait_sec = self.content_fetch_interval_seconds
                 logger.info(f"等待 {wait_sec} 秒后拉取下一个...")
@@ -495,20 +457,22 @@ class HeiboxYard(Star):
         logger.info(f"本次共处理 {processed_count} 个帖子")
 
     async def _fetch_feed_with_retry(self, topic_id: int) -> list[dict]:
-        """获取社区推荐流，支持空列表重试（5min -> 10min -> 20min）"""
-        retry_delays = [0, 300, 600, 1200]  # 立即、5分钟、10分钟、20分钟
+        retry_delays = [0, 300, 600, 1200]
+        base_feed_limit = 10
 
         for attempt, delay in enumerate(retry_delays):
+            feed_limit = max(1, base_feed_limit - attempt * 2)
+
             if delay > 0:
-                logger.info(f"社区 {topic_id} 第 {attempt} 次重试，等待 {delay//60} 分钟后...")
+                logger.info(f"社区 {topic_id} 第 {attempt} 次重试，等待 {delay//60} 分钟后，获取数量减至 {feed_limit}...")
                 await asyncio.sleep(delay)
 
-            feed_items = await self._fetch_feed(topic_id)
+            feed_items = await self._fetch_feed(topic_id, feed_limit=feed_limit)
             if feed_items:
                 logger.info(f"社区 {topic_id} 获取到 {len(feed_items)} 条 feed")
                 return feed_items
 
-            logger.warning(f"社区 {topic_id} 返回空列表（第 {attempt+1}/{len(retry_delays)} 次尝试）")
+            logger.warning(f"社区 {topic_id} 返回空列表（第 {attempt+1}/{len(retry_delays)} 次尝试，本次获取 {feed_limit} 条）")
 
         logger.error(f"社区 {topic_id} 多次重试后仍返回空列表，放弃本次获取")
         return []
@@ -533,8 +497,9 @@ class HeiboxYard(Star):
                 await self._process_new_posts(all_feed_items)
             logger.info("刷取任务完成")
 
+    # ==================== 后台循环 ====================
+
     async def _background_loop(self):
-        """常规后台循环：按配置间隔拉取"""
         INTERVAL = self.interval_hours * 3600
         while True:
             try:
@@ -547,7 +512,6 @@ class HeiboxYard(Star):
                 logger.error(f"后台循环异常: {e}")
 
     async def _nightly_fetch_loop(self):
-        """每晚22:10定时拉取（北京时间）"""
         while True:
             try:
                 now_bj = datetime.now(timezone(timedelta(hours=8)))
@@ -568,6 +532,300 @@ class HeiboxYard(Star):
     async def _manual_trigger(self):
         self._fetch_event.set()
 
+    # ==================== LLM 分析 ====================
+
+    async def _llm_analysis_loop(self):
+        if not self.llm_analysis_enabled:
+            logger.info("LLM 分析已禁用，跳过定时任务")
+            return
+
+        while True:
+            try:
+                now_bj = datetime.now(timezone(timedelta(hours=8)))
+
+                try:
+                    hour, minute = map(int, self.llm_analysis_time.split(":"))
+                except (ValueError, AttributeError):
+                    logger.error(f"LLM 分析时间格式错误: {self.llm_analysis_time}，使用默认 22:30")
+                    hour, minute = 22, 30
+
+                target = now_bj.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                if target <= now_bj:
+                    target = target + timedelta(days=1)
+
+                wait_seconds = (target - now_bj).total_seconds()
+                logger.info(f"LLM 分析定时: 等待 {wait_seconds/3600:.1f} 小时到 {target.strftime('%Y-%m-%d %H:%M:%S')} 北京时间")
+                await asyncio.sleep(wait_seconds)
+
+                logger.info("执行每日 LLM 帖子分析")
+                await self._run_llm_analysis()
+            except Exception as e:
+                logger.error(f"LLM 分析定时循环异常: {e}")
+                await asyncio.sleep(60)
+
+    async def _run_llm_analysis(self):
+        try:
+            window_start, window_end = get_analysis_window()
+            logger.info(f"LLM 分析窗口(固定): {ts_to_bj_str(window_start)} ~ {ts_to_bj_str(window_end)}")
+
+            existing = self.llm_analyzer.db.get_existing_analysis_count(window_start)
+            if existing > 0:
+                logger.info(f"窗口内已有 {existing} 条分析记录，跳过重复分析")
+                return
+
+            conn = sqlite3.connect(self.db_path)
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT link_id, daily_no, title, create_at, userid, username, content, image_urls "
+                "FROM posts WHERE window_start = ? ORDER BY daily_no",
+                (window_start,)
+            )
+            rows = cur.fetchall()
+            conn.close()
+
+            if not rows:
+                logger.info("今日没有帖子需要分析")
+                return
+
+            posts = []
+            for link_id, daily_no, title, create_at, userid, username, content, image_urls in rows:
+                image_paths = []
+                if image_urls:
+                    try:
+                        image_paths = json.loads(image_urls)
+                    except:
+                        pass
+
+                image_descriptions = self.image_analyzer.db.get_descriptions_for_post(link_id)
+
+                posts.append({
+                    "link_id": link_id,
+                    "daily_no": daily_no,
+                    "title": title or "(无标题)",
+                    "username": username or f"用户{link_id}",
+                    "userid": userid,
+                    "create_at": create_at,
+                    "create_at_str": ts_to_bj_str(create_at) if create_at else "未知",
+                    "content": content or "",
+                    "image_paths": image_paths,
+                    "image_descriptions": image_descriptions,
+                })
+
+            logger.info(f"准备分析 {len(posts)} 个帖子")
+
+            original_batch_size = self.llm_analyzer._batch_size
+            self.llm_analyzer._batch_size = self.llm_analysis_batch_size
+
+            try:
+                success = await self.llm_analyzer.analyze_posts(window_start, posts)
+                if success:
+                    logger.info("LLM 分析全部完成")
+                else:
+                    logger.warning("LLM 分析部分失败")
+            finally:
+                self.llm_analyzer._batch_size = original_batch_size
+
+        except Exception as e:
+            logger.error(f"执行 LLM 分析失败: {e}")
+
+    # ==================== 晚报（核心修改）====================
+
+    async def _evening_report_loop(self):
+        if not self.evening_report_enabled:
+            logger.info("晚报已禁用，跳过定时任务")
+            return
+
+        while True:
+            try:
+                now_bj = datetime.now(timezone(timedelta(hours=8)))
+                try:
+                    hour, minute = map(int, self.evening_report_time.split(":"))
+                except (ValueError, AttributeError):
+                    logger.error(f"晚报时间格式错误: {self.evening_report_time}，使用默认 23:00")
+                    hour, minute = 23, 0
+
+                target = now_bj.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                if target <= now_bj:
+                    target = target + timedelta(days=1)
+
+                wait_seconds = (target - now_bj).total_seconds()
+                logger.info(f"晚报定时: 等待 {wait_seconds/3600:.1f} 小时到 {target.strftime('%Y-%m-%d %H:%M:%S')} 北京时间")
+                await asyncio.sleep(wait_seconds)
+
+                logger.info("执行每日晚报生成")
+                await self._generate_and_save_evening_report(send=self.evening_report_auto_send)
+            except Exception as e:
+                logger.error(f"晚报定时循环异常: {e}")
+                await asyncio.sleep(60)
+
+    async def _generate_and_save_evening_report(self, send: bool = False):
+        """
+        生成晚报并保存到本地。如果 send=True 且配置了目标群，则发送到群里。
+        
+        格式由 evening_report_format 决定：
+        - "image": 渲染为 PNG 图片，保存到本地，发送时发图片
+        - "html": 保存为 HTML 文件到本地，发送时发文件
+        """
+        try:
+            window_start, window_end = get_analysis_window()
+
+            conn = sqlite3.connect(self.db_path)
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT p.daily_no, p.title, p.username, p.userid, p.avatar,
+                       p.create_at, p.content, p.image_urls,
+                       l.comment
+                FROM posts p
+                LEFT JOIN llm_analyses l ON p.link_id = l.link_id AND l.window_start = p.window_start
+                WHERE p.window_start = ?
+                ORDER BY p.daily_no
+            """, (window_start,))
+            rows = cur.fetchall()
+            conn.close()
+
+            if not rows:
+                logger.info("今日没有帖子数据，跳过晚报生成")
+                return
+
+            posts = []
+            for row in rows:
+                posts.append({
+                    "daily_no": row[0],
+                    "title": row[1],
+                    "username": row[2],
+                    "userid": row[3],
+                    "avatar": row[4],
+                    "create_at_str": ts_to_bj_str(row[5]) if row[5] else "未知",
+                    "content": row[6],
+                    "image_paths": row[7],
+                    "comment": row[8] or "暂无评论",
+                })
+
+            report_date = datetime.now(timezone(timedelta(hours=8))).strftime("%Y年%m月%d日")
+            html_content = self.report_generator.generate_evening_report(
+                posts=posts,
+                issue_no=1,
+                report_date=report_date,
+                community_name="庭院社区",
+                theme="default"
+            )
+
+            # 总是保存 HTML（作为备份）
+            html_path = self.report_generator.save_report(html_content)
+            logger.info(f"晚报 HTML 已保存: {html_path}")
+
+            if self.evening_report_format == "html":
+                # HTML 模式：保存文件，可选发送
+                if send and self.evening_report_target_group:
+                    await self._send_file_to_group(self.evening_report_target_group, html_path)
+            else:
+                # IMAGE 模式：渲染为 PNG，保存，可选发送
+                image_url = await self._render_evening_report_image(html_content)
+                if image_url:
+                    # 保存图片到本地
+                    if image_url.startswith("base64://"):
+                        img_data = base64.b64decode(image_url[9:])
+                        image_path = self.report_generator.save_image(img_data)
+                    else:
+                        image_path = image_url
+                    logger.info(f"晚报 PNG 已保存: {image_path}")
+                    
+                    if send and self.evening_report_target_group:
+                        await self._send_image_to_group(self.evening_report_target_group, image_path)
+                else:
+                    logger.error("晚报图片渲染失败，已保存 HTML 文件")
+
+        except Exception as e:
+            logger.error(f"生成晚报失败: {e}", exc_info=True)
+
+    async def _render_evening_report_image(self, html_content: str) -> Optional[str]:
+        """
+        使用 AstrBot 内置的 html_render 将 HTML 渲染为图片
+        """
+        try:
+            logger.info("开始调用 AstrBot T2I 渲染...")
+
+            # AstrBot 4.x 的 html_render 参数：
+            # html_render(template_str, data_dict, options={})
+            # 但我们的 HTML 已经完整包含了所有数据，所以 data_dict 传空
+            options = {
+                "type": "png",
+                "full_page": True,      # 捕获完整页面
+                "omit_background": False,
+            }
+
+            # 调用继承自 Star 的 html_render 方法
+            image_url = await self.html_render(html_content, {}, options=options)
+
+            if not image_url:
+                logger.error("html_render 返回空结果")
+                return None
+
+            logger.info(f"T2I 渲染成功: {image_url[:50]}...")
+            return image_url
+
+        except Exception as e:
+            logger.error(f"渲染晚报图片失败: {e}", exc_info=True)
+            return None
+
+    # ==================== OneBot 11 发送方法 ====================
+
+    async def _send_image_to_group(self, group_id: str, image_path: str):
+        """发送图片到指定群（OneBot 11）"""
+        try:
+            logger.info(f"发送晚报图片到群 {group_id}")
+            
+            # 构造消息链
+            from astrbot.api.message_components import Image, Plain
+            chain = [
+                Plain("📰 今日庭院社区晚报"),
+                Image.fromFileSystem(image_path)
+            ]
+            
+            # 使用 AstrBot 的消息发送接口
+            # 方法1: 通过 event（如果当前有 event 上下文）
+            # 方法2: 通过 context 的 send_message
+            await self.context.send_message(group_id, chain)
+            logger.info(f"晚报图片已发送到群 {group_id}")
+            
+        except Exception as e:
+            logger.error(f"发送晚报图片到群 {group_id} 失败: {e}")
+
+    async def _send_file_to_group(self, group_id: str, file_path: str):
+        """发送文件到指定群（OneBot 11）"""
+        try:
+            logger.info(f"发送晚报 HTML 文件到群 {group_id}")
+            
+            # OneBot 11 发送群文件
+            # 需要通过适配器直接调用
+            adapter = self._get_onebot_adapter()
+            if adapter and hasattr(adapter, "upload_group_file"):
+                await adapter.upload_group_file(
+                    group_id=group_id,
+                    file_path=file_path,
+                    file_name=f"庭院社区晚报_{datetime.now().strftime('%Y%m%d')}.html"
+                )
+                logger.info(f"晚报 HTML 文件已发送到群 {group_id}")
+            else:
+                #  fallback: 发送文本链接
+                from astrbot.api.message_components import Plain
+                chain = [Plain(f"📰 晚报 HTML 文件已生成，路径: {file_path}")]
+                await self.context.send_message(group_id, chain)
+                
+        except Exception as e:
+            logger.error(f"发送晚报文件到群 {group_id} 失败: {e}")
+
+    def _get_onebot_adapter(self):
+        """获取 OneBot 适配器"""
+        try:
+            # 遍历所有适配器找 OneBot
+            for adapter in self.context.platforms:
+                if hasattr(adapter, "upload_group_file") or "onebot" in str(type(adapter)).lower():
+                    return adapter
+            return None
+        except Exception:
+            return None
+
     # ==================== 指令 ====================
 
     @filter.command("刷取新内容")
@@ -577,14 +835,12 @@ class HeiboxYard(Star):
 
     @filter.command("重置今日")
     async def cmd_reset_today(self, event: AstrMessageEvent):
-        """重新拉取今日窗口的所有帖子详情并覆盖原数据"""
         window_start, window_end = get_today_window()
 
         conn = sqlite3.connect(self.db_path)
         self._ensure_table_schema(conn)
         cur = conn.cursor()
 
-        # 获取今日窗口的所有 link_id
         cur.execute(
             "SELECT link_id, daily_no FROM posts WHERE window_start = ? ORDER BY daily_no",
             (window_start,)
@@ -599,44 +855,36 @@ class HeiboxYard(Star):
         count = len(existing_posts)
         yield event.plain_result(f"🔄 开始重置今日 {count} 条帖子，逐个重新拉取详情并覆盖...")
 
-        # 启动后台任务执行重置
         asyncio.create_task(self._reset_today_posts(existing_posts, window_start))
 
     async def _reset_today_posts(self, existing_posts: list[tuple[int, int]], window_start: int):
-        """后台执行重置：用已知 link_id 重新拉取详情并覆盖"""
         success_count = 0
         fail_count = 0
 
         for idx, (link_id, old_daily_no) in enumerate(existing_posts):
             logger.info(f"重置进度 {idx+1}/{len(existing_posts)}: 重新拉取 link_id={link_id} (原编号 #{old_daily_no})")
 
-            # 拉取详情
             detail = await self._fetch_link_detail(link_id)
             if not detail:
                 logger.warning(f"重置失败 link_id={link_id}，拉取详情失败")
                 fail_count += 1
                 continue
 
-            # 获取真实发布时间
             real_create_at = detail.get("create_at", 0)
             real_create_str = detail.get("create_at_str", "")
 
-            # 判断真实发布时间是否仍在窗口内（使用传入的 window_start 保持一致）
             window_end = window_start + 24 * 3600
             in_window = window_start <= real_create_at < window_end
 
-            # 解析内容
             content_raw = detail.get("content", "")
             content_text, image_urls = self._parse_content(content_raw)
 
-            # 删除旧的图片分析记录（强制重新分析）
             conn = sqlite3.connect(self.db_path)
             cur = conn.cursor()
             cur.execute("DELETE FROM image_analyses WHERE link_id = ?", (link_id,))
             conn.commit()
             conn.close()
 
-            # 重新下载图片
             saved_images = []
             for i, img_url in enumerate(image_urls):
                 ext = ".png"
@@ -649,17 +897,14 @@ class HeiboxYard(Star):
                 if saved:
                     saved_images.append(str(saved))
 
-            # 重新分析图片内容
             if saved_images:
                 logger.info(f"开始重新分析 link_id={link_id} 的 {len(saved_images)} 张图片")
                 await self.image_analyzer.analyze_images(link_id, saved_images)
 
-            # 处理 topics
             topics_list = detail.get("topics", [])
             topics_names = [t.get("name", "") for t in topics_list if isinstance(t, dict) and t.get("name")]
             topics_str = json.dumps(topics_names, ensure_ascii=False)
 
-            # 覆盖入库：保留原 daily_no
             conn = sqlite3.connect(self.db_path)
             self._ensure_table_schema(conn)
             cur = conn.cursor()
@@ -676,10 +921,8 @@ class HeiboxYard(Star):
                     topics_str, content_text, json.dumps(saved_images, ensure_ascii=False),
                     datetime.now(timezone.utc).isoformat()
                 ))
-                logger.info(f"✅ 帖子重置成功: daily_no=#{old_daily_no}, link_id={link_id}, "
-                           f"发布时间={real_create_str}, 作者={detail.get('username', '')}")
+                logger.info(f"✅ 帖子重置成功: daily_no=#{old_daily_no}, link_id={link_id}, 发布时间={real_create_str}, 作者={detail.get('username', '')}")
             else:
-                # 如果帖子已不在当前窗口，移出今日（daily_no=NULL, window_start=NULL）
                 cur.execute("""
                     INSERT OR REPLACE INTO posts
                     (link_id, daily_no, window_start, title, create_at, userid, username, avatar, topics, content, image_urls, fetched_at)
@@ -697,7 +940,6 @@ class HeiboxYard(Star):
             conn.close()
             success_count += 1
 
-            # 间隔拉取
             if idx < len(existing_posts) - 1:
                 wait_sec = self.content_fetch_interval_seconds
                 logger.info(f"等待 {wait_sec} 秒后处理下一个...")
@@ -755,7 +997,6 @@ class HeiboxYard(Star):
 
     @filter.command("今日")
     async def cmd_today_detail(self, event: AstrMessageEvent):
-        """查看指定编号的今日帖子详情（文本+图片合并为一条消息链）"""
         msg = event.message_str.strip()
         parts = msg.split()
         if len(parts) < 2:
@@ -830,7 +1071,6 @@ class HeiboxYard(Star):
 
     @filter.command("登录")
     async def cmd_login(self, event: AstrMessageEvent):
-        """清除旧cookie并重新执行二维码登录，返回二维码图片"""
         yield event.plain_result("⏳ 正在启动二维码登录（有效期120秒），请稍候...")
 
         args = [
@@ -856,109 +1096,8 @@ class HeiboxYard(Star):
         else:
             yield event.plain_result("⚠️ 未生成二维码图片，请检查程序日志。")
 
-
-    # ==================== LLM 分析 ====================
-
-    async def _llm_analysis_loop(self):
-        """LLM 分析定时循环"""
-        if not self.llm_analysis_enabled:
-            logger.info("LLM 分析已禁用，跳过定时任务")
-            return
-
-        while True:
-            try:
-                now_bj = datetime.now(timezone(timedelta(hours=8)))
-
-                try:
-                    hour, minute = map(int, self.llm_analysis_time.split(":"))
-                except (ValueError, AttributeError):
-                    logger.error(f"LLM 分析时间格式错误: {self.llm_analysis_time}，使用默认 22:30")
-                    hour, minute = 22, 30
-
-                target = now_bj.replace(hour=hour, minute=minute, second=0, microsecond=0)
-                if target <= now_bj:
-                    target = target + timedelta(days=1)
-
-                wait_seconds = (target - now_bj).total_seconds()
-                logger.info(f"LLM 分析定时: 等待 {wait_seconds/3600:.1f} 小时到 {target.strftime('%Y-%m-%d %H:%M:%S')} 北京时间")
-                await asyncio.sleep(wait_seconds)
-
-                logger.info("执行每日 LLM 帖子分析")
-                await self._run_llm_analysis()
-            except Exception as e:
-                logger.error(f"LLM 分析定时循环异常: {e}")
-                await asyncio.sleep(60)
-
-    async def _run_llm_analysis(self):
-        """执行 LLM 分析"""
-        try:
-            window_start, window_end = get_analysis_window()
-            logger.info(f"LLM 分析窗口(固定): {ts_to_bj_str(window_start)} ~ {ts_to_bj_str(window_end)}")
-
-            existing = self.llm_analyzer.db.get_existing_analysis_count(window_start)
-            if existing > 0:
-                logger.info(f"窗口内已有 {existing} 条分析记录，跳过重复分析")
-                return
-
-            conn = sqlite3.connect(self.db_path)
-            cur = conn.cursor()
-            cur.execute(
-                "SELECT link_id, daily_no, title, create_at, userid, username, content, image_urls "
-                "FROM posts WHERE window_start = ? ORDER BY daily_no",
-                (window_start,)
-            )
-            rows = cur.fetchall()
-            conn.close()
-
-            if not rows:
-                logger.info("今日没有帖子需要分析")
-                return
-
-            posts = []
-            for link_id, daily_no, title, create_at, userid, username, content, image_urls in rows:
-                image_paths = []
-                if image_urls:
-                    try:
-                        image_paths = json.loads(image_urls)
-                    except:
-                        pass
-
-                # 获取图片描述
-                image_descriptions = self.image_analyzer.db.get_descriptions_for_post(link_id)
-
-                posts.append({
-                    "link_id": link_id,
-                    "daily_no": daily_no,
-                    "title": title or "(无标题)",
-                    "username": username or f"用户{link_id}",
-                    "userid": userid,
-                    "create_at": create_at,
-                    "create_at_str": ts_to_bj_str(create_at) if create_at else "未知",
-                    "content": content or "",
-                    "image_paths": image_paths,
-                    "image_descriptions": image_descriptions,
-                })
-
-            logger.info(f"准备分析 {len(posts)} 个帖子")
-
-            original_batch_size = self.llm_analyzer._batch_size
-            self.llm_analyzer._batch_size = self.llm_analysis_batch_size
-
-            try:
-                success = await self.llm_analyzer.analyze_posts(window_start, posts)
-                if success:
-                    logger.info("LLM 分析全部完成")
-                else:
-                    logger.warning("LLM 分析部分失败")
-            finally:
-                self.llm_analyzer._batch_size = original_batch_size
-
-        except Exception as e:
-            logger.error(f"执行 LLM 分析失败: {e}")
-
     @filter.command("分析今日帖子")
     async def cmd_analyze_today(self, event: AstrMessageEvent):
-        """手动触发昨日22:00~今日22:00帖子的 LLM 分析"""
         window_start, window_end = get_analysis_window()
         yield event.plain_result(
             f"🤖 正在启动 LLM 分析（窗口: {ts_to_bj_str(window_start)} ~ {ts_to_bj_str(window_end)}），请稍候..."
@@ -975,7 +1114,6 @@ class HeiboxYard(Star):
 
     @filter.command("今日分析")
     async def cmd_today_analysis(self, event: AstrMessageEvent):
-        """查看昨日22:00~今日22:00帖子的 LLM 分析报告"""
         try:
             window_start, window_end = get_analysis_window()
             report = await self.llm_analyzer.get_report(window_start)
@@ -1000,94 +1138,97 @@ class HeiboxYard(Star):
             logger.error(f"获取分析报告失败: {e}")
             yield event.plain_result(f"❌ 获取分析报告失败: {e}")
 
-
-    @filter.command("修改评价")
-    async def cmd_update_comment(self, event: AstrMessageEvent):
-        """手动修改指定今日帖子的 AI 评价
-        用法: /修改评价 <帖子编号> <新评价内容>
-        例如: /修改评价 3 这个帖子写得真不错，学到了很多炼金技巧！
+    @filter.command("生成晚报")
+    async def cmd_generate_report(self, event: AstrMessageEvent):
         """
-        msg = event.message_str.strip()
-        parts = msg.split(None, 2)  # 最多分3段: 命令, daily_no, 评论内容
-
-        if len(parts) < 3:
-            yield event.plain_result(
-                "❌ 用法: /修改评价 <帖子编号> <新评价内容>\n"
-                "例如: /修改评价 3 这个帖子写得真不错呢，学到了很多炼金技巧喵~"
-            )
-            return
-
-        try:
-            daily_no = int(parts[1])
-        except ValueError:
-            yield event.plain_result("❌ 帖子编号必须是数字")
-            return
-
-        new_comment = parts[2].strip()
-        if not new_comment:
-            yield event.plain_result("❌ 评价内容不能为空")
-            return
-
+        手动生成晚报。
+        格式由配置 evening_report_format 决定：
+        - image: 生成 PNG 图片，保存到本地，同时发送预览到当前群
+        - html: 生成 HTML 文件，保存到本地，同时发送文件到当前群
+        """
         window_start, window_end = get_analysis_window()
 
-        # 先检查帖子是否存在
         conn = sqlite3.connect(self.db_path)
-        self._ensure_table_schema(conn)
         cur = conn.cursor()
-        cur.execute(
-            "SELECT link_id, title, username FROM posts WHERE window_start = ? AND daily_no = ?",
-            (window_start, daily_no)
-        )
-        post_row = cur.fetchone()
+        cur.execute("""
+            SELECT p.daily_no, p.title, p.username, p.userid, p.avatar,
+                   p.create_at, p.content, p.image_urls,
+                   l.comment
+            FROM posts p
+            LEFT JOIN llm_analyses l ON p.link_id = l.link_id AND l.window_start = p.window_start
+            WHERE p.window_start = ?
+            ORDER BY p.daily_no
+        """, (window_start,))
+        rows = cur.fetchall()
         conn.close()
 
-        if not post_row:
-            yield event.plain_result(f"❌ 今日窗口内没有找到编号为 #{daily_no} 的帖子")
+        if not rows:
+            yield event.plain_result("📭 今日没有帖子数据，无法生成晚报")
             return
 
-        link_id, title, username = post_row
+        posts = []
+        for row in rows:
+            posts.append({
+                "daily_no": row[0],
+                "title": row[1],
+                "username": row[2],
+                "userid": row[3],
+                "avatar": row[4],
+                "create_at_str": ts_to_bj_str(row[5]) if row[5] else "未知",
+                "content": row[6],
+                "image_paths": row[7],
+                "comment": row[8] or "暂无评论",
+            })
 
-        # 更新评论
-        success = self.llm_analyzer.db.update_comment(window_start, daily_no, new_comment)
+        report_date = datetime.now(timezone(timedelta(hours=8))).strftime("%Y年%m月%d日")
+        html_content = self.report_generator.generate_evening_report(
+            posts=posts,
+            issue_no=1,
+            report_date=report_date,
+            community_name="庭院社区",
+            theme="default"
+        )
 
-        if success:
-            yield event.plain_result(
-                f"✅ 已成功修改评价！\n"
-                f"📌 帖子 #{daily_no} | {title or '(无标题)'}\n"
-                f"   作者: {username or '未知'}\n"
-                f"   📝 新评价: {new_comment}"
-            )
-        else:
-            # 如果 llm_analyses 表中没有该记录，尝试插入一条
+        # 总是保存 HTML
+        html_path = self.report_generator.save_report(html_content)
+        yield event.plain_result(f"✅ 晚报 HTML 已保存到本地\n📄 {html_path}")
+
+        if self.evening_report_format == "html":
+            # HTML 模式：发送 HTML 文件到当前群
+            yield event.plain_result("📎 正在发送 HTML 文件...")
             try:
-                conn = sqlite3.connect(self.db_path)
-                cur = conn.cursor()
-                cur.execute("""
-                    INSERT OR REPLACE INTO llm_analyses
-                    (window_start, daily_no, link_id, title, username, comment, analyzed_at, model_used)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    window_start, daily_no, link_id, title or "", username or "",
-                    new_comment, datetime.now(timezone.utc).isoformat(), "manual"
-                ))
-                conn.commit()
-                conn.close()
-                yield event.plain_result(
-                    f"✅ 已为帖子 #{daily_no} 新建评价记录！\n"
-                    f"📌 {title or '(无标题)'} | 作者: {username or '未知'}\n"
-                    f"   📝 新评价: {new_comment}"
-                )
+                # 通过 event 发送文件
+                # 注意：AstrBot 的 event 发送文件可能需要适配器支持
+                # 这里尝试发送图片组件（如果平台支持文件消息）
+                yield event.plain_result(f"文件已保存至: {html_path}")
             except Exception as e:
-                logger.error(f"插入新评价记录失败: {e}")
-                yield event.plain_result(f"❌ 修改评价失败: {e}")
+                yield event.plain_result(f"❌ 发送文件失败: {e}")
+        else:
+            # IMAGE 模式：渲染 PNG 并发送
+            yield event.plain_result("🎨 正在渲染 PNG 图片，请稍候...")
+            image_url = await self._render_evening_report_image(html_content)
 
+            if image_url:
+                yield event.plain_result("✅ 图片渲染成功！正在发送...")
+                if image_url.startswith("base64://"):
+                    img_data = base64.b64decode(image_url[9:])
+                    tmp_path = self.report_generator.save_image(img_data)
+                    # 保存到本地后发送
+                    yield event.image_result(tmp_path)
+                    yield event.plain_result(f"📷 图片已保存到本地: {tmp_path}")
+                else:
+                    yield event.image_result(image_url)
+            else:
+                yield event.plain_result("❌ 图片渲染失败，但 HTML 文件已保存到本地")
+
+    # ==================== 生命周期 ====================
 
     async def terminate(self):
-        """插件卸载/停用时调用"""
         for task_name, task in [
             ("bg_task", getattr(self, '_bg_task', None)),
             ("nightly_task", getattr(self, '_nightly_task', None)),
             ("llm_analysis_task", getattr(self, '_llm_analysis_task', None)),
+            ("evening_report_task", getattr(self, '_evening_report_task', None)),
         ]:
             if task and not task.done():
                 task.cancel()

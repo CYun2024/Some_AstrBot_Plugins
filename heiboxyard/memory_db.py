@@ -7,6 +7,7 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+from collections import Counter
 
 from astrbot.api import logger
 
