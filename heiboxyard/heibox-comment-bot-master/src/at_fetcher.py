@@ -334,14 +334,15 @@ def main() -> int:
         end_ts = _parse_timestamp(args.end_time)
     else:
         parser.print_help()
-        print("\n[ERROR] 必须指定时间范围: --recent-hours, 或 --start-ts/--end-ts, 或 --start-time/--end-time")
+        print("\n[ERROR] 必须指定时间范围: --recent-hours, 或 --start-ts/--end-ts, 或 --start-time/--end-time", file=sys.stderr)
         return 1
 
     if start_ts > end_ts:
-        print("[ERROR] 开始时间不能晚于结束时间")
+        print("[ERROR] 开始时间不能晚于结束时间", file=sys.stderr)
         return 1
 
-    print(f"[INFO] 获取 @消息: {_timestamp_to_beijing_str(start_ts)} ~ {_timestamp_to_beijing_str(end_ts)}")
+    # 日志输出到 stderr，避免污染 stdout 的 JSON
+    print(f"[INFO] 获取 @消息: {_timestamp_to_beijing_str(start_ts)} ~ {_timestamp_to_beijing_str(end_ts)}", file=sys.stderr)
 
     try:
         result = get_at_messages_in_range(
@@ -351,7 +352,7 @@ def main() -> int:
             heybox_id=args.heybox_id,
         )
     except Exception as exc:
-        print(f"[ERROR] {exc}")
+        print(f"[ERROR] {exc}", file=sys.stderr)
         return 1
 
     if args.raw:
