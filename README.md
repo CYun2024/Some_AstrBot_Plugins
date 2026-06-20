@@ -3,7 +3,7 @@
 
 1. 基于astrbot_plugin_AtTool的魔改@插件，不过看起来可能不太像原插件了，主要功能有：让LLM智能的at，at转@，获取群友QQ号和昵称的映射，保存到本地文件，LLM会判断意图去智能@他人，去查找本地映射文件，没有就调用获取群列表，找到最可信的结果。一个QQ号可以对应多个昵称，可以手动修改列表数据来让AI认人。目前没发现有什么Bug，不过也可能是因为我把映射在知识库也写了一份（雾）。
 
-2. LLM_debugger,创建一个web服务以监听主api的调用，可能Bug有点多，与morechatplus有联动
+2. LLM_debugger,创建一个web服务以监听主api的调用，可能Bug有点多，与morechatplus有联动，可以查看morechatplus数据库
    
 3. 修改了astrbot_plugin_angel_heart的前台文件，新增了@到上下文中，但是现在不用了
 
@@ -11,4 +11,8 @@
 
 5. morechatplus,重构版群聊插件，整合了艾特工具，包含增强群聊上下文、用户画像、主动回复、图片识别等等功能
 
-6. changancat，哈气数量统计，表情包统计，哈气趋势图，群友哈气数量查询
+6. changancat，基于morechatplus数据库的哈气数量统计，表情包统计，哈气趋势图，群友哈气数量查询，表情统计
+
+7. ImageStatsPlugin ，基于morechatplus数据库的图片/表情包发送数量统计
+
+8. heiboxyard，基于heibox-comment-bot-master项目的小黑盒社区帖子爬取与晚报分析制作
