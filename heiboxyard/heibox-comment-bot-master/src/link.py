@@ -3,8 +3,8 @@
 一次请求获取帖主名字 + 帖子发布时间
 
 用法:
-    python link_info.py --link-id 183663331
-    python link_info.py --link-id 183663331 --debug
+    python src/link.py --link-id 183663331
+    python src/link.py --link-id 183663331 --debug
 
 返回字段:
     - link_id: 帖子ID
@@ -15,6 +15,9 @@
     - create_at_str: 帖子发布时间（北京时间字符串）
     - modify_at: 最后修改/评论时间（UTC时间戳）
     - modify_at_str: 最后修改/评论时间（北京时间字符串）
+    - title: 帖子标题
+    - content: 帖子内容（原始JSON字符串，包含文本和图片块）
+    - topics: 话题标签列表
 """
 
 import json
@@ -64,6 +67,7 @@ def extract_link_info(raw_data: dict, link_id: int) -> dict:
         "modify_at_str": None,    # 最后修改/评论时间（北京时间）
         "title": None,
         "content": None,
+        "topics": [],             # 话题标签列表
     }
 
     # ========== 帖主信息（result.link.user）==========
@@ -123,7 +127,12 @@ def extract_link_info(raw_data: dict, link_id: int) -> dict:
             break
 
     if content:
-        info["content"] = content[:] 
+        info["content"] = content[:]
+
+    # ========== 话题标签 ==========
+    topics = link.get("topics")
+    if isinstance(topics, list) and topics:
+        info["topics"] = topics
 
     return info
 
