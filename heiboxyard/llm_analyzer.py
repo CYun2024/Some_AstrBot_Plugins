@@ -363,8 +363,12 @@ class LLMAnalysisDB:
 
 
 
-    def get_analysis_report_by_prefix(self, daily_no_prefix: str) -> Optional[list[dict]]:
-        """获取指定 daily_no 前缀的完整分析报告"""
+    def get_analysis_report_by_prefix(self, window_no: str) -> Optional[list[dict]]:
+        """获取指定窗口编号的完整分析报告
+        
+        Args:
+            window_no: 窗口编号（如 "20260621"）
+        """
         try:
             conn = sqlite3.connect(self.db_path)
             cur = conn.cursor()
@@ -374,7 +378,7 @@ class LLMAnalysisDB:
                 FROM llm_analyses
                 WHERE daily_no LIKE ? || '-%'
                 ORDER BY daily_no
-            """, (daily_no_prefix,))
+            """, (window_no,))
             rows = cur.fetchall()
             conn.close()
 
@@ -574,6 +578,10 @@ class LLMPostAnalyzer:
         """获取分析报告"""
         return self.db.get_analysis_report(window_start)
 
-    async def get_report_by_prefix(self, daily_no_prefix: str) -> Optional[list[dict]]:
-        """获取分析报告（按 daily_no 前缀）"""
-        return self.db.get_analysis_report_by_prefix(daily_no_prefix)
+    async def get_report_by_prefix(self, window_no: str) -> Optional[list[dict]]:
+        """获取分析报告（按窗口编号）
+        
+        Args:
+            window_no: 窗口编号（如 "20260621"）
+        """
+        return self.db.get_analysis_report_by_prefix(window_no)

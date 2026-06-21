@@ -14,9 +14,9 @@ import aiohttp
 from astrbot.api import logger
 
 from .utils import (
-    get_today_window, ts_to_bj_str, get_date_str_from_ts,
-    get_date_str_from_window, format_daily_no, parse_daily_no,
-    get_window_for_timestamp
+    get_current_window, get_current_window_no, ts_to_bj_str,
+    get_date_str_from_ts, format_daily_no, parse_daily_no,
+    get_window_for_timestamp, get_window_by_no
 )
 
 
@@ -29,12 +29,16 @@ class PostManager:
         self.image_dir = image_dir
         self.program_path = program_path
         self.content_fetch_interval_seconds = content_fetch_interval_seconds
+        # 确保数据库文件所在目录存在
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
     # ==================== 数据库 ====================
 
     def _ensure_db(self):
         """确保数据库表存在（处理数据库文件被外部删除的情况）"""
+        # 确保数据库文件所在目录存在（防止目录被外部删除）
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
         try:
             conn = sqlite3.connect(self.db_path)
             cur = conn.cursor()
@@ -133,15 +137,15 @@ class PostManager:
         conn.commit()
         conn.close()
 
-    def get_next_daily_no(self, date_str: str) -> str:
+    def get_next_daily_no(self, window_no: str) -> str:
         """获取下一个 daily_no（新格式：YYYYMMDD-NN）"""
         self._ensure_db()
         conn = sqlite3.connect(self.db_path)
         cur = conn.cursor()
-        # 查找该日期下最大的编号
+        # 查找该窗口编号下最大的编号
         cur.execute(
             "SELECT daily_no FROM posts WHERE date_str = ? ORDER BY daily_no DESC LIMIT 1",
-            (date_str,)
+            (window_no,)
         )
         row = cur.fetchone()
         conn.close()
@@ -152,7 +156,7 @@ class PostManager:
         else:
             next_seq = 1
 
-        return format_daily_no(date_str, next_seq)
+        return format_daily_no(window_no, next_seq)
 
     def get_existing_post(self, link_id: int) -> Optional[tuple]:
         """查询帖子是否已存在"""
@@ -196,9 +200,13 @@ class PostManager:
         }
 
     def save_post(self, link_id: int, daily_no: Optional[str], window_start: Optional[int],
-                  date_str: Optional[str], detail: dict, content_text: str, saved_images: list[str],
+                  window_no: Optional[str], detail: dict, content_text: str, saved_images: list[str],
                   topics_str: str, source: str = "feed"):
-        """保存帖子到数据库"""
+        """保存帖子到数据库
+        
+        Args:
+            window_no: 窗口编号（如 "20260621"），作为 date_str 存储
+        """
         self._ensure_db()
         conn = sqlite3.connect(self.db_path)
         self._ensure_table_schema(conn)
@@ -210,7 +218,7 @@ class PostManager:
              topics, content, image_urls, fetched_at, source)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
-            link_id, daily_no, window_start, date_str,
+            link_id, daily_no, window_start, window_no,
             detail.get("title", ""), detail.get("create_at", 0),
             detail.get("userid", 0), detail.get("username", ""), detail.get("avatar", ""),
             topics_str, content_text, json.dumps(saved_images, ensure_ascii=False),
@@ -221,7 +229,7 @@ class PostManager:
         conn.close()
 
     def get_posts_in_window(self, window_start: int) -> list[tuple]:
-        """获取窗口内的所有帖子"""
+        """获取窗口内的所有帖子（按 window_start 时间戳）"""
         self._ensure_db()
         conn = sqlite3.connect(self.db_path)
         cur = conn.cursor()
@@ -233,14 +241,14 @@ class PostManager:
         conn.close()
         return rows
 
-    def get_posts_by_date(self, date_str: str) -> list[tuple]:
-        """获取指定日期的所有帖子"""
+    def get_posts_by_window_no(self, window_no: str) -> list[tuple]:
+        """根据窗口编号获取所有帖子"""
         self._ensure_db()
         conn = sqlite3.connect(self.db_path)
         cur = conn.cursor()
         cur.execute(
             "SELECT link_id, daily_no FROM posts WHERE date_str = ? ORDER BY daily_no",
-            (date_str,)
+            (window_no,)
         )
         rows = cur.fetchall()
         conn.close()
@@ -452,29 +460,36 @@ class PostManager:
 
     # ==================== 帖子处理流程 ====================
 
-    async def process_single_post(self, link_id: int, window_start: int, window_end: int,
+    async def process_single_post(self, link_id: int, target_window_no: str = None,
                                    source: str = "feed", at_receive_time: int = None) -> bool:
-        """处理单个帖子：拉取详情、下载图片、入库"""
+        """处理单个帖子：拉取详情、下载图片、入库
+        
+        Args:
+            link_id: 帖子ID
+            target_window_no: 目标窗口编号（如 "20260621"），@消息时强制归入此窗口
+            source: 来源（"feed" 或 "at"）
+            at_receive_time: @消息收到时间戳（UTC，兼容旧代码）
+        """
         existing = self.get_existing_post(link_id)
         if existing:
-            _, content, image_urls, old_window, old_date, old_daily_no, old_source = existing
+            _, content, image_urls, old_window, old_date_str, old_daily_no, old_source = existing
             # 内容已完整拉取过
             if content and image_urls:
                 # @消息来源：检查是否需要重新编号到当前窗口
-                if source == "at":
-                    # 计算当前窗口的 date_str（daily_no 前缀）
-                    current_date_str = get_date_str_from_window(window_start)
-                    # 用 date_str 判断是否已在当前窗口（兼容旧数据 window_start 可能不准确的情况）
-                    if old_date == current_date_str:
-                        logger.info(f"link_id={link_id} 已完整拉取且在同一窗口(date_str={old_date})，跳过")
+                if source == "at" and target_window_no:
+                    # 用窗口编号判断是否已在同一窗口
+                    if old_date_str == target_window_no:
+                        logger.info(f"link_id={link_id} 已完整拉取且在同一窗口({old_date_str})，跳过")
                         return False
-                    # 重新分配到当前窗口
-                    logger.info(f"link_id={link_id} 已存在，@消息触发重新编号到当前窗口 (原date_str={old_date}, 新date_str={current_date_str})")
+                    # 重新分配到目标窗口
+                    logger.info(f"link_id={link_id} 已存在，@消息触发重新编号到窗口 {target_window_no} (原窗口={old_date_str})")
                     full_post = self._get_full_post(link_id)
                     if full_post:
-                        new_daily_no = self.get_next_daily_no(current_date_str)
+                        # 获取目标窗口的起止时间
+                        window_start, window_end = get_window_by_no(target_window_no)
+                        new_daily_no = self.get_next_daily_no(target_window_no)
                         self.save_post(
-                            link_id, new_daily_no, window_start, current_date_str,
+                            link_id, new_daily_no, window_start, target_window_no,
                             full_post["detail"], full_post["content"],
                             full_post["images"], full_post["topics"], source=source
                         )
@@ -485,7 +500,7 @@ class PostManager:
                         return False
                 else:
                     # feed 来源：跳过
-                    if old_window == window_start and old_source == source:
+                    if old_date_str == target_window_no and old_source == source:
                         logger.info(f"link_id={link_id} 已完整拉取且在同一窗口同一来源，跳过")
                     else:
                         logger.info(f"link_id={link_id} 已完整拉取，窗口/来源不同，跳过")
@@ -497,7 +512,6 @@ class PostManager:
             return False
 
         real_create_at = detail.get("create_at", 0)
-        real_create_str = detail.get("create_at_str", "")
 
         # 解析内容和下载图片
         content_raw = detail.get("content", "")
@@ -506,56 +520,56 @@ class PostManager:
         topics_list = detail.get("topics", [])
         topics_str = self.parse_topics(topics_list)
 
-        # 确定归属：根据帖子自身时间计算窗口，而不是拉取时的当前窗口
-        if source == "at" and at_receive_time:
-            # @消息：按收到时间计算窗口
-            post_window_start, post_window_end = get_window_for_timestamp(at_receive_time)
-            # daily_no 的日期前缀应对应窗口结束日
-            date_str = get_date_str_from_ts(post_window_end)
-            window_start_for_post = post_window_start
-            in_window = True
-            logger.info(f"@消息 link_id={link_id} 按收到时间归入 {date_str}, 窗口={ts_to_bj_str(post_window_start)}~{ts_to_bj_str(post_window_end)}")
+        # 确定归属窗口
+        if source == "at" and target_window_no:
+            # @消息：强制归入目标窗口
+            window_start, window_end = get_window_by_no(target_window_no)
+            window_no = target_window_no
+            logger.info(f"@消息 link_id={link_id} 强制归入窗口 {window_no}, 窗口={ts_to_bj_str(window_start)}~{ts_to_bj_str(window_end)}")
         else:
             # 推荐流：按帖子实际发布时间计算窗口
-            post_window_start, post_window_end = get_window_for_timestamp(real_create_at)
-            # daily_no 的日期前缀应对应窗口结束日
-            date_str = get_date_str_from_ts(post_window_end)
-            window_start_for_post = post_window_start
-            in_window = True
-            logger.info(f"推荐流 link_id={link_id} 按发布时间归入 {date_str}, 窗口={ts_to_bj_str(post_window_start)}~{ts_to_bj_str(post_window_end)}")
+            window_start, window_end = get_window_for_timestamp(real_create_at)
+            window_no = get_date_str_from_ts(window_end)
+            logger.info(f"推荐流 link_id={link_id} 按发布时间归入窗口 {window_no}, 窗口={ts_to_bj_str(window_start)}~{ts_to_bj_str(window_end)}")
 
-        # 获取编号
-        if in_window:
-            daily_no = self.get_next_daily_no(date_str)
-            self.save_post(link_id, daily_no, window_start_for_post, date_str, detail,
-                          content_text, saved_images, topics_str, source=source)
-            logger.info(f"✅ 帖子入库: daily_no=#{daily_no}, link_id={link_id}, "
-                       f"归属日期={date_str}, 作者={detail.get('username', '')}, 来源={source}")
-        else:
-            # 归档：不给编号
-            self.save_post(link_id, None, None, date_str, detail, content_text,
-                          saved_images, topics_str, source=source)
-            logger.info(f"📌 帖子归档: link_id={link_id}, 归属日期={date_str}, 来源={source}")
-
+        # 获取编号并入库
+        daily_no = self.get_next_daily_no(window_no)
+        self.save_post(link_id, daily_no, window_start, window_no, detail,
+                      content_text, saved_images, topics_str, source=source)
+        logger.info(f"✅ 帖子入库: daily_no=#{daily_no}, link_id={link_id}, "
+                   f"窗口编号={window_no}, 作者={detail.get('username', '')}, 来源={source}")
         return True
 
     async def process_posts(self, link_ids: list[int], source: str = "feed",
-                           at_receive_time: int = None) -> int:
+                           target_window_no: str = None, at_receive_time: int = None) -> int:
         """
         批量处理帖子列表
+        
+        Args:
+            link_ids: 帖子ID列表
+            source: 来源
+            target_window_no: 目标窗口编号（@消息时必须传入）
+            at_receive_time: 兼容旧代码
         """
         if not link_ids:
             return 0
 
-        window_start, window_end = get_today_window()
-        today_date = get_date_str_from_window(window_start)
-        logger.info(f"处理帖子列表: 时间窗口 {ts_to_bj_str(window_start)} ~ {ts_to_bj_str(window_end)} (北京时间), "
-                   f"今日日期={today_date}, 共 {len(link_ids)} 个帖子, 来源={source}")
+        # 确定处理时使用的窗口信息（仅用于日志展示）
+        if target_window_no:
+            window_start, window_end = get_window_by_no(target_window_no)
+            log_window_no = target_window_no
+        else:
+            window_start, window_end = get_current_window()
+            log_window_no = get_current_window_no()
+
+        logger.info(f"处理帖子列表: 窗口编号={log_window_no}, "
+                   f"时间范围 {ts_to_bj_str(window_start)} ~ {ts_to_bj_str(window_end)} (北京时间), "
+                   f"共 {len(link_ids)} 个帖子, 来源={source}")
 
         processed_count = 0
         for idx, link_id in enumerate(link_ids):
             success = await self.process_single_post(
-                link_id, window_start, window_end,
+                link_id, target_window_no=target_window_no,
                 source=source, at_receive_time=at_receive_time
             )
             if success:
@@ -566,5 +580,5 @@ class PostManager:
                 logger.info(f"等待 {wait_sec} 秒后处理下一个...")
                 await asyncio.sleep(wait_sec)
 
-        logger.info(f"本次共处理 {processed_count}/{len(link_ids)} 个帖子 (来源={source})")
+        logger.info(f"本次共处理 {processed_count}/{len(link_ids)} 个帖子 (来源={source}, 窗口={log_window_no})")
         return processed_count

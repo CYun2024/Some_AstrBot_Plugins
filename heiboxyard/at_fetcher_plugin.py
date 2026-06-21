@@ -8,7 +8,7 @@ from typing import Optional
 
 from astrbot.api import logger
 
-from .utils import ts_to_bj_str, get_date_str_from_ts
+from .utils import get_current_window_no, get_window_by_no, ts_to_bj_str
 
 
 class AtMessageFetcher:
@@ -94,10 +94,14 @@ class AtMessageFetcher:
     async def fetch_and_process(self) -> int:
         """
         拉取 @消息并处理帖子
+        所有@消息归入当前窗口编号
         返回处理的帖子数量
         """
         try:
-            now_ts = int(datetime.now(timezone.utc).timestamp())
+            # 确定当前窗口编号
+            target_window_no = get_current_window_no()
+            logger.info(f"@消息拉取: 当前窗口编号={target_window_no}")
+
             link_ids = await self.post_manager.fetch_at_messages(recent_hours=self.recent_hours)
             if not link_ids:
                 logger.info("本次 @消息拉取为空")
@@ -105,7 +109,7 @@ class AtMessageFetcher:
 
             logger.info(f"@消息拉取到 {len(link_ids)} 个帖子，开始处理...")
             processed = await self.post_manager.process_posts(
-                link_ids, source="at", at_receive_time=now_ts
+                link_ids, source="at", target_window_no=target_window_no
             )
             return processed
 
@@ -117,9 +121,13 @@ class AtMessageFetcher:
                            recent_hours: int = None) -> int:
         """
         手动触发 @消息拉取
+        所有@消息归入当前窗口编号
         """
         try:
-            now_ts = int(datetime.now(timezone.utc).timestamp())
+            # 确定当前窗口编号
+            target_window_no = get_current_window_no()
+            logger.info(f"手动 @消息拉取: 当前窗口编号={target_window_no}")
+
             if recent_hours is not None:
                 link_ids = await self.post_manager.fetch_at_messages(recent_hours=recent_hours)
             elif start_time and end_time:
@@ -133,7 +141,7 @@ class AtMessageFetcher:
 
             logger.info(f"手动 @消息拉取到 {len(link_ids)} 个帖子，开始处理...")
             processed = await self.post_manager.process_posts(
-                link_ids, source="at", at_receive_time=now_ts
+                link_ids, source="at", target_window_no=target_window_no
             )
             return processed
 
