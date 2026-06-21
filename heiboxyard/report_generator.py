@@ -12,6 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, Callable
 
+import aiohttp
 from astrbot.api import logger
 
 from .templates import HTMLTemplates
@@ -26,6 +27,9 @@ class EveningReportGenerator:
         self.data_dir.mkdir(exist_ok=True)
         self.reports_dir = self.data_dir / "reports"
         self.reports_dir.mkdir(exist_ok=True)
+        # 头像缓存目录
+        self.avatar_cache_dir = self.data_dir / "avatar_cache"
+        self.avatar_cache_dir.mkdir(exist_ok=True)
 
     # ================================================================
     # 主入口：生成完整晚报 HTML
@@ -115,8 +119,12 @@ class EveningReportGenerator:
 
         comment = post.get("comment", "") or "暂无评论"
 
+        # daily_no 可能是字符串格式如 "20260620-1"
+        daily_no = post.get("daily_no", 0)
+        daily_no_str = str(daily_no) if daily_no else "0"
+
         return {
-            "daily_no": post.get("daily_no", 0),
+            "daily_no": daily_no_str,
             "title": post.get("title", "(无标题)"),
             "username": post.get("username", "未知用户"),
             "avatar_data": avatar_data,
@@ -126,6 +134,116 @@ class EveningReportGenerator:
             "image_data_list": image_data_list,
             "image_count": len(image_data_list),
         }
+
+    # ================================================================
+    # 头像处理（修复版：支持下载网络头像）
+    # ================================================================
+
+    def _resolve_avatar(self, avatar: str) -> str:
+        """解析头像，支持本地路径、HTTP URL，失败返回默认头像"""
+        if not avatar:
+            return self._get_default_avatar()
+
+        # 1. 本地路径且存在
+        if os.path.exists(avatar):
+            return self._image_to_base64(avatar) or self._get_default_avatar()
+
+        # 2. HTTP URL：尝试下载并缓存
+        if avatar.startswith("http"):
+            cached = self._get_cached_avatar(avatar)
+            if cached:
+                return cached
+            # 同步下载（晚报生成通常在异步上下文外调用）
+            try:
+                downloaded = self._download_avatar_sync(avatar)
+                if downloaded:
+                    return downloaded
+            except Exception as e:
+                logger.warning(f"下载头像失败 {avatar}: {e}")
+            return self._get_default_avatar()
+
+        return self._get_default_avatar()
+
+    def _get_cached_avatar(self, url: str) -> Optional[str]:
+        """检查是否有缓存的头像 base64"""
+        import hashlib
+        url_hash = hashlib.md5(url.encode()).hexdigest()
+        cache_path = self.avatar_cache_dir / f"{url_hash}.txt"
+        if cache_path.exists():
+            try:
+                return cache_path.read_text(encoding="utf-8")
+            except Exception:
+                pass
+        return None
+
+    def _save_avatar_cache(self, url: str, base64_data: str):
+        """缓存头像 base64"""
+        import hashlib
+        url_hash = hashlib.md5(url.encode()).hexdigest()
+        cache_path = self.avatar_cache_dir / f"{url_hash}.txt"
+        try:
+            cache_path.write_text(base64_data, encoding="utf-8")
+        except Exception as e:
+            logger.warning(f"保存头像缓存失败: {e}")
+
+    def _download_avatar_sync(self, url: str) -> Optional[str]:
+        """同步下载头像并转为 base64（用于非异步上下文）"""
+        import urllib.request
+        import urllib.error
+        try:
+            req = urllib.request.Request(url, headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            })
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = resp.read()
+                if not data:
+                    return None
+
+                mime = "image/jpeg"
+                if data.startswith(b"\x89PNG"):
+                    mime = "image/png"
+                elif data.startswith(b"GIF8"):
+                    mime = "image/gif"
+                elif data.startswith(b"RIFF"):
+                    mime = "image/webp"
+
+                b64 = base64.b64encode(data).decode("utf-8")
+                result = f"data:{mime};base64,{b64}"
+                self._save_avatar_cache(url, result)
+                return result
+        except Exception as e:
+            logger.warning(f"同步下载头像失败 {url}: {e}")
+            return None
+
+    async def _download_avatar_async(self, url: str) -> Optional[str]:
+        """异步下载头像并转为 base64"""
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=10),
+                                       headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                }) as resp:
+                    if resp.status != 200:
+                        return None
+                    data = await resp.read()
+                    if not data:
+                        return None
+
+                    mime = "image/jpeg"
+                    if data.startswith(b"\x89PNG"):
+                        mime = "image/png"
+                    elif data.startswith(b"GIF8"):
+                        mime = "image/gif"
+                    elif data.startswith(b"RIFF"):
+                        mime = "image/webp"
+
+                    b64 = base64.b64encode(data).decode("utf-8")
+                    result = f"data:{mime};base64,{b64}"
+                    self._save_avatar_cache(url, result)
+                    return result
+        except Exception as e:
+            logger.warning(f"异步下载头像失败 {url}: {e}")
+            return None
 
     # ================================================================
     # T2I 图片渲染（核心新增！）
@@ -139,16 +257,6 @@ class EveningReportGenerator:
     ) -> Optional[str]:
         """
         将 HTML 渲染为图片，返回 base64:// 或文件路径
-
-        Args:
-            html_content: 完整的 HTML 字符串
-            html_render_func: AstrBot 的 T2I 渲染函数，通常是:
-                context.get_t2i_render().render(html_content, {}, return_url=False, image_options=...)
-                或 astrbot 提供的类似函数
-            image_options: 渲染参数，如 {"type": "png", "quality": "ultra"}
-
-        Returns:
-            base64:// 开头的图片数据，或本地文件路径
         """
         if not html_content:
             logger.error("HTML 内容为空，无法渲染图片")
@@ -160,12 +268,10 @@ class EveningReportGenerator:
         try:
             logger.info(f"开始 T2I 渲染，HTML 长度: {len(html_content)} 字符")
 
-            # 调用 AstrBot 的 T2I 渲染
-            # html_render_func 签名: (html_str, data_dict, return_url, image_options) -> bytes | str
             image_data = await html_render_func(
                 html_content,
-                {},           # 空数据，因为 HTML 已包含所有内容
-                False,        # return_url=False，返回 bytes
+                {},
+                False,
                 image_options,
             )
 
@@ -173,7 +279,6 @@ class EveningReportGenerator:
                 logger.error("T2I 渲染返回空数据")
                 return None
 
-            # 校验是否为合法图片
             is_valid = False
             actual_data = None
 
@@ -188,18 +293,16 @@ class EveningReportGenerator:
                 logger.warning(f"T2I 返回了非预期的数据类型: {type(image_data)}")
                 return None
 
-            # 检查 magic numbers
-            if data_head.startswith(b"\xff\xd8"):      # JPEG
+            if data_head.startswith(b"\xff\xd8"):
                 is_valid = True
-            elif data_head.startswith(b"\x89PNG"):      # PNG
+            elif data_head.startswith(b"\x89PNG"):
                 is_valid = True
-            elif data_head.startswith(b"GIF8"):         # GIF
+            elif data_head.startswith(b"GIF8"):
                 is_valid = True
             elif data_head.startswith(b"RIFF") and b"WEBP" in data_head[:16]:
                 is_valid = True
 
             if not is_valid:
-                # 尝试解析 HTML 错误
                 html_error = None
                 try:
                     html_text = actual_data[:4096].decode("utf-8", errors="ignore")
@@ -215,7 +318,6 @@ class EveningReportGenerator:
                 logger.error(f"渲染结果不是有效图片 (头部: {data_head[:4].hex()})")
                 return None
 
-            # 转换为 base64
             if isinstance(image_data, bytes):
                 b64 = base64.b64encode(image_data).decode("utf-8")
                 image_url = f"base64://{b64}"
@@ -255,18 +357,6 @@ class EveningReportGenerator:
     # ================================================================
     # 工具方法
     # ================================================================
-
-    def _resolve_avatar(self, avatar: str) -> str:
-        if not avatar:
-            return self._get_default_avatar()
-
-        if avatar.startswith("http"):
-            return self._get_default_avatar()
-
-        if os.path.exists(avatar):
-            return self._image_to_base64(avatar) or self._get_default_avatar()
-
-        return self._get_default_avatar()
 
     def _image_to_base64(self, image_path: str) -> Optional[str]:
         try:

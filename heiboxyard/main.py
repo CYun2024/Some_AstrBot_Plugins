@@ -16,7 +16,12 @@ from astrbot.api import logger
 import astrbot.api.message_components as Comp
 from astrbot.api import AstrBotConfig
 
-from .utils import clean_html_tags, get_today_window, get_analysis_window, ts_to_bj_str, parse_time_str, get_next_target_time
+from .utils import (
+    clean_html_tags, get_today_window, get_analysis_window, ts_to_bj_str,
+    parse_time_str, get_next_target_time, get_today_date_str, get_date_str_from_window,
+    get_window_for_date, parse_daily_no, format_daily_no,
+    get_today_daily_no_prefix, get_window_start_from_daily_prefix
+)
 from .post_manager import PostManager
 from .at_fetcher_plugin import AtMessageFetcher
 from .llm_analyzer import LLMPostAnalyzer
@@ -249,20 +254,28 @@ class HeiboxYard(Star):
 
     async def _run_llm_analysis(self):
         try:
-            window_start, window_end = get_analysis_window()
-            logger.info(f"LLM 分析窗口: {ts_to_bj_str(window_start)} ~ {ts_to_bj_str(window_end)}")
+            today_prefix = get_today_daily_no_prefix()
+            window_start = get_window_start_from_daily_prefix(today_prefix)
+            logger.info(f"LLM 分析: 今日编号前缀={today_prefix}, window_start={ts_to_bj_str(window_start)}")
 
-            existing = self.llm_analyzer.db.get_existing_analysis_count(window_start)
-            if existing > 0:
-                logger.info(f"窗口内已有 {existing} 条分析记录，跳过")
-                return
-
+            # 检查是否已有分析记录（按 daily_no 前缀）
             conn = sqlite3.connect(self.db_path)
             cur = conn.cursor()
             cur.execute(
+                "SELECT COUNT(*) FROM llm_analyses WHERE daily_no LIKE ? || '-%'",
+                (today_prefix,)
+            )
+            existing = cur.fetchone()[0]
+            if existing > 0:
+                logger.info(f"今日已有 {existing} 条分析记录，跳过")
+                conn.close()
+                return
+
+            # 查询今日编号的帖子（包括 feed 和 at）
+            cur.execute(
                 "SELECT link_id, daily_no, title, create_at, userid, username, content, image_urls "
-                "FROM posts WHERE window_start = ? ORDER BY daily_no",
-                (window_start,)
+                "FROM posts WHERE daily_no LIKE ? || '-%' ORDER BY daily_no",
+                (today_prefix,)
             )
             rows = cur.fetchall()
             conn.close()
@@ -326,7 +339,8 @@ class HeiboxYard(Star):
 
     async def _generate_and_save_evening_report(self, send: bool = False):
         try:
-            window_start, _ = get_analysis_window()
+            today_prefix = get_today_daily_no_prefix()
+            today_date = today_prefix
 
             conn = sqlite3.connect(self.db_path)
             cur = conn.cursor()
@@ -334,9 +348,9 @@ class HeiboxYard(Star):
                 SELECT p.daily_no, p.title, p.username, p.userid, p.avatar,
                        p.create_at, p.content, p.image_urls, l.comment
                 FROM posts p
-                LEFT JOIN llm_analyses l ON p.link_id = l.link_id AND l.window_start = p.window_start
-                WHERE p.window_start = ? ORDER BY p.daily_no
-            """, (window_start,))
+                LEFT JOIN llm_analyses l ON p.link_id = l.link_id AND l.daily_no = p.daily_no
+                WHERE p.daily_no LIKE ? || '-%' ORDER BY p.daily_no
+            """, (today_prefix,))
             rows = cur.fetchall()
             conn.close()
 
@@ -447,17 +461,12 @@ class HeiboxYard(Star):
             logger.info(f"手动 @消息拉取完成: {count} 个帖子")
         asyncio.create_task(_run())
 
-    @filter.command("刷取昨日at")
+    @filter.command("刷取当前窗口at")
     async def cmd_manual_at_fetch_yesterday(self, event: AstrMessageEvent):
         """手动拉取昨日22:00到现在的@消息"""
-        from datetime import datetime, timezone, timedelta
-
         now_bj = datetime.now(timezone(timedelta(hours=8)))
         today_22 = now_bj.replace(hour=22, minute=0, second=0, microsecond=0)
-
-        # 固定拉取昨天22:00到现在
         start = today_22 - timedelta(days=1)
-
         start_str = start.strftime("%Y-%m-%d %H:%M:%S")
         end_str = now_bj.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -477,17 +486,18 @@ class HeiboxYard(Star):
     @filter.command("重置今日")
     async def cmd_reset_today(self, event: AstrMessageEvent):
         window_start, _ = get_today_window()
+        today_date = get_date_str_from_window(window_start)
         existing_posts = self.post_manager.get_posts_in_window(window_start)
 
         if not existing_posts:
-            yield event.plain_result("📭 当前时间窗口内还没有帖子，无法重置。")
+            yield event.plain_result(f"📭 今日 ({today_date}) 窗口内还没有帖子，无法重置。")
             return
 
         count = len(existing_posts)
-        yield event.plain_result(f"🔄 开始重置今日 {count} 条帖子...")
-        asyncio.create_task(self._reset_today_posts(existing_posts, window_start))
+        yield event.plain_result(f"🔄 开始重置今日 {today_date} 的 {count} 条帖子...")
+        asyncio.create_task(self._reset_today_posts(existing_posts, window_start, today_date))
 
-    async def _reset_today_posts(self, existing_posts: list[tuple[int, int]], window_start: int):
+    async def _reset_today_posts(self, existing_posts: list[tuple[int, str]], window_start: int, today_date: str):
         success_count = 0
         for idx, (link_id, old_daily_no) in enumerate(existing_posts):
             logger.info(f"重置进度 {idx+1}/{len(existing_posts)}: link_id={link_id} (原 #{old_daily_no})")
@@ -498,8 +508,7 @@ class HeiboxYard(Star):
                 continue
 
             real_create_at = detail.get("create_at", 0)
-            window_end = window_start + 24 * 3600
-            in_window = window_start <= real_create_at < window_end
+            in_window = window_start <= real_create_at < window_start + 24 * 3600
 
             content_text, image_urls = self.post_manager.parse_content(detail.get("content", ""))
             self.post_manager.delete_image_analyses(link_id)
@@ -511,12 +520,14 @@ class HeiboxYard(Star):
             topics_str = self.post_manager.parse_topics(detail.get("topics", []))
 
             if in_window:
-                self.post_manager.save_post(link_id, old_daily_no, window_start, detail,
-                                            content_text, saved_images, topics_str)
-                logger.info(f"✅ 重置成功: #{old_daily_no}, link_id={link_id}")
+                # 重新分配编号
+                new_daily_no = self.post_manager.get_next_daily_no(today_date)
+                self.post_manager.save_post(link_id, new_daily_no, window_start, today_date, detail,
+                                            content_text, saved_images, topics_str, source="feed")
+                logger.info(f"✅ 重置成功: #{new_daily_no}, link_id={link_id}")
             else:
-                self.post_manager.save_post(link_id, None, None, detail,
-                                            content_text, saved_images, topics_str)
+                self.post_manager.save_post(link_id, None, None, today_date, detail,
+                                            content_text, saved_images, topics_str, source="feed")
                 logger.info(f"📌 已移出窗口: link_id={link_id}")
 
             success_count += 1
@@ -528,6 +539,7 @@ class HeiboxYard(Star):
     @filter.command("今日帖子")
     async def cmd_today_posts(self, event: AstrMessageEvent):
         window_start, window_end = get_today_window()
+        today_date = get_date_str_from_window(window_start)
 
         conn = sqlite3.connect(self.db_path)
         cur = conn.cursor()
@@ -540,12 +552,10 @@ class HeiboxYard(Star):
         conn.close()
 
         if not rows:
-            yield event.plain_result("📭 当前时间窗口内还没有拉取到帖子。")
+            yield event.plain_result(f"📭 今日 ({today_date}) 窗口内还没有拉取到帖子。")
             return
 
-        header = "📋 今日帖子列表（{} ~ {}）：\n".format(
-            ts_to_bj_str(window_start), ts_to_bj_str(window_end)
-        )
+        header = f"📋 今日帖子列表 ({today_date}):\n"
         lines = [header]
         
         for link_id, daily_no, title, create_at, userid, username, avatar, topics, content, source in rows:
@@ -564,7 +574,6 @@ class HeiboxYard(Star):
 
             source_icon = "📨" if source == "at" else "📰"
             
-            # 使用 .format() 或普通字符串拼接，避免 f-string 跨多行问题
             post_text = (
                 "━━━━━━━━━━━━━━\n"
                 "{source_icon} 编号: #{daily_no}\n"
@@ -593,29 +602,37 @@ class HeiboxYard(Star):
         msg = event.message_str.strip()
         parts = msg.split()
         if len(parts) < 2:
-            yield event.plain_result("❌ 用法: /今日 <帖子编号>\n例如: /今日 1")
+            yield event.plain_result("❌ 用法: /今日 <帖子编号>\n例如: /今日 20260620-1")
             return
 
-        try:
-            daily_no = int(parts[1])
-        except ValueError:
-            yield event.plain_result("❌ 帖子编号必须是数字")
+        daily_no_input = parts[1]
+        # 支持输入 20260620-1 或 1（自动补全今日日期）
+        if "-" in daily_no_input:
+            date_str, seq_no = parse_daily_no(daily_no_input)
+        else:
+            window_start, _ = get_today_window()
+            date_str = get_date_str_from_window(window_start)
+            seq_no = int(daily_no_input) if daily_no_input.isdigit() else 0
+            daily_no_input = format_daily_no(date_str, seq_no)
+
+        if not date_str or seq_no <= 0:
+            yield event.plain_result("❌ 帖子编号格式错误，应为 YYYYMMDD-N 或 N")
             return
 
-        window_start, _ = get_today_window()
+        window_start, window_end = get_window_for_date(date_str)
 
         conn = sqlite3.connect(self.db_path)
         cur = conn.cursor()
         cur.execute(
             "SELECT link_id, daily_no, title, create_at, userid, username, avatar, topics, content, image_urls "
-            "FROM posts WHERE window_start = ? AND daily_no = ?",
-            (window_start, daily_no)
+            "FROM posts WHERE daily_no = ?",
+            (daily_no_input,)
         )
         row = cur.fetchone()
         conn.close()
 
         if not row:
-            yield event.plain_result(f"❌ 今日没有找到编号为 #{daily_no} 的帖子")
+            yield event.plain_result(f"❌ 没有找到编号为 #{daily_no_input} 的帖子")
             return
 
         link_id, daily_no, title, create_at, userid, username, avatar, topics, content, image_urls = row
@@ -632,7 +649,6 @@ class HeiboxYard(Star):
             except:
                 pass
 
-        # 使用普通字符串拼接
         text_part = (
             "📌 帖子详情 [编号 #{daily_no}]\n"
             "━━━━━━━━━━━━━━\n"
@@ -690,23 +706,24 @@ class HeiboxYard(Star):
 
     @filter.command("分析今日帖子")
     async def cmd_analyze_today(self, event: AstrMessageEvent):
-        window_start, window_end = get_analysis_window()
+        today_prefix = get_today_daily_no_prefix()
         yield event.plain_result(
-            f"🤖 正在启动 LLM 分析（{ts_to_bj_str(window_start)} ~ {ts_to_bj_str(window_end)}），请稍候..."
+            f"🤖 正在启动 LLM 分析（今日编号 {today_prefix}），请稍候..."
         )
         asyncio.create_task(self._run_llm_analysis())
 
     @filter.command("今日分析")
     async def cmd_today_analysis(self, event: AstrMessageEvent):
         try:
-            window_start, _ = get_analysis_window()
-            report = await self.llm_analyzer.get_report(window_start)
+            today_prefix = get_today_daily_no_prefix()
+            today_date = today_prefix
+            report = await self.llm_analyzer.get_report_by_prefix(today_prefix)
 
             if not report:
-                yield event.plain_result("📭 今日还没有 LLM 分析报告")
+                yield event.plain_result(f"📭 今日 ({today_date}) 还没有 LLM 分析报告")
                 return
 
-            lines = [f"📊 帖子 LLM 分析评论（{ts_to_bj_str(window_start)}）\n"]
+            lines = [f"📊 帖子 LLM 分析评论 ({today_date})\n"]
             for item in report:
                 lines.append(
                     f"━━━━━━━━━━━━━━\n"
@@ -722,7 +739,8 @@ class HeiboxYard(Star):
 
     @filter.command("生成晚报")
     async def cmd_generate_report(self, event: AstrMessageEvent):
-        window_start, _ = get_analysis_window()
+        today_prefix = get_today_daily_no_prefix()
+        today_date = today_prefix
 
         conn = sqlite3.connect(self.db_path)
         cur = conn.cursor()
@@ -730,14 +748,14 @@ class HeiboxYard(Star):
             SELECT p.daily_no, p.title, p.username, p.userid, p.avatar,
                    p.create_at, p.content, p.image_urls, l.comment
             FROM posts p
-            LEFT JOIN llm_analyses l ON p.link_id = l.link_id AND l.window_start = p.window_start
-            WHERE p.window_start = ? ORDER BY p.daily_no
-        """, (window_start,))
+            LEFT JOIN llm_analyses l ON p.link_id = l.link_id AND l.daily_no = p.daily_no
+            WHERE p.daily_no LIKE ? || '-%' ORDER BY p.daily_no
+        """, (today_prefix,))
         rows = cur.fetchall()
         conn.close()
 
         if not rows:
-            yield event.plain_result("📭 今日没有帖子数据，无法生成晚报")
+            yield event.plain_result(f"📭 今日 ({today_date}) 没有帖子数据，无法生成晚报")
             return
 
         posts = []

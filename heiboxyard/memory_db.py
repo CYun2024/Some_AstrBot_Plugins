@@ -201,7 +201,6 @@ class UserMemoryDB:
         if profile:
             lines.append(f"【{username} 的历史画像】")
             lines.append(f"- 历史发帖数: {profile['post_count']}")
-            # lines.append(f"- 常见标签: {', '.join(profile['common_tags']) or '无'}")  # 已禁用
             lines.append(f"- 主要情感倾向: {profile['common_sentiment']}")
 
         if history:

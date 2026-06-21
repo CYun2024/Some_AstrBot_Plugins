@@ -8,7 +8,7 @@ from typing import Optional
 
 from astrbot.api import logger
 
-from .utils import ts_to_bj_str
+from .utils import ts_to_bj_str, get_date_str_from_ts
 
 
 class AtMessageFetcher:
@@ -19,13 +19,6 @@ class AtMessageFetcher:
 
     def __init__(self, post_manager, fetch_hours: list[int] = None,
                  recent_hours: int = 6, enabled: bool = True):
-        """
-        Args:
-            post_manager: PostManager 实例
-            fetch_hours: 拉取时间点列表（北京时间小时），默认 [4, 10, 16, 22]
-            recent_hours: 每次拉取最近 N 小时的 @消息
-            enabled: 是否启用
-        """
         self.post_manager = post_manager
         self.fetch_hours = fetch_hours or self.DEFAULT_FETCH_HOURS
         self.recent_hours = recent_hours
@@ -71,7 +64,6 @@ class AtMessageFetcher:
         now_bj = datetime.now(timezone(timedelta(hours=8)))
         current_hour = now_bj.hour
 
-        # 找到下一个拉取时间点
         next_hour = None
         for h in sorted(self.fetch_hours):
             if h > current_hour:
@@ -79,13 +71,11 @@ class AtMessageFetcher:
                 break
 
         if next_hour is None:
-            # 今天的都已经过了，取明天的第一个
             next_hour = min(self.fetch_hours)
             target = now_bj.replace(hour=next_hour, minute=0, second=0, microsecond=0) + timedelta(days=1)
         else:
             target = now_bj.replace(hour=next_hour, minute=0, second=0, microsecond=0)
 
-        # 如果目标时间已经过了（比如正好在目标时间点），跳到下一个周期
         if target <= now_bj:
             target = target + timedelta(days=1)
 
@@ -107,13 +97,16 @@ class AtMessageFetcher:
         返回处理的帖子数量
         """
         try:
+            now_ts = int(datetime.now(timezone.utc).timestamp())
             link_ids = await self.post_manager.fetch_at_messages(recent_hours=self.recent_hours)
             if not link_ids:
                 logger.info("本次 @消息拉取为空")
                 return 0
 
             logger.info(f"@消息拉取到 {len(link_ids)} 个帖子，开始处理...")
-            processed = await self.post_manager.process_posts(link_ids, source="at")
+            processed = await self.post_manager.process_posts(
+                link_ids, source="at", at_receive_time=now_ts
+            )
             return processed
 
         except Exception as e:
@@ -124,12 +117,9 @@ class AtMessageFetcher:
                            recent_hours: int = None) -> int:
         """
         手动触发 @消息拉取
-        Args:
-            start_time: 开始时间 "YYYY-MM-DD HH:MM:SS"
-            end_time: 结束时间 "YYYY-MM-DD HH:MM:SS"
-            recent_hours: 最近 N 小时
         """
         try:
+            now_ts = int(datetime.now(timezone.utc).timestamp())
             if recent_hours is not None:
                 link_ids = await self.post_manager.fetch_at_messages(recent_hours=recent_hours)
             elif start_time and end_time:
@@ -142,7 +132,9 @@ class AtMessageFetcher:
                 return 0
 
             logger.info(f"手动 @消息拉取到 {len(link_ids)} 个帖子，开始处理...")
-            processed = await self.post_manager.process_posts(link_ids, source="at")
+            processed = await self.post_manager.process_posts(
+                link_ids, source="at", at_receive_time=now_ts
+            )
             return processed
 
         except Exception as e:

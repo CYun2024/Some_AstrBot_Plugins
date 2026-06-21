@@ -52,7 +52,7 @@ ANALYSIS_SYSTEM_PROMPT = """你叫韶梦，是一只14岁猫娘萝莉，
 {
   "analyses": [
     {
-      "daily_no": 帖子编号,
+      "daily_no": "帖子编号（如 20260620-1）",
       "comment": "你的评论内容",
       "sentiment": "positive|neutral|negative"
     }
@@ -70,6 +70,18 @@ ANALYSIS_SYSTEM_PROMPT = """你叫韶梦，是一只14岁猫娘萝莉，
 1. 必须返回合法的 JSON，不要 markdown 代码块包裹
 2. 每个帖子都要有评论
 3. 评论要有信息量，不要敷衍"不错""挺好的"之类
+
+【JSON 输出规范 - 必须严格遵守】
+1. 必须返回纯 JSON，不要任何 markdown 代码块标记（不要 ```json 或 ```）
+2. 必须确保每个 analyses 数组元素都有完整的大括号 { 和 }
+3. 元素之间用逗号分隔，最后一个元素后不要加逗号
+4. JSON 中不要包含任何注释、说明文字或其他非 JSON 内容
+5. 示例格式（请严格遵循此格式，不要换行美化）：
+
+{"analyses":[{"daily_no":"20260620-1","comment":"评论内容","sentiment":"positive"},{"daily_no":"20260620-2","comment":"评论内容","sentiment":"neutral"}]}
+
+6. 特别注意：每个 { 和 } 都必须成对出现，不要遗漏任何括号
+7. 不要输出除了 JSON 之外的任何内容
 
 """
 
@@ -127,7 +139,7 @@ class LLMAnalysisDB:
                 CREATE TABLE llm_analyses (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     window_start INTEGER NOT NULL,
-                    daily_no INTEGER NOT NULL,
+                    daily_no TEXT NOT NULL,
                     link_id INTEGER NOT NULL,
                     title TEXT,
                     username TEXT,
@@ -160,16 +172,64 @@ class LLMAnalysisDB:
             if "image_descriptions" not in existing_cols:
                 migrations.append("ALTER TABLE llm_analyses ADD COLUMN image_descriptions TEXT")
             if "comment" not in existing_cols:
-                # 旧版有 score/category/summary/strengths/weaknesses/sentiment/recommendation
-                # 新版用 comment 替代
                 migrations.append("ALTER TABLE llm_analyses ADD COLUMN comment TEXT")
+            if "daily_no" in existing_cols:
+                # 检查 daily_no 是否为 TEXT 类型
+                cur.execute("PRAGMA table_info(llm_analyses)")
+                for row in cur.fetchall():
+                    if row[1] == "daily_no" and row[2] != "TEXT":
+                        # 需要重建表来修改类型
+                        migrations.append("RECREATE_TABLE_FOR_DAILY_NO_TEXT")
+                        break
 
             for sql in migrations:
-                try:
-                    cur.execute(sql)
-                    logger.info(f"LLM分析表迁移: {sql}")
-                except Exception as e:
-                    logger.warning(f"迁移跳过: {sql} - {e}")
+                if sql == "RECREATE_TABLE_FOR_DAILY_NO_TEXT":
+                    # SQLite 不支持直接修改列类型，需要重建表
+                    try:
+                        cur.execute("""
+                            CREATE TABLE llm_analyses_new (
+                                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                window_start INTEGER NOT NULL,
+                                daily_no TEXT NOT NULL,
+                                link_id INTEGER NOT NULL,
+                                title TEXT,
+                                username TEXT,
+                                userid INTEGER,
+                                create_at INTEGER,
+                                create_at_str TEXT,
+                                content_length INTEGER,
+                                image_count INTEGER,
+                                image_paths TEXT,
+                                image_descriptions TEXT,
+                                comment TEXT,
+                                tags TEXT,
+                                raw_response TEXT,
+                                analyzed_at TEXT,
+                                model_used TEXT,
+                                UNIQUE(window_start, daily_no)
+                            )
+                        """)
+                        cur.execute("""
+                            INSERT INTO llm_analyses_new 
+                            SELECT id, window_start, CAST(daily_no AS TEXT), link_id, title, username, 
+                                   userid, create_at, create_at_str, content_length, image_count, 
+                                   image_paths, image_descriptions, comment, tags, raw_response, 
+                                   analyzed_at, model_used
+                            FROM llm_analyses
+                        """)
+                        cur.execute("DROP TABLE llm_analyses")
+                        cur.execute("ALTER TABLE llm_analyses_new RENAME TO llm_analyses")
+                        cur.execute("CREATE INDEX idx_analysis_window ON llm_analyses(window_start)")
+                        cur.execute("CREATE INDEX idx_analysis_window_no ON llm_analyses(window_start, daily_no)")
+                        logger.info("LLM分析表 daily_no 类型迁移为 TEXT")
+                    except Exception as e:
+                        logger.warning(f"daily_no 类型迁移失败: {e}")
+                else:
+                    try:
+                        cur.execute(sql)
+                        logger.info(f"LLM分析表迁移: {sql}")
+                    except Exception as e:
+                        logger.warning(f"迁移跳过: {sql} - {e}")
 
             conn.commit()
             logger.info("LLM 分析表迁移检查完成")
@@ -217,7 +277,7 @@ class LLMAnalysisDB:
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     window_start,
-                    daily_no,
+                    str(daily_no),
                     post.get('link_id', 0),
                     post.get('title', ''),
                     post.get('username', ''),
@@ -243,7 +303,7 @@ class LLMAnalysisDB:
         logger.info(f"已保存 {len(analyses)} 条分析结果")
 
 
-    def update_comment(self, window_start: int, daily_no: int, new_comment: str) -> bool:
+    def update_comment(self, window_start: int, daily_no: str, new_comment: str) -> bool:
         """手动更新指定帖子的 AI 评论"""
         try:
             conn = sqlite3.connect(self.db_path)
@@ -252,7 +312,7 @@ class LLMAnalysisDB:
                 UPDATE llm_analyses
                 SET comment = ?, analyzed_at = ?
                 WHERE window_start = ? AND daily_no = ?
-            """, (new_comment, datetime.now(timezone.utc).isoformat(), window_start, daily_no))
+            """, (new_comment, datetime.now(timezone.utc).isoformat(), window_start, str(daily_no)))
             conn.commit()
             affected = cur.rowcount
             conn.close()
@@ -301,6 +361,42 @@ class LLMAnalysisDB:
             logger.error(f"获取分析报告失败: {e}")
             return None
 
+
+
+    def get_analysis_report_by_prefix(self, daily_no_prefix: str) -> Optional[list[dict]]:
+        """获取指定 daily_no 前缀的完整分析报告"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT daily_no, link_id, title, username, create_at_str, content_length,
+                       image_count, comment, tags, analyzed_at, model_used
+                FROM llm_analyses
+                WHERE daily_no LIKE ? || '-%'
+                ORDER BY daily_no
+            """, (daily_no_prefix,))
+            rows = cur.fetchall()
+            conn.close()
+
+            results = []
+            for row in rows:
+                results.append({
+                    "daily_no": row[0],
+                    "link_id": row[1],
+                    "title": row[2],
+                    "username": row[3],
+                    "create_at_str": row[4],
+                    "content_length": row[5],
+                    "image_count": row[6],
+                    "comment": row[7],
+                    "tags": json.loads(row[8]) if row[8] else [],
+                    "analyzed_at": row[9],
+                    "model_used": row[10],
+                })
+            return results
+        except Exception as e:
+            logger.error(f"获取分析报告失败: {e}")
+            return None
 
 # ========== LLM 调用 ==========
 
@@ -477,3 +573,7 @@ class LLMPostAnalyzer:
     async def get_report(self, window_start: int) -> Optional[list[dict]]:
         """获取分析报告"""
         return self.db.get_analysis_report(window_start)
+
+    async def get_report_by_prefix(self, daily_no_prefix: str) -> Optional[list[dict]]:
+        """获取分析报告（按 daily_no 前缀）"""
+        return self.db.get_analysis_report_by_prefix(daily_no_prefix)
