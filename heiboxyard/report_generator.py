@@ -1,5 +1,5 @@
 """
-晚报报告生成器
+晚报报告生成器（重构版）
 负责将帖子数据 + AI评论 组装成 HTML 晚报，并支持转图片
 """
 
@@ -8,6 +8,7 @@ import base64
 import json
 import os
 import re
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Callable
@@ -42,7 +43,29 @@ class EveningReportGenerator:
         report_date: str,
         community_name: str = "庭院社区",
         theme: str = "default",
+        ai_summary: str = None,
+        total_comments: int = 0,
+        elapsed_time: str = None,
+        tokens_used: str = None,
+        cost_estimate: str = None,
+        model_used: str = None,
     ) -> str:
+        """
+        生成晚报 HTML
+
+        Args:
+            posts: 帖子列表
+            issue_no: 期号
+            report_date: 报告日期
+            community_name: 社区名称
+            theme: 主题
+            ai_summary: AI总评价（新增）
+            total_comments: AI评论总数（新增）
+            elapsed_time: 生成耗时（新增）
+            tokens_used: 消耗tokens（新增）
+            cost_estimate: 预估成本（新增）
+            model_used: 使用的模型（新增）
+        """
         total_posts = len(posts)
         total_images = sum(
             len(p.get("image_paths", [])) if isinstance(p.get("image_paths"), list)
@@ -58,8 +81,14 @@ class EveningReportGenerator:
             "community_name": community_name,
             "total_posts": total_posts,
             "total_images": total_images,
+            "total_comments": total_comments,
             "posts_html": posts_html,
+            "ai_summary": ai_summary or "暂无总评",
             "generation_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "elapsed_time": elapsed_time or "--",
+            "tokens_used": tokens_used or "--",
+            "cost_estimate": cost_estimate or "--",
+            "model_used": model_used or "--",
         }
 
         html_content = self.html_templates.render_template(
@@ -107,15 +136,11 @@ class EveningReportGenerator:
             except:
                 image_paths = []
 
-        for img_path in image_paths[:3]:
+        # 限制详情帖子最多展示5张图片
+        for img_path in image_paths[:5]:
             img_data = self._image_to_base64(img_path)
             if img_data:
                 image_data_list.append(img_data)
-
-        content = post.get("content", "") or ""
-        content_cleaned = self._clean_content(content)
-        if len(content_cleaned) > 300:
-            content_cleaned = content_cleaned[:300] + "..."
 
         comment = post.get("comment", "") or "暂无评论"
 
@@ -129,7 +154,6 @@ class EveningReportGenerator:
             "username": post.get("username", "未知用户"),
             "avatar_data": avatar_data,
             "create_at_str": post.get("create_at_str", ""),
-            "content": content_cleaned,
             "comment": comment,
             "image_data_list": image_data_list,
             "image_count": len(image_data_list),
@@ -246,7 +270,7 @@ class EveningReportGenerator:
             return None
 
     # ================================================================
-    # T2I 图片渲染（核心新增！）
+    # T2I 图片渲染
     # ================================================================
 
     async def render_html_to_image(
@@ -382,13 +406,6 @@ class EveningReportGenerator:
             return None
 
     def _get_default_avatar(self) -> str:
-        svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><circle cx="50" cy="50" r="50" fill="#ddd"/></svg>'
+        svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><circle cx="50" cy="50" r="50" fill="#8B0000"/><text x="50" y="58" font-size="40" fill="#fff" text-anchor="middle">?</text></svg>'
         b64 = base64.b64encode(svg.encode()).decode()
         return f"data:image/svg+xml;base64,{b64}"
-
-    def _clean_content(self, text: str) -> str:
-        if not text:
-            return ""
-        cleaned = re.sub(r'<[^>]+>', ' ', text)
-        cleaned = re.sub(r'\s+', ' ', cleaned).strip()
-        return cleaned

@@ -27,6 +27,7 @@ from .llm_analyzer import LLMPostAnalyzer
 from .image_analyzer import ImagePostAnalyzer
 from .memory_db import UserMemoryDB
 from .report_generator import EveningReportGenerator
+from .report_ai_summary import generate_ai_summary
 
 DEFAULT_PROGRAM_PATH = "heibox-comment-bot-master"
 
@@ -334,45 +335,59 @@ class HeiboxYard(Star):
                 hour, minute = parse_time_str(self.evening_report_time)
                 target = get_next_target_time(hour, minute)
                 wait_seconds = (target - datetime.now(timezone(timedelta(hours=8)))).total_seconds()
-                logger.info(f"晚报定时: 等待 {wait_seconds/3600:.1f} 小时到 {target.strftime('%Y-%m-%d %H:%M:%S')}")
+                logger.info("晚报定时: 等待 " + str(round(wait_seconds/3600, 1)) + " 小时到 " + target.strftime('%Y-%m-%d %H:%M:%S'))
                 await asyncio.sleep(wait_seconds)
 
                 logger.info("执行每日晚报生成")
                 await self._generate_and_save_evening_report(send=self.evening_report_auto_send)
             except Exception as e:
-                logger.error(f"晚报定时循环异常: {e}")
+                logger.error("晚报定时循环异常: " + str(e))
                 await asyncio.sleep(60)
 
     async def _generate_and_save_evening_report(self, window_no: str = None, send: bool = False):
         """生成晚报
-        
+
         Args:
             window_no: 窗口编号（如 "20260621"），None 则使用当前窗口
             send: 是否自动发送
         """
+        import time
+        start_time = time.time()
+
         try:
             if window_no is None:
                 window_no = get_current_window_no()
-            
+
             window_start, window_end = get_window_by_no(window_no)
 
             conn = sqlite3.connect(self.db_path)
             cur = conn.cursor()
+
+            # 获取帖子数据 + AI评论
             cur.execute("""
                 SELECT p.daily_no, p.title, p.username, p.userid, p.avatar,
-                       p.create_at, p.content, p.image_urls, l.comment
+                       p.create_at, p.content, p.image_urls, l.comment, l.model_used
                 FROM posts p
                 LEFT JOIN llm_analyses l ON p.link_id = l.link_id AND l.daily_no = p.daily_no
                 WHERE p.date_str = ? ORDER BY p.daily_no
             """, (window_no,))
             rows = cur.fetchall()
+
+            # 统计评论数
+            cur.execute("""
+                SELECT COUNT(*) FROM llm_analyses 
+                WHERE daily_no LIKE ? || '-%'
+            """, (window_no,))
+            total_comments = cur.fetchone()[0]
+
             conn.close()
 
             if not rows:
-                logger.info(f"窗口 {window_no} 没有帖子数据，跳过晚报")
+                logger.info("窗口 " + window_no + " 没有帖子数据，跳过晚报")
                 return
 
             posts = []
+            model_used_set = set()
             for row in rows:
                 posts.append({
                     "daily_no": row[0], "title": row[1], "username": row[2],
@@ -381,15 +396,44 @@ class HeiboxYard(Star):
                     "content": row[6], "image_paths": row[7],
                     "comment": row[8] or "暂无评论",
                 })
+                if row[9]:
+                    model_used_set.add(row[9])
+
+            # 生成AI总评价
+            ai_summary = await generate_ai_summary(
+                self.context, posts, window_no, self.llm_provider_id
+            )
+
+            elapsed = time.time() - start_time
+            elapsed_str = str(round(elapsed, 1)) + "s"
 
             report_date = datetime.fromtimestamp(window_end, tz=timezone(timedelta(hours=8))).strftime("%Y年%m月%d日")
+
+            # 估算tokens（粗略：每帖子约500 tokens）
+            estimated_tokens = len(posts) * 500
+            tokens_str = "~" + str(estimated_tokens)
+
+            # 估算成本（按0.003$/1K tokens）
+            cost_str = "~$" + str(round(estimated_tokens * 0.003 / 1000, 3))
+
+            model_str = ", ".join(model_used_set) if model_used_set else "--"
+
             html_content = self.report_generator.generate_evening_report(
-                posts=posts, issue_no=1, report_date=report_date,
-                community_name="庭院社区", theme="default"
+                posts=posts, 
+                issue_no=1, 
+                report_date=report_date,
+                community_name="庭院社区", 
+                theme="default",
+                ai_summary=ai_summary,
+                total_comments=total_comments,
+                elapsed_time=elapsed_str,
+                tokens_used=tokens_str,
+                cost_estimate=cost_str,
+                model_used=model_str,
             )
 
             html_path = self.report_generator.save_report(html_content)
-            logger.info(f"晚报 HTML 已保存: {html_path}")
+            logger.info("晚报 HTML 已保存: " + html_path)
 
             if self.evening_report_format == "html":
                 if send and self.evening_report_target_group:
@@ -402,14 +446,14 @@ class HeiboxYard(Star):
                         image_path = self.report_generator.save_image(img_data)
                     else:
                         image_path = image_url
-                    logger.info(f"晚报 PNG 已保存: {image_path}")
+                    logger.info("晚报 PNG 已保存: " + image_path)
                     if send and self.evening_report_target_group:
                         await self._send_image_to_group(self.evening_report_target_group, image_path)
                 else:
                     logger.error("晚报图片渲染失败")
 
         except Exception as e:
-            logger.error(f"生成晚报失败: {e}", exc_info=True)
+            logger.error("生成晚报失败: " + str(e), exc_info=True)
 
     async def _render_evening_report_image(self, html_content: str) -> Optional[str]:
         try:
@@ -419,10 +463,10 @@ class HeiboxYard(Star):
             if not image_url:
                 logger.error("html_render 返回空结果")
                 return None
-            logger.info(f"T2I 渲染成功: {image_url[:50]}...")
+            logger.info("T2I 渲染成功: " + image_url[:50] + "...")
             return image_url
         except Exception as e:
-            logger.error(f"渲染晚报图片失败: {e}", exc_info=True)
+            logger.error("渲染晚报图片失败: " + str(e), exc_info=True)
             return None
 
     # ==================== 发送方法 ====================
@@ -432,9 +476,9 @@ class HeiboxYard(Star):
             from astrbot.api.message_components import Image, Plain
             chain = [Plain("📰 庭院社区晚报"), Image.fromFileSystem(image_path)]
             await self.context.send_message(group_id, chain)
-            logger.info(f"晚报图片已发送到群 {group_id}")
+            logger.info("晚报图片已发送到群 " + group_id)
         except Exception as e:
-            logger.error(f"发送晚报图片失败: {e}")
+            logger.error("发送晚报图片失败: " + str(e))
 
     async def _send_file_to_group(self, group_id: str, file_path: str):
         try:
@@ -442,13 +486,13 @@ class HeiboxYard(Star):
             if adapter and hasattr(adapter, "upload_group_file"):
                 await adapter.upload_group_file(
                     group_id=group_id, file_path=file_path,
-                    file_name=f"庭院社区晚报_{datetime.now().strftime('%Y%m%d')}.html"
+                    file_name="庭院社区晚报_" + datetime.now().strftime('%Y%m%d') + ".html"
                 )
             else:
                 from astrbot.api.message_components import Plain
-                await self.context.send_message(group_id, [Plain(f"📰 晚报文件: {file_path}")])
+                await self.context.send_message(group_id, [Plain("📰 晚报文件: " + file_path)])
         except Exception as e:
-            logger.error(f"发送晚报文件失败: {e}")
+            logger.error("发送晚报文件失败: " + str(e))
 
     def _get_onebot_adapter(self):
         try:
@@ -459,7 +503,7 @@ class HeiboxYard(Star):
         except Exception:
             return None
 
-    # ==================== 指令 ====================
+# ==================== 指令 ====================
 
     @filter.command("刷取新内容")
     async def cmd_manual_fetch(self, event: AstrMessageEvent):
