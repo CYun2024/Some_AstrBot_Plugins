@@ -1,81 +1,30 @@
-{% if posts %}
+{% if posts and posts | length > 0 %}
 <div class="brief-section">
-    <div class="section-title">更多帖子</div>
-    
+    <div class="section-title" style="margin-top:16px;">更多帖子</div>
+
     {% for post in posts %}
     <div class="post-brief">
         <div class="brief-left">
-            <img src="{{ post.avatar_data }}" class="brief-avatar" alt="头像">
+            <img src="{{ post.avatar_data | default('data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMDAgMTAwIj48Y2lyY2xlIGN4PSI1MCIgY3k9IjUwIiByPSI1MCIgZmlsbD0iI2Q0YTM3MyIvPjx0ZXh0IHg9IjUwIiB5PSI2MiIgZm9udC1zaXplPSI0MCIgZmlsbD0iI2ZmZiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1mYW1pbHk9InNhbnMtc2VyaWYiPj88L3RleHQ+PC9zdmc+') }}" class="brief-avatar" alt="头像">
             <div class="brief-info">
-                <div class="brief-title">{{ post.title }}</div>
+                <span class="brief-title">{{ post.title | default("(无标题)") }}</span>
                 <div class="brief-meta">
-                    <span>{{ post.username }}</span>
-                    <span class="brief-dot">•</span>
-                    <span>{{ post.create_at_str }}</span>
+                    <span>{{ post.username | default("匿名") }}</span>
+                    <span class="brief-dot">·</span>
+                    <span>{{ post.create_at_str | default("未知") }}</span>
                 </div>
             </div>
         </div>
-        <div class="brief-comment">{{ post.comment }}</div>
+        <div class="brief-right">
+            {% if post.image_data_list and post.image_data_list | length > 0 %}
+            <div class="brief-img-count">
+                <span>📷</span>
+                <span>{{ post.image_data_list | length }}</span>
+            </div>
+            {% endif %}
+            <span class="brief-comment">{{ post.comment | default("暂无评论") }}</span>
+        </div>
     </div>
     {% endfor %}
 </div>
 {% endif %}
-
-<style>
-.brief-section { margin-top: 20px; }
-
-.post-brief {
-    display: flex;
-    align-items: flex-start;
-    gap: 12px;
-    padding: 16px;
-    background: rgba(255,255,255,0.03);
-    border-radius: 8px;
-    margin-bottom: 12px;
-    border: 1px solid rgba(255,255,255,0.05);
-}
-
-.brief-left {
-    display: flex;
-    gap: 10px;
-    flex: 1;
-    min-width: 0;
-}
-
-.brief-avatar {
-    width: 36px;
-    height: 36px;
-    border-radius: 50%;
-    flex-shrink: 0;
-    object-fit: cover;
-}
-
-.brief-info { min-width: 0; }
-
-.brief-title {
-    font-size: 14px;
-    color: #fff;
-    font-weight: 500;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
-
-.brief-meta {
-    font-size: 12px;
-    color: #666;
-    margin-top: 4px;
-}
-
-.brief-dot { margin: 0 6px; }
-
-.brief-comment {
-    font-size: 13px;
-    color: #aaa;
-    font-style: italic;
-    max-width: 300px;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
-</style>
