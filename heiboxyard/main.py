@@ -133,7 +133,6 @@ class HeiboxYard(Star):
         )
 
         # ========== 任务管理 ==========
-        self._fetch_event = asyncio.Event()
         self._lock = asyncio.Lock()
         self._tasks = []
         self._start_tasks()
@@ -204,16 +203,18 @@ class HeiboxYard(Star):
 
     async def _background_loop(self):
         INTERVAL = self.interval_hours * 3600
+        # 启动后先等待一小段时间让系统初始化完成，然后立即执行第一次拉取
+        await asyncio.sleep(30)
+        logger.info(f"后台循环启动，首次拉取将在 30 秒后开始，之后每 {self.interval_hours} 小时执行一次")
+
         while True:
             try:
-                await asyncio.wait_for(self._fetch_event.wait(), timeout=INTERVAL)
-                self._fetch_event.clear()
-                await self._fetch_and_process_feed()
-            except asyncio.TimeoutError:
                 await self._fetch_and_process_feed()
             except Exception as e:
-                logger.error(f"后台循环异常: {e}")
+                logger.error(f"后台拉取异常: {e}")
 
+            logger.info(f"Feed 拉取完成，{self.interval_hours} 小时后进行下一次")
+            await asyncio.sleep(INTERVAL)
     async def _nightly_fetch_loop(self):
         while True:
             try:
@@ -229,8 +230,22 @@ class HeiboxYard(Star):
                 await asyncio.sleep(60)
 
     async def _manual_trigger(self):
-        self._fetch_event.set()
-
+        """手动触发一次拉取（在当前循环周期内立即执行）"""
+        logger.info("收到手动触发请求")
+        # 取消当前正在 sleep 的 background_loop 任务，让它重新进入循环
+        for task in self._tasks:
+            if task.get_name() == "bg_task" and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                # 重新启动 background_loop，它会立即执行一次拉取
+                new_task = asyncio.create_task(self._background_loop(), name="bg_task")
+                # 替换旧任务
+                self._tasks = [new_task if t.get_name() == "bg_task" else t for t in self._tasks]
+                logger.info("已重新启动后台拉取任务，将立即执行")
+                break
     # ==================== LLM 分析 ====================
 
     async def _llm_analysis_loop(self):
@@ -563,6 +578,8 @@ class HeiboxYard(Star):
     async def _reset_window_posts(self, existing_posts: list[tuple[int, str]], window_no: str):
         window_start, window_end = get_window_by_no(window_no)
         success_count = 0
+        reanalyzed_count = 0
+        skipped_count = 0
         for idx, (link_id, old_daily_no) in enumerate(existing_posts):
             logger.info(f"重置进度 {idx+1}/{len(existing_posts)}: link_id={link_id} (原 #{old_daily_no})")
 
@@ -596,11 +613,37 @@ class HeiboxYard(Star):
                                             content_text, saved_images, topics_str, source="feed")
                 logger.info(f"📌 已移出窗口: link_id={link_id} -> 窗口 {post_window_no}")
 
+            # 检查是否已有 AI 分析记录
+            had_analysis = self.llm_analyzer.db.has_analysis(link_id)
+            if had_analysis:
+                # 删除旧分析记录并重新分析
+                self.llm_analyzer.db.delete_analysis_by_link_id(link_id)
+                image_descriptions = self.image_analyzer.db.get_descriptions_for_post(link_id)
+                post = {
+                    "link_id": link_id,
+                    "daily_no": new_daily_no if in_window else None,
+                    "title": detail.get("title", "(无标题)"),
+                    "username": detail.get("username", ""),
+                    "userid": detail.get("userid", 0),
+                    "create_at": real_create_at,
+                    "create_at_str": ts_to_bj_str(real_create_at) if real_create_at else "未知",
+                    "content": content_text,
+                    "image_paths": saved_images,
+                    "image_descriptions": image_descriptions,
+                }
+                target_ws = window_start if in_window else post_window_start
+                await self.llm_analyzer.analyze_posts(target_ws, [post])
+                reanalyzed_count += 1
+                logger.info(f"🔄 重新分析完成: link_id={link_id}")
+            else:
+                skipped_count += 1
+                logger.info(f"⏭️ 跳过分析（无历史记录）: link_id={link_id}")
+
             success_count += 1
             if idx < len(existing_posts) - 1:
                 await asyncio.sleep(self.content_fetch_interval_seconds)
 
-        logger.info(f"重置完成: 成功 {success_count}/{len(existing_posts)}")
+        logger.info(f"重置完成: 成功 {success_count}/{len(existing_posts)}, 重新分析 {reanalyzed_count} 条, 跳过 {skipped_count} 条")
 
     @filter.command("今日帖子")
     async def cmd_today_posts(self, event: AstrMessageEvent):

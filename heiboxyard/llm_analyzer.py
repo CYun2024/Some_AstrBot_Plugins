@@ -402,6 +402,50 @@ class LLMAnalysisDB:
             logger.error(f"获取分析报告失败: {e}")
             return None
 
+    def delete_analysis_by_link_id(self, link_id: int) -> bool:
+        """根据 link_id 删除 AI 分析记录
+
+        Args:
+            link_id: 帖子ID
+
+        Returns:
+            是否成功删除
+        """
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cur = conn.cursor()
+            cur.execute("DELETE FROM llm_analyses WHERE link_id = ?", (link_id,))
+            deleted_count = cur.rowcount
+            conn.commit()
+            conn.close()
+            if deleted_count > 0:
+                logger.info(f"已删除 link_id={link_id} 的 {deleted_count} 条 AI 分析记录")
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"删除 AI 分析记录失败 link_id={link_id}: {e}")
+            return False
+
+    def has_analysis(self, link_id: int) -> bool:
+        """检查帖子是否已有 AI 分析记录
+
+        Args:
+            link_id: 帖子ID
+
+        Returns:
+            是否有分析记录
+        """
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cur = conn.cursor()
+            cur.execute("SELECT COUNT(*) FROM llm_analyses WHERE link_id = ?", (link_id,))
+            count = cur.fetchone()[0]
+            conn.close()
+            return count > 0
+        except Exception as e:
+            logger.error(f"检查 AI 分析记录失败 link_id={link_id}: {e}")
+            return False
+
 # ========== LLM 调用 ==========
 
 class LLMPostAnalyzer:
