@@ -13,16 +13,19 @@
                     <span class="brief-dot">·</span>
                     <span>{{ post.create_at_str | default("未知") }}</span>
                 </div>
+                <!-- 小图片预览 120px -->
+                {% if post.image_data_list and post.image_data_list | length > 0 %}
+                <div class="brief-images">
+                    {% for img_data in post.image_data_list[:3] %}
+                    <img src="{{ img_data }}" class="brief-thumb" alt="缩略图">
+                    {% endfor %}
+                </div>
+                {% endif %}
+                <!-- AI评论放下面，不截断 -->
+                <div class="brief-comment-full">
+                    {{ post.comment | default("暂无评论") }}
+                </div>
             </div>
-        </div>
-        <div class="brief-right">
-            {% if post.image_data_list and post.image_data_list | length > 0 %}
-            <div class="brief-img-count">
-                <span>📷</span>
-                <span>{{ post.image_data_list | length }}</span>
-            </div>
-            {% endif %}
-            <span class="brief-comment">{{ post.comment | default("暂无评论") }}</span>
         </div>
     </div>
     {% endfor %}
