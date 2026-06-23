@@ -415,7 +415,7 @@ class HeiboxYard(Star):
                     model_used_set.add(row[9])
 
             # 生成AI总评价
-            ai_summary = await generate_ai_summary(
+            ai_summary, summary_model, summary_tokens = await generate_ai_summary(
                 self.context, posts, window_no, self.llm_provider_id
             )
 
@@ -424,14 +424,24 @@ class HeiboxYard(Star):
 
             report_date = datetime.fromtimestamp(window_end, tz=timezone(timedelta(hours=8))).strftime("%Y年%m月%d日")
 
-            # 估算tokens（粗略：每帖子约500 tokens）
-            estimated_tokens = len(posts) * 500
-            tokens_str = "~" + str(estimated_tokens)
+            # 合并模型信息：帖子分析模型 + 总评生成模型
+            all_models = set(model_used_set)
+            if summary_model and summary_model != "unknown":
+                all_models.add(summary_model)
+            model_str = ", ".join(all_models) if all_models else "--"
+
+            # 合并token消耗：帖子分析估算 + 总评真实消耗
+            # 帖子分析估算（每帖子约500 tokens）
+            estimated_analysis_tokens = len(posts) * 500
+            # 总评真实tokens
+            summary_tokens_int = int(summary_tokens) if summary_tokens and summary_tokens.isdigit() else 0
+            total_tokens = estimated_analysis_tokens + summary_tokens_int
+            tokens_str = "~" + str(total_tokens)
+            if summary_tokens_int > 0:
+                tokens_str += " (含总评" + summary_tokens + ")"
 
             # 估算成本（按0.003$/1K tokens）
-            cost_str = "~$" + str(round(estimated_tokens * 0.003 / 1000, 3))
-
-            model_str = ", ".join(model_used_set) if model_used_set else "--"
+            cost_str = "~$" + str(round(total_tokens * 0.003 / 1000, 3))
 
             html_content = self.report_generator.generate_evening_report(
                 posts=posts, 
@@ -941,10 +951,17 @@ class HeiboxYard(Star):
                 "comment": row[8] or "暂无评论",
             })
 
+        # 生成AI总评价
+        ai_summary, summary_model, summary_tokens = await generate_ai_summary(
+            self.context, posts, window_no, self.llm_provider_id
+        )
+
         report_date = datetime.fromtimestamp(window_end, tz=timezone(timedelta(hours=8))).strftime("%Y年%m月%d日")
         html_content = self.report_generator.generate_evening_report(
             posts=posts, issue_no=1, report_date=report_date,
-            community_name="庭院社区", theme="default"
+            community_name="庭院社区", theme="default",
+            ai_summary=ai_summary,
+            model_used=summary_model if summary_model else "--",
         )
 
         html_path = self.report_generator.save_report(html_content)
