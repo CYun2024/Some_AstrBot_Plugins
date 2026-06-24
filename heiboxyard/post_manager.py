@@ -293,6 +293,163 @@ class PostManager:
 
         return renumbered
 
+    def swap_daily_no(self, window_no: str, seq1: int, seq2: int) -> tuple[bool, str]:
+        """交换窗口内两个帖子的 daily_no（编号），同时同步更新 AI 评论记录
+
+        Args:
+            window_no: 窗口编号（如 "20260621"）
+            seq1: 第一个帖子序号（从1开始）
+            seq2: 第二个帖子序号（从1开始）
+
+        Returns:
+            (是否成功, 结果消息)
+        """
+        self._ensure_db()
+        conn = sqlite3.connect(self.db_path)
+        cur = conn.cursor()
+
+        try:
+            # 获取窗口内所有帖子，按 create_at, link_id 排序（确保顺序稳定）
+            cur.execute(
+                "SELECT link_id, daily_no FROM posts WHERE date_str = ? ORDER BY create_at, link_id",
+                (window_no,)
+            )
+            rows = cur.fetchall()
+
+            if not rows:
+                return False, f"📭 窗口 {window_no} 内没有帖子"
+
+            total = len(rows)
+
+            # 检查序号有效性
+            if seq1 < 1 or seq1 > total:
+                return False, f"❌ 序号 {seq1} 超出范围，窗口 {window_no} 共有 {total} 个帖子"
+            if seq2 < 1 or seq2 > total:
+                return False, f"❌ 序号 {seq2} 超出范围，窗口 {window_no} 共有 {total} 个帖子"
+            if seq1 == seq2:
+                return False, "❌ 两个序号相同，无需交换"
+
+            # 获取两个帖子的信息
+            link_id_1, old_daily_no_1 = rows[seq1 - 1]
+            link_id_2, old_daily_no_2 = rows[seq2 - 1]
+
+            # 生成临时 daily_no 避免 UNIQUE 冲突
+            temp_daily_no = f"{window_no}-TEMP-{int(datetime.now(timezone.utc).timestamp())}"
+
+            # 交换 daily_no：先设临时值，再交换
+            cur.execute(
+                "UPDATE posts SET daily_no = ? WHERE link_id = ? AND date_str = ?",
+                (temp_daily_no, link_id_1, window_no)
+            )
+            cur.execute(
+                "UPDATE posts SET daily_no = ? WHERE link_id = ? AND date_str = ?",
+                (old_daily_no_1, link_id_2, window_no)
+            )
+            cur.execute(
+                "UPDATE posts SET daily_no = ? WHERE link_id = ? AND date_str = ?",
+                (old_daily_no_2, link_id_1, window_no)
+            )
+
+            # 同步更新 llm_analyses 表中的 daily_no
+            # 同样使用临时值避免 UNIQUE 冲突
+            window_start, _ = get_window_by_no(window_no)
+            cur.execute(
+                "UPDATE llm_analyses SET daily_no = ? WHERE window_start = ? AND daily_no = ?",
+                (temp_daily_no, window_start, old_daily_no_1)
+            )
+            cur.execute(
+                "UPDATE llm_analyses SET daily_no = ? WHERE window_start = ? AND daily_no = ?",
+                (old_daily_no_1, window_start, old_daily_no_2)
+            )
+            cur.execute(
+                "UPDATE llm_analyses SET daily_no = ? WHERE window_start = ? AND daily_no = ?",
+                (old_daily_no_2, window_start, temp_daily_no)
+            )
+
+            conn.commit()
+
+            logger.info(f"✅ 交换完成: #{old_daily_no_1} <-> #{old_daily_no_2}, link_ids={link_id_1},{link_id_2}")
+            return True, (
+                f"✅ 交换成功！\n"
+                f"📌 #{old_daily_no_1} (ID:{link_id_1}) <-> #{old_daily_no_2} (ID:{link_id_2})\n"
+                f"📋 窗口 {window_no} 共 {total} 个帖子"
+            )
+
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"交换 daily_no 失败: {e}")
+            return False, f"❌ 交换失败: {str(e)}"
+        finally:
+            conn.close()
+
+    def reset_daily_order(self, window_no: str) -> tuple[int, str]:
+        """重置窗口内帖子的 daily_no 顺序，按 create_at 重新连续编号
+        同时同步更新 AI 评论记录中的 daily_no
+
+        Args:
+            window_no: 窗口编号（如 "20260621"）
+
+        Returns:
+            (重新编号的帖子数量, 结果消息)
+        """
+        self._ensure_db()
+        conn = sqlite3.connect(self.db_path)
+        cur = conn.cursor()
+
+        try:
+            # 获取窗口内所有帖子，按 create_at, link_id 排序
+            cur.execute(
+                "SELECT link_id, daily_no, create_at FROM posts WHERE date_str = ? ORDER BY create_at, link_id",
+                (window_no,)
+            )
+            rows = cur.fetchall()
+
+            if not rows:
+                return 0, f"📭 窗口 {window_no} 内没有帖子"
+
+            total = len(rows)
+            window_start, _ = get_window_by_no(window_no)
+            renumbered = 0
+
+            for new_seq, (link_id, old_daily_no, create_at) in enumerate(rows, start=1):
+                new_daily_no = format_daily_no(window_no, new_seq)
+                if old_daily_no != new_daily_no:
+                    # 更新 posts 表
+                    cur.execute(
+                        "UPDATE posts SET daily_no = ? WHERE link_id = ? AND date_str = ?",
+                        (new_daily_no, link_id, window_no)
+                    )
+                    # 同步更新 llm_analyses 表
+                    cur.execute(
+                        "UPDATE llm_analyses SET daily_no = ? WHERE window_start = ? AND daily_no = ?",
+                        (new_daily_no, window_start, old_daily_no)
+                    )
+                    renumbered += 1
+                    logger.info(f"重新编号: #{old_daily_no} -> #{new_daily_no}, link_id={link_id}")
+
+            conn.commit()
+
+            if renumbered > 0:
+                logger.info(f"窗口 {window_no} 重新编号完成: {renumbered}/{total} 个帖子")
+                return renumbered, (
+                    f"✅ 重置顺序成功！\n"
+                    f"📋 窗口 {window_no} 共 {total} 个帖子\n"
+                    f"🔄 重新编号 {renumbered} 个帖子\n"
+                    f"📅 按发布时间排序后重新编号为 01 ~ {total:02d}"
+                )
+            else:
+                return 0, (
+                    f"✅ 顺序无需调整\n"
+                    f"📋 窗口 {window_no} 共 {total} 个帖子\n"
+                    f"📌 所有帖子编号已经是正确的顺序"
+                )
+
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"重置 daily_no 顺序失败: {e}")
+            return 0, f"❌ 重置失败: {str(e)}"
+        finally:
+            conn.close()
 
     def delete_image_analyses(self, link_id: int):
         """删除帖子的图片分析记录（用于重置）"""

@@ -64,9 +64,8 @@ class EveningReportGenerator:
         theme: str = "default",
         ai_summary: str = None,
         total_comments: int = 0,
-        elapsed_time: str = None,
+        generation_time: str = None,
         tokens_used: str = None,
-        cost_estimate: str = None,
         model_used: str = None,
     ) -> str:
         """
@@ -78,12 +77,11 @@ class EveningReportGenerator:
             report_date: 报告日期
             community_name: 社区名称
             theme: 主题
-            ai_summary: AI总评价（新增）
-            total_comments: AI评论总数（新增）
-            elapsed_time: 生成耗时（新增）
-            tokens_used: 消耗tokens（新增）
-            cost_estimate: 预估成本（新增）
-            model_used: 使用的模型（新增）
+            ai_summary: AI总评价
+            total_comments: AI评论总数
+            generation_time: 生成时间（日期时间字符串，如 2026-06-24 19:49:00）
+            tokens_used: 消耗tokens（格式: 输入/缓存命中/输出）
+            model_used: 使用的模型
         """
         total_posts = len(posts)
         total_images = sum(
@@ -94,6 +92,10 @@ class EveningReportGenerator:
 
         posts_html = self._render_posts_list(posts, theme)
 
+        # 生成时间默认为当前时间
+        if generation_time is None:
+            generation_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
         render_data = {
             "issue_no": issue_no,
             "report_date": report_date,
@@ -103,10 +105,8 @@ class EveningReportGenerator:
             "total_comments": total_comments,
             "posts_html": posts_html,
             "ai_summary": ai_summary or "暂无总评",
-            "generation_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "elapsed_time": elapsed_time or "--",
+            "generation_time": generation_time,
             "tokens_used": tokens_used or "--",
-            "cost_estimate": cost_estimate or "--",
             "model_used": model_used or "--",
         }
 

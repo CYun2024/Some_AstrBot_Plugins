@@ -267,13 +267,24 @@ class HeiboxYard(Star):
                 logger.error(f"LLM 分析定时循环异常: {e}")
                 await asyncio.sleep(60)
 
-    async def _run_llm_analysis(self, window_no: str = None, force_reanalyze: bool = False):
+    async def _run_llm_analysis(self, window_no: str = None, force_reanalyze: bool = False) -> dict:
         """执行 LLM 分析
 
         Args:
             window_no: 窗口编号（如 "20260621"），None 则使用当前窗口
             force_reanalyze: 是否强制重新分析所有帖子（默认 False，只补全缺失的）
+
+        Returns:
+            累积的 token 使用信息字典
         """
+        accumulated_tokens = {
+            "total_tokens": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "prompt_cache_hit_tokens": 0,
+            "prompt_cache_miss_tokens": 0,
+        }
+
         try:
             if window_no is None:
                 window_no = get_current_window_no()
@@ -294,7 +305,7 @@ class HeiboxYard(Star):
 
             if not rows:
                 logger.info(f"窗口 {window_no} 没有帖子需要分析")
-                return
+                return accumulated_tokens
 
             posts = []
             for link_id, daily_no, title, create_at, userid, username, content, image_urls in rows:
@@ -338,28 +349,58 @@ class HeiboxYard(Star):
             try:
                 if force_reanalyze or existing_count == 0:
                     # 全新分析或强制重分析
-                    success = await self.llm_analyzer.analyze_posts(window_start, posts)
+                    success, batch_tokens = await self.llm_analyzer.analyze_posts(window_start, posts)
+                    # 累积 token
+                    for key in accumulated_tokens:
+                        accumulated_tokens[key] += batch_tokens.get(key, 0)
                     logger.info("LLM 分析全部完成" if success else "LLM 分析部分失败")
 
                 # ===== 补全机制：检查并修复缺失的评论（无论是否强制重分析都会执行）=====
-                await self._ensure_all_analyses(window_start, posts)
+                fill_success, fill_missing, fill_tokens = await self._ensure_all_analyses(window_start, posts)
+                # 累积补全 token
+                for key in accumulated_tokens:
+                    accumulated_tokens[key] += fill_tokens.get(key, 0)
 
             finally:
                 self.llm_analyzer._batch_size = original_batch_size
 
+            logger.info(
+                f"LLM 分析总token消耗: total={accumulated_tokens['total_tokens']}, "
+                f"prompt={accumulated_tokens['prompt_tokens']}, "
+                f"completion={accumulated_tokens['completion_tokens']}, "
+                f"cache_hit={accumulated_tokens['prompt_cache_hit_tokens']}, "
+                f"cache_miss={accumulated_tokens['prompt_cache_miss_tokens']}"
+            )
+            return accumulated_tokens
+
         except Exception as e:
             logger.error(f"执行 LLM 分析失败: {e}")
+            return accumulated_tokens
 
-    async def _ensure_all_analyses(self, window_start: int, posts: list[dict]):
+    async def _ensure_all_analyses(self, window_start: int, posts: list[dict]) -> tuple[int, int, dict]:
         """
         确保窗口内所有帖子都有 AI 评论，没有则补全
         同时确保总评已生成
+
+        Returns:
+            (成功补全数量, 仍然缺失数量, 累积token使用信息)
         """
+        accumulated_tokens = {
+            "total_tokens": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "prompt_cache_hit_tokens": 0,
+            "prompt_cache_miss_tokens": 0,
+        }
+
         window_no = get_window_no_from_start(window_start)
         logger.info(f"🔍 开始检查窗口 {window_no} 的评论完整性...")
 
         # 1. 检查帖子评论完整性并补全
-        filled, still_missing = await self.llm_analyzer.db.fill_missing_analyses(window_start, posts)
+        filled, still_missing, fill_tokens = await self.llm_analyzer.fill_missing_analyses(window_start, posts)
+        # 累积补全 token
+        for key in accumulated_tokens:
+            accumulated_tokens[key] += fill_tokens.get(key, 0)
 
         if still_missing > 0:
             logger.warning(f"⚠️ 窗口 {window_no} 仍有 {still_missing} 个帖子缺少评论")
@@ -370,6 +411,8 @@ class HeiboxYard(Star):
         logger.info(f"📝 检查窗口 {window_no} 的总评...")
         await self._ensure_ai_summary(window_no, posts)
         logger.info(f"✅ 窗口 {window_no} 分析完整性检查完成")
+
+        return filled, still_missing, accumulated_tokens
 
     async def _ensure_ai_summary(self, window_no: str, posts: list[dict]):
         """
@@ -448,17 +491,21 @@ class HeiboxYard(Star):
                 await asyncio.sleep(wait_seconds)
 
                 logger.info("执行每日晚报生成")
+                # 定时任务不传入 analysis_tokens（因为 LLM 分析是独立任务，token 已分别记录）
                 await self._generate_and_save_evening_report(send=self.evening_report_auto_send)
             except Exception as e:
                 logger.error("晚报定时循环异常: " + str(e))
                 await asyncio.sleep(60)
 
-    async def _generate_and_save_evening_report(self, window_no: str = None, send: bool = False):
+    async def _generate_and_save_evening_report(self, window_no: str = None, send: bool = False,
+                                                analysis_tokens: dict = None, summary_tokens: dict = None):
         """生成晚报
 
         Args:
             window_no: 窗口编号（如 "20260621"），None 则使用当前窗口
             send: 是否自动发送
+            analysis_tokens: 帖子分析累积的 token 信息（可选）
+            summary_tokens: 总评生成的 token 信息（可选）
         """
         import time
         start_time = time.time()
@@ -509,7 +556,7 @@ class HeiboxYard(Star):
                     model_used_set.add(row[9])
 
             # 生成AI总评价
-            ai_summary, summary_model, summary_tokens = await generate_ai_summary(
+            ai_summary, summary_model, summary_token_info = await generate_ai_summary(
                 self.context, posts, window_no, self.llm_provider_id
             )
 
@@ -524,18 +571,27 @@ class HeiboxYard(Star):
                 all_models.add(summary_model)
             model_str = ", ".join(all_models) if all_models else "--"
 
-            # 合并token消耗：帖子分析估算 + 总评真实消耗
-            # 帖子分析估算（每帖子约500 tokens）
-            estimated_analysis_tokens = len(posts) * 500
-            # 总评真实tokens
-            summary_tokens_int = int(summary_tokens) if summary_tokens and summary_tokens.isdigit() else 0
-            total_tokens = estimated_analysis_tokens + summary_tokens_int
-            tokens_str = "~" + str(total_tokens)
-            if summary_tokens_int > 0:
-                tokens_str += " (含总评" + summary_tokens + ")"
+            # ========== Token 统计（真实数据，非估算）==========
+            # 合并帖子分析 token 和总评 token
+            total_tokens = 0
+            total_cache_hit = 0
+            total_completion = 0
 
-            # 估算成本（按0.003$/1K tokens）
-            cost_str = "~$" + str(round(total_tokens * 0.003 / 1000, 3))
+            if analysis_tokens:
+                total_tokens += analysis_tokens.get("total_tokens", 0)
+                total_cache_hit += analysis_tokens.get("prompt_cache_hit_tokens", 0)
+                total_completion += analysis_tokens.get("completion_tokens", 0)
+
+            if summary_token_info:
+                total_tokens += summary_token_info.get("total_tokens", 0)
+                total_cache_hit += summary_token_info.get("prompt_cache_hit_tokens", 0)
+                total_completion += summary_token_info.get("completion_tokens", 0)
+
+            # 格式化: 总/缓存命中/输出
+            if total_tokens > 0:
+                tokens_str = f"{total_tokens}/{total_cache_hit}/{total_completion}"
+            else:
+                tokens_str = "--"
 
             html_content = self.report_generator.generate_evening_report(
                 posts=posts, 
@@ -545,9 +601,8 @@ class HeiboxYard(Star):
                 theme="default",
                 ai_summary=ai_summary,
                 total_comments=total_comments,
-                elapsed_time=elapsed_str,
+                generation_time=generation_time,
                 tokens_used=tokens_str,
-                cost_estimate=cost_str,
                 model_used=model_str,
             )
 
@@ -1068,18 +1123,28 @@ class HeiboxYard(Star):
         report_date = datetime.fromtimestamp(window_end, tz=timezone(timedelta(hours=8))).strftime("%Y年%m月%d日")
         # 计算统计信息
         total_comments = len(posts)
-        elapsed_time = "手动生成"
-        tokens_used = "--"
-        cost_estimate = "--"
+
+        # Token: 总评真实数据（帖子分析 token 在独立任务中，此处不重复统计）
+        # 修复：summary_tokens 是返回的第三个值，不是 summary_token_info
+        total_input = summary_tokens.get("prompt_tokens", 0) if summary_tokens else 0
+        cache_hit = summary_tokens.get("prompt_cache_hit_tokens", 0) if summary_tokens else 0
+        completion = summary_tokens.get("completion_tokens", 0) if summary_tokens else 0
+
+        if total_input > 0 or completion > 0:
+            tokens_str = f"{total_input}/{cache_hit}/{completion}"
+        else:
+            tokens_str = "--"
+
+        # 生成时间 = 当前日期时间
+        generation_time = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
 
         html_content = self.report_generator.generate_evening_report(
             posts=posts, issue_no=issue_no, report_date=report_date,
             community_name="庭院社区", theme="default",
             ai_summary=ai_summary,
             total_comments=total_comments,
-            elapsed_time=elapsed_time,
-            tokens_used=tokens_used,
-            cost_estimate=cost_estimate,
+            generation_time=generation_time,
+            tokens_used=tokens_str,
             model_used=summary_model if summary_model else "--",
         )
 
@@ -1242,6 +1307,84 @@ class HeiboxYard(Star):
             conn.close()
         except Exception as e:
             logger.warning(f"移动 AI 分析记录失败: {e}")
+
+    @filter.command("调整顺序")
+    async def cmd_adjust_order(self, event: AstrMessageEvent):
+        """调整窗口内帖子的展示顺序（交换两个帖子的编号）
+        用法: /调整顺序 <序号1> <序号2> [窗口编号]
+        例如: 
+          /调整顺序 1 3          （调整当前窗口）
+          /调整顺序 1 3 20260623 （调整指定窗口）
+        - 交换后，序号1 和 序号2 对应的帖子在晚报中的展示顺序会互换
+        - 序号即 /今日帖子 列表中帖子的顺序号（从1开始）
+        """
+        msg = event.message_str.strip()
+        parts = msg.split()
+
+        if len(parts) < 3:
+            yield event.plain_result(
+                "❌ 用法: /调整顺序 <序号1> <序号2> [窗口编号]\n"
+                "例如: /调整顺序 1 3\n"
+                "      /调整顺序 1 3 20260623\n"
+                "说明: 交换两个帖子在晚报中的展示顺序，不指定窗口编号则调整当前窗口"
+            )
+            return
+
+        # 解析参数
+        try:
+            seq1 = int(parts[1])
+            seq2 = int(parts[2])
+        except ValueError:
+            yield event.plain_result("❌ 序号必须是数字，例如: /调整顺序 1 3")
+            return
+
+        # 判断是否有窗口编号参数
+        if len(parts) >= 4:
+            window_no = parts[3].strip()
+            if not (len(window_no) == 8 and window_no.isdigit()):
+                yield event.plain_result(
+                    "❌ 窗口编号格式错误，应为 YYYYMMDD\n"
+                    "例如: /调整顺序 1 3 20260623"
+                )
+                return
+        else:
+            window_no = get_current_window_no()
+
+        # 执行交换
+        success, result_msg = self.post_manager.swap_daily_no(window_no, seq1, seq2)
+        yield event.plain_result(result_msg)
+
+    @filter.command("重置顺序")
+    async def cmd_reset_order(self, event: AstrMessageEvent):
+        """重置窗口内帖子的编号顺序，按发布时间重新连续编号
+        用法: /重置顺序 [窗口编号]
+        例如: 
+          /重置顺序           （重置当前窗口）
+          /重置顺序 20260623  （重置指定窗口）
+        - 按帖子发布时间重新排序，编号为 01, 02, 03...
+        - 同时同步修复 AI 评论的编号关联
+        - 用于修复编号错乱（如 01, 02, 04, 05 缺少 03）
+        """
+        msg = event.message_str.strip()
+        parts = msg.split()
+
+        # 判断是否有窗口编号参数
+        if len(parts) >= 2:
+            window_no = parts[1].strip()
+            if not (len(window_no) == 8 and window_no.isdigit()):
+                yield event.plain_result(
+                    "❌ 窗口编号格式错误，应为 YYYYMMDD\n"
+                    "例如: /重置顺序 20260623"
+                )
+                return
+        else:
+            window_no = get_current_window_no()
+
+        yield event.plain_result(f"🔄 正在重置窗口 {window_no} 的帖子顺序，请稍候...")
+
+        # 执行重置
+        renumbered, result_msg = self.post_manager.reset_daily_order(window_no)
+        yield event.plain_result(result_msg)
 
     # ==================== 生命周期 ====================
 

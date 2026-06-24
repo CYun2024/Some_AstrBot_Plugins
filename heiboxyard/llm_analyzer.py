@@ -326,6 +326,39 @@ class LLMAnalysisDB:
             logger.error(f"手动更新评论失败: {e}")
             return False
 
+
+    def update_daily_no(self, old_daily_no: str, new_daily_no: str, window_start: int = None) -> bool:
+        """更新 AI 分析记录中的 daily_no（用于 /调整顺序 指令同步）"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cur = conn.cursor()
+
+            if window_start is not None:
+                cur.execute("""
+                    UPDATE llm_analyses
+                    SET daily_no = ?
+                    WHERE window_start = ? AND daily_no = ?
+                """, (str(new_daily_no), window_start, str(old_daily_no)))
+            else:
+                cur.execute("""
+                    UPDATE llm_analyses
+                    SET daily_no = ?
+                    WHERE daily_no = ?
+                """, (str(new_daily_no), str(old_daily_no)))
+
+            affected = cur.rowcount
+            conn.commit()
+            conn.close()
+            if affected > 0:
+                logger.info(f"AI评论 daily_no 更新成功: {old_daily_no} -> {new_daily_no}")
+                return True
+            else:
+                logger.info(f"AI评论 daily_no 无需更新: {old_daily_no} -> {new_daily_no} (无匹配记录)")
+                return True
+        except Exception as e:
+            logger.error(f"更新 AI 评论 daily_no 失败: {e}")
+            return False
+
     def get_analysis_report(self, window_start: int) -> Optional[list[dict]]:
         """获取指定窗口的完整分析报告"""
         try:
@@ -558,8 +591,24 @@ class LLMPostAnalyzer:
                 pass
             return None
 
-    async def _call_llm(self, prompt: str, image_urls: list[str] = None) -> tuple[Optional[str], Optional[str]]:
-        """调用 LLM，返回 (completion_text, model_used)"""
+    async def _call_llm(self, prompt: str, image_urls: list[str] = None) -> tuple[Optional[str], Optional[str], dict]:
+        """调用 LLM，返回 (completion_text, model_used, token_info)
+
+        token_info 格式: {
+            "total_tokens": int,
+            "prompt_tokens": int,
+            "completion_tokens": int,
+            "prompt_cache_hit_tokens": int,
+            "prompt_cache_miss_tokens": int,
+        }
+        """
+        token_info = {
+            "total_tokens": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "prompt_cache_hit_tokens": 0,
+            "prompt_cache_miss_tokens": 0,
+        }
         try:
             provider = None
             if self.chat_provider_id:
@@ -568,7 +617,7 @@ class LLMPostAnalyzer:
                 providers = self.context.get_all_providers()
                 if not providers:
                     logger.warning("没有可用的 LLM 提供商")
-                    return None, None
+                    return None, None, token_info
                 provider = providers[0]
                 logger.info(f"使用默认 LLM 提供商: {provider.meta().id}")
 
@@ -580,25 +629,74 @@ class LLMPostAnalyzer:
 
             if not llm_resp:
                 logger.warning("LLM 返回空响应")
-                return None, None
+                return None, None, token_info
 
             completion_text = getattr(llm_resp, 'completion_text', None)
             if not completion_text:
                 logger.warning("LLM 响应中没有 completion_text")
-                return None, None
+                return None, None, token_info
 
             model_used = getattr(llm_resp, 'model', provider.meta().id) or provider.meta().id
-            return completion_text, model_used
+
+            # 提取 token 使用信息（增强兼容性）
+            raw_usage = getattr(llm_resp, 'raw_usage', None)
+            if raw_usage and isinstance(raw_usage, dict):
+                token_info["total_tokens"] = raw_usage.get('total_tokens', 0) or 0
+                token_info["prompt_tokens"] = raw_usage.get('prompt_tokens', 0) or 0
+                token_info["completion_tokens"] = raw_usage.get('completion_tokens', 0) or 0
+                token_info["prompt_cache_hit_tokens"] = raw_usage.get('prompt_cache_hit_tokens', 0) or 0
+                token_info["prompt_cache_miss_tokens"] = raw_usage.get('prompt_cache_miss_tokens', 0) or 0
+            else:
+                # 方式2: 尝试 usage 属性
+                usage = getattr(llm_resp, 'usage', None)
+                if usage and isinstance(usage, dict):
+                    token_info["total_tokens"] = usage.get('total_tokens', 0) or 0
+                    token_info["prompt_tokens"] = usage.get('prompt_tokens', 0) or 0
+                    token_info["completion_tokens"] = usage.get('completion_tokens', 0) or 0
+                    token_info["prompt_cache_hit_tokens"] = usage.get('prompt_cache_hit_tokens', 0) or 0
+                    token_info["prompt_cache_miss_tokens"] = usage.get('prompt_cache_miss_tokens', 0) or 0
+                else:
+                    # 方式3: 直接属性
+                    token_info["completion_tokens"] = getattr(llm_resp, 'completion_tokens', 0) or 0
+                    token_info["prompt_tokens"] = getattr(llm_resp, 'prompt_tokens', 0) or 0
+                    token_info["total_tokens"] = getattr(llm_resp, 'total_tokens', 0) or 0
+                    # 方式4: response_metadata
+                    if token_info["total_tokens"] == 0:
+                        resp_meta = getattr(llm_resp, 'response_metadata', None)
+                        if resp_meta and isinstance(resp_meta, dict):
+                            token_usage = resp_meta.get('token_usage', {}) or resp_meta.get('usage', {})
+                            if token_usage:
+                                token_info["total_tokens"] = token_usage.get('total_tokens', 0) or 0
+                                token_info["prompt_tokens"] = token_usage.get('prompt_tokens', 0) or 0
+                                token_info["completion_tokens"] = token_usage.get('completion_tokens', 0) or 0
+                                token_info["prompt_cache_hit_tokens"] = token_usage.get('prompt_cache_hit_tokens', 0) or 0
+                                token_info["prompt_cache_miss_tokens"] = token_usage.get('prompt_cache_miss_tokens', 0) or 0
+                    if token_info["total_tokens"] == 0 and token_info["prompt_tokens"] > 0 and token_info["completion_tokens"] > 0:
+                        token_info["total_tokens"] = token_info["prompt_tokens"] + token_info["completion_tokens"]
+
+            return completion_text, model_used, token_info
 
         except Exception as e:
             logger.error(f"调用 LLM 失败: {e}")
-            return None, None
+            return None, None, token_info
 
-    async def analyze_posts(self, window_start: int, posts: list[dict]) -> bool:
-        """分析一批帖子，分批调用 LLM"""
+    async def analyze_posts(self, window_start: int, posts: list[dict]) -> tuple[bool, dict]:
+        """分析一批帖子，分批调用 LLM
+
+        Returns:
+            (是否全部成功, 累积的token使用信息字典)
+        """
+        accumulated_tokens = {
+            "total_tokens": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "prompt_cache_hit_tokens": 0,
+            "prompt_cache_miss_tokens": 0,
+        }
+
         if not posts:
             logger.info("没有帖子需要分析")
-            return True
+            return True, accumulated_tokens
 
         total = len(posts)
         logger.info(f"开始分析 {total} 个帖子，每批最多 {self._batch_size} 个")
@@ -622,7 +720,11 @@ class LLMPostAnalyzer:
             logger.info(f"分析第 {batch_num}/{total_batches} 批，共 {len(batch)} 个帖子")
 
             prompt = _build_analysis_prompt(batch)
-            completion_text, model_used = await self._call_llm(prompt)
+            completion_text, model_used, batch_tokens = await self._call_llm(prompt)
+
+            # 累积 token
+            for key in accumulated_tokens:
+                accumulated_tokens[key] += batch_tokens.get(key, 0)
 
             if not completion_text:
                 logger.error(f"第 {batch_num} 批 LLM 调用失败，跳过")
@@ -680,9 +782,16 @@ class LLMPostAnalyzer:
             if i + self._batch_size < total:
                 await asyncio.sleep(2)
 
-        logger.info(f"帖子分析任务结束，成功: {all_success}")
-        return all_success
-    async def analyze_single_post(self, post: dict) -> Optional[dict]:
+        logger.info(
+            f"帖子分析任务结束，成功: {all_success}, "
+            f"tokens: total={accumulated_tokens['total_tokens']}, "
+            f"prompt={accumulated_tokens['prompt_tokens']}, "
+            f"completion={accumulated_tokens['completion_tokens']}, "
+            f"cache_hit={accumulated_tokens['prompt_cache_hit_tokens']}, "
+            f"cache_miss={accumulated_tokens['prompt_cache_miss_tokens']}"
+        )
+        return all_success, accumulated_tokens
+    async def analyze_single_post(self, post: dict) -> tuple[Optional[dict], dict]:
         """
         对单个帖子进行 AI 分析（用于补全漏掉的评论）
 
@@ -690,25 +799,36 @@ class LLMPostAnalyzer:
             post: 帖子数据字典
 
         Returns:
-            分析结果字典，失败返回 None
+            (分析结果字典, token使用信息字典)，失败返回 (None, token_info)
         """
+        token_info = {
+            "total_tokens": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "prompt_cache_hit_tokens": 0,
+            "prompt_cache_miss_tokens": 0,
+        }
         try:
             # 构建单帖子的 prompt
             prompt = _build_single_analysis_prompt(post)
 
             logger.info(f"补全分析帖子 #{post.get('daily_no')} - {post.get('title', '(无标题)')}")
 
-            completion_text, model_used = await self._call_llm(prompt)
+            completion_text, model_used, batch_tokens = await self._call_llm(prompt)
+
+            # 记录 token
+            for key in token_info:
+                token_info[key] = batch_tokens.get(key, 0)
 
             if not completion_text:
                 logger.error(f"单帖子分析 LLM 调用失败: #{post.get('daily_no')}")
-                return None
+                return None, token_info
 
             # 尝试解析 JSON
             analysis = self._safe_json_parse_single(completion_text)
             if analysis:
                 analysis['model_used'] = model_used or "unknown"
-                return analysis
+                return analysis, token_info
 
             # 解析失败，尝试直接提取评论内容
             logger.warning(f"单帖子 JSON 解析失败，尝试直接提取: #{post.get('daily_no')}")
@@ -719,13 +839,13 @@ class LLMPostAnalyzer:
                     "comment": comment,
                     "sentiment": "neutral",
                     "model_used": model_used or "unknown"
-                }
+                }, token_info
 
-            return None
+            return None, token_info
 
         except Exception as e:
             logger.error(f"单帖子分析异常 #{post.get('daily_no')}: {e}")
-            return None
+            return None, token_info
 
     def _safe_json_parse_single(self, text: str) -> Optional[dict]:
         """安全解析单帖子分析的 JSON 返回"""
@@ -800,7 +920,7 @@ class LLMPostAnalyzer:
 
         return None
 
-    async def fill_missing_analyses(self, window_start: int, posts: list[dict]) -> tuple[int, int]:
+    async def fill_missing_analyses(self, window_start: int, posts: list[dict]) -> tuple[int, int, dict]:
         """
         补全窗口中缺失的 AI 评论
 
@@ -809,11 +929,19 @@ class LLMPostAnalyzer:
             posts: 该窗口的所有帖子列表
 
         Returns:
-            (成功补全数量, 仍然缺失数量)
+            (成功补全数量, 仍然缺失数量, 累积token使用信息)
         """
+        accumulated_tokens = {
+            "total_tokens": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "prompt_cache_hit_tokens": 0,
+            "prompt_cache_miss_tokens": 0,
+        }
+
         missing_posts = self.db.get_missing_analyses(window_start, posts)
         if not missing_posts:
-            return 0, 0
+            return 0, 0, accumulated_tokens
 
         logger.info(f"开始补全 {len(missing_posts)} 个缺失评论的帖子")
 
@@ -829,7 +957,11 @@ class LLMPostAnalyzer:
                     else:
                         post['user_memory'] = ""
 
-                analysis = await self.analyze_single_post(post)
+                analysis, single_tokens = await self.analyze_single_post(post)
+
+                # 累积补全的 token
+                for key in accumulated_tokens:
+                    accumulated_tokens[key] += single_tokens.get(key, 0)
 
                 if analysis and analysis.get('comment'):
                     # 保存到数据库
@@ -871,8 +1003,15 @@ class LLMPostAnalyzer:
                 continue
 
         still_missing = len(missing_posts) - success_count
-        logger.info(f"补全完成: 成功 {success_count}/{len(missing_posts)}, 仍缺失 {still_missing}")
-        return success_count, still_missing
+        logger.info(
+            f"补全完成: 成功 {success_count}/{len(missing_posts)}, 仍缺失 {still_missing}, "
+            f"tokens: total={accumulated_tokens['total_tokens']}, "
+            f"prompt={accumulated_tokens['prompt_tokens']}, "
+            f"completion={accumulated_tokens['completion_tokens']}, "
+            f"cache_hit={accumulated_tokens['prompt_cache_hit_tokens']}, "
+            f"cache_miss={accumulated_tokens['prompt_cache_miss_tokens']}"
+        )
+        return success_count, still_missing, accumulated_tokens
 
 
 
@@ -1281,8 +1420,24 @@ class LLMPostAnalyzer:
                 pass
             return None
 
-    async def _call_llm(self, prompt: str, image_urls: list[str] = None) -> tuple[Optional[str], Optional[str]]:
-        """调用 LLM，返回 (completion_text, model_used)"""
+    async def _call_llm(self, prompt: str, image_urls: list[str] = None) -> tuple[Optional[str], Optional[str], dict]:
+        """调用 LLM，返回 (completion_text, model_used, token_info)
+
+        token_info 格式: {
+            "total_tokens": int,
+            "prompt_tokens": int,
+            "completion_tokens": int,
+            "prompt_cache_hit_tokens": int,
+            "prompt_cache_miss_tokens": int,
+        }
+        """
+        token_info = {
+            "total_tokens": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "prompt_cache_hit_tokens": 0,
+            "prompt_cache_miss_tokens": 0,
+        }
         try:
             provider = None
             if self.chat_provider_id:
@@ -1291,7 +1446,7 @@ class LLMPostAnalyzer:
                 providers = self.context.get_all_providers()
                 if not providers:
                     logger.warning("没有可用的 LLM 提供商")
-                    return None, None
+                    return None, None, token_info
                 provider = providers[0]
                 logger.info(f"使用默认 LLM 提供商: {provider.meta().id}")
 
@@ -1303,25 +1458,74 @@ class LLMPostAnalyzer:
 
             if not llm_resp:
                 logger.warning("LLM 返回空响应")
-                return None, None
+                return None, None, token_info
 
             completion_text = getattr(llm_resp, 'completion_text', None)
             if not completion_text:
                 logger.warning("LLM 响应中没有 completion_text")
-                return None, None
+                return None, None, token_info
 
             model_used = getattr(llm_resp, 'model', provider.meta().id) or provider.meta().id
-            return completion_text, model_used
+
+            # 提取 token 使用信息（增强兼容性）
+            raw_usage = getattr(llm_resp, 'raw_usage', None)
+            if raw_usage and isinstance(raw_usage, dict):
+                token_info["total_tokens"] = raw_usage.get('total_tokens', 0) or 0
+                token_info["prompt_tokens"] = raw_usage.get('prompt_tokens', 0) or 0
+                token_info["completion_tokens"] = raw_usage.get('completion_tokens', 0) or 0
+                token_info["prompt_cache_hit_tokens"] = raw_usage.get('prompt_cache_hit_tokens', 0) or 0
+                token_info["prompt_cache_miss_tokens"] = raw_usage.get('prompt_cache_miss_tokens', 0) or 0
+            else:
+                # 方式2: 尝试 usage 属性
+                usage = getattr(llm_resp, 'usage', None)
+                if usage and isinstance(usage, dict):
+                    token_info["total_tokens"] = usage.get('total_tokens', 0) or 0
+                    token_info["prompt_tokens"] = usage.get('prompt_tokens', 0) or 0
+                    token_info["completion_tokens"] = usage.get('completion_tokens', 0) or 0
+                    token_info["prompt_cache_hit_tokens"] = usage.get('prompt_cache_hit_tokens', 0) or 0
+                    token_info["prompt_cache_miss_tokens"] = usage.get('prompt_cache_miss_tokens', 0) or 0
+                else:
+                    # 方式3: 直接属性
+                    token_info["completion_tokens"] = getattr(llm_resp, 'completion_tokens', 0) or 0
+                    token_info["prompt_tokens"] = getattr(llm_resp, 'prompt_tokens', 0) or 0
+                    token_info["total_tokens"] = getattr(llm_resp, 'total_tokens', 0) or 0
+                    # 方式4: response_metadata
+                    if token_info["total_tokens"] == 0:
+                        resp_meta = getattr(llm_resp, 'response_metadata', None)
+                        if resp_meta and isinstance(resp_meta, dict):
+                            token_usage = resp_meta.get('token_usage', {}) or resp_meta.get('usage', {})
+                            if token_usage:
+                                token_info["total_tokens"] = token_usage.get('total_tokens', 0) or 0
+                                token_info["prompt_tokens"] = token_usage.get('prompt_tokens', 0) or 0
+                                token_info["completion_tokens"] = token_usage.get('completion_tokens', 0) or 0
+                                token_info["prompt_cache_hit_tokens"] = token_usage.get('prompt_cache_hit_tokens', 0) or 0
+                                token_info["prompt_cache_miss_tokens"] = token_usage.get('prompt_cache_miss_tokens', 0) or 0
+                    if token_info["total_tokens"] == 0 and token_info["prompt_tokens"] > 0 and token_info["completion_tokens"] > 0:
+                        token_info["total_tokens"] = token_info["prompt_tokens"] + token_info["completion_tokens"]
+
+            return completion_text, model_used, token_info
 
         except Exception as e:
             logger.error(f"调用 LLM 失败: {e}")
-            return None, None
+            return None, None, token_info
 
-    async def analyze_posts(self, window_start: int, posts: list[dict]) -> bool:
-        """分析一批帖子，分批调用 LLM"""
+    async def analyze_posts(self, window_start: int, posts: list[dict]) -> tuple[bool, dict]:
+        """分析一批帖子，分批调用 LLM
+
+        Returns:
+            (是否全部成功, 累积的token使用信息字典)
+        """
+        accumulated_tokens = {
+            "total_tokens": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "prompt_cache_hit_tokens": 0,
+            "prompt_cache_miss_tokens": 0,
+        }
+
         if not posts:
             logger.info("没有帖子需要分析")
-            return True
+            return True, accumulated_tokens
 
         total = len(posts)
         logger.info(f"开始分析 {total} 个帖子，每批最多 {self._batch_size} 个")
@@ -1345,7 +1549,11 @@ class LLMPostAnalyzer:
             logger.info(f"分析第 {batch_num}/{total_batches} 批，共 {len(batch)} 个帖子")
 
             prompt = _build_analysis_prompt(batch)
-            completion_text, model_used = await self._call_llm(prompt)
+            completion_text, model_used, batch_tokens = await self._call_llm(prompt)
+
+            # 累积 token
+            for key in accumulated_tokens:
+                accumulated_tokens[key] += batch_tokens.get(key, 0)
 
             if not completion_text:
                 logger.error(f"第 {batch_num} 批 LLM 调用失败，跳过")
@@ -1403,8 +1611,15 @@ class LLMPostAnalyzer:
             if i + self._batch_size < total:
                 await asyncio.sleep(2)
 
-        logger.info(f"帖子分析任务结束，成功: {all_success}")
-        return all_success
+        logger.info(
+            f"帖子分析任务结束，成功: {all_success}, "
+            f"tokens: total={accumulated_tokens['total_tokens']}, "
+            f"prompt={accumulated_tokens['prompt_tokens']}, "
+            f"completion={accumulated_tokens['completion_tokens']}, "
+            f"cache_hit={accumulated_tokens['prompt_cache_hit_tokens']}, "
+            f"cache_miss={accumulated_tokens['prompt_cache_miss_tokens']}"
+        )
+        return all_success, accumulated_tokens
 
     async def get_report(self, window_start: int) -> Optional[list[dict]]:
         """获取分析报告"""
