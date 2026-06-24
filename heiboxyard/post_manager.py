@@ -254,6 +254,46 @@ class PostManager:
         conn.close()
         return rows
 
+    def renumber_window_posts(self, window_no: str) -> int:
+        """重新编号指定窗口中的所有帖子，确保编号连续
+
+        返回重新编号的帖子数量
+        """
+        self._ensure_db()
+        conn = sqlite3.connect(self.db_path)
+        cur = conn.cursor()
+
+        # 获取该窗口所有帖子，按原有顺序（create_at 或 link_id）
+        cur.execute(
+            "SELECT link_id, daily_no FROM posts WHERE date_str = ? ORDER BY create_at, link_id",
+            (window_no,)
+        )
+        rows = cur.fetchall()
+
+        if not rows:
+            conn.close()
+            return 0
+
+        renumbered = 0
+        for new_seq, (link_id, old_daily_no) in enumerate(rows, start=1):
+            new_daily_no = format_daily_no(window_no, new_seq)
+            if old_daily_no != new_daily_no:
+                cur.execute(
+                    "UPDATE posts SET daily_no = ? WHERE link_id = ? AND date_str = ?",
+                    (new_daily_no, link_id, window_no)
+                )
+                renumbered += 1
+                logger.info(f"重新编号: #{old_daily_no} -> #{new_daily_no}, link_id={link_id}")
+
+        conn.commit()
+        conn.close()
+
+        if renumbered > 0:
+            logger.info(f"窗口 {window_no} 重新编号完成: {renumbered} 个帖子")
+
+        return renumbered
+
+
     def delete_image_analyses(self, link_id: int):
         """删除帖子的图片分析记录（用于重置）"""
         self._ensure_db()

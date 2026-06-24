@@ -36,6 +36,25 @@ class EveningReportGenerator:
     # 主入口：生成完整晚报 HTML
     # ================================================================
 
+    def calculate_issue_no(self, window_no: str) -> int:
+        """
+        计算期号：以 20260622 为第一期，每天一期
+
+        Args:
+            window_no: 窗口编号，格式 YYYYMMDD
+
+        Returns:
+            期号（从1开始）
+        """
+        from datetime import datetime
+        base_date = datetime.strptime("20260622", "%Y%m%d")
+        try:
+            current_date = datetime.strptime(window_no, "%Y%m%d")
+        except ValueError:
+            return 1
+        delta_days = (current_date - base_date).days
+        return max(1, delta_days + 1)
+
     def generate_evening_report(
         self,
         posts: list[dict],
@@ -359,19 +378,25 @@ class EveningReportGenerator:
     # 保存功能
     # ================================================================
 
-    def save_report(self, html_content: str, filename: str = None) -> str:
+    def save_report(self, html_content: str, window_no: str = None, filename: str = None) -> str:
         if not filename:
-            filename = f"evening_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
+            if window_no:
+                filename = f"evening_report_{window_no}.html"
+            else:
+                filename = f"evening_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
 
         file_path = self.reports_dir / filename
         file_path.write_text(html_content, encoding="utf-8")
         logger.info(f"晚报 HTML 已保存: {file_path}")
         return str(file_path)
 
-    def save_image(self, image_data: bytes, filename: str = None) -> str:
+    def save_image(self, image_data: bytes, window_no: str = None, filename: str = None) -> str:
         """保存图片 bytes 到文件"""
         if not filename:
-            filename = f"evening_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+            if window_no:
+                filename = f"evening_report_{window_no}.png"
+            else:
+                filename = f"evening_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
 
         file_path = self.reports_dir / filename
         file_path.write_bytes(image_data)

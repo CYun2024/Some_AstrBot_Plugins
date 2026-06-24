@@ -267,33 +267,23 @@ class HeiboxYard(Star):
                 logger.error(f"LLM 分析定时循环异常: {e}")
                 await asyncio.sleep(60)
 
-    async def _run_llm_analysis(self, window_no: str = None):
+    async def _run_llm_analysis(self, window_no: str = None, force_reanalyze: bool = False):
         """执行 LLM 分析
-        
+
         Args:
             window_no: 窗口编号（如 "20260621"），None 则使用当前窗口
+            force_reanalyze: 是否强制重新分析所有帖子（默认 False，只补全缺失的）
         """
         try:
             if window_no is None:
                 window_no = get_current_window_no()
-            
+
             window_start, window_end = get_window_by_no(window_no)
             logger.info(f"LLM 分析: 窗口编号={window_no}, window_start={ts_to_bj_str(window_start)}")
 
-            # 检查是否已有分析记录
+            # 查询该窗口编号的帖子（包括 feed 和 at）
             conn = sqlite3.connect(self.db_path)
             cur = conn.cursor()
-            cur.execute(
-                "SELECT COUNT(*) FROM llm_analyses WHERE daily_no LIKE ? || '-%'",
-                (window_no,)
-            )
-            existing = cur.fetchone()[0]
-            if existing > 0:
-                logger.info(f"窗口 {window_no} 已有 {existing} 条分析记录，跳过")
-                conn.close()
-                return
-
-            # 查询该窗口编号的帖子（包括 feed 和 at）
             cur.execute(
                 "SELECT link_id, daily_no, title, create_at, userid, username, content, image_urls "
                 "FROM posts WHERE date_str = ? ORDER BY daily_no",
@@ -325,20 +315,124 @@ class HeiboxYard(Star):
                     "image_descriptions": image_descriptions,
                 })
 
+            # 检查已有分析记录数
+            existing_count = self.llm_analyzer.db.get_existing_analysis_count(window_start)
+
+            if existing_count > 0:
+                if force_reanalyze:
+                    logger.info(f"窗口 {window_no} 已有 {existing_count} 条分析记录，强制重新分析所有 {len(posts)} 个帖子")
+                    # 删除旧记录，重新分析
+                    conn = sqlite3.connect(self.db_path)
+                    cur = conn.cursor()
+                    cur.execute("DELETE FROM llm_analyses WHERE window_start = ?", (window_start,))
+                    conn.commit()
+                    conn.close()
+                    logger.info(f"已清除窗口 {window_no} 的旧分析记录")
+                else:
+                    logger.info(f"窗口 {window_no} 已有 {existing_count} 条分析记录，将只补全缺失的评论")
+
             logger.info(f"准备分析 {len(posts)} 个帖子")
             original_batch_size = self.llm_analyzer._batch_size
             self.llm_analyzer._batch_size = self.llm_analysis_batch_size
 
             try:
-                success = await self.llm_analyzer.analyze_posts(window_start, posts)
-                logger.info("LLM 分析全部完成" if success else "LLM 分析部分失败")
+                if force_reanalyze or existing_count == 0:
+                    # 全新分析或强制重分析
+                    success = await self.llm_analyzer.analyze_posts(window_start, posts)
+                    logger.info("LLM 分析全部完成" if success else "LLM 分析部分失败")
+
+                # ===== 补全机制：检查并修复缺失的评论（无论是否强制重分析都会执行）=====
+                await self._ensure_all_analyses(window_start, posts)
+
             finally:
                 self.llm_analyzer._batch_size = original_batch_size
 
         except Exception as e:
             logger.error(f"执行 LLM 分析失败: {e}")
 
-    # ==================== 晚报 ====================
+    async def _ensure_all_analyses(self, window_start: int, posts: list[dict]):
+        """
+        确保窗口内所有帖子都有 AI 评论，没有则补全
+        同时确保总评已生成
+        """
+        window_no = get_window_no_from_start(window_start)
+        logger.info(f"🔍 开始检查窗口 {window_no} 的评论完整性...")
+
+        # 1. 检查帖子评论完整性并补全
+        filled, still_missing = await self.llm_analyzer.db.fill_missing_analyses(window_start, posts)
+
+        if still_missing > 0:
+            logger.warning(f"⚠️ 窗口 {window_no} 仍有 {still_missing} 个帖子缺少评论")
+        else:
+            logger.info(f"✅ 窗口 {window_no} 所有帖子评论已完整")
+
+        # 2. 确保总评已生成（无论是否已有分析记录，都触发总评检查）
+        logger.info(f"📝 检查窗口 {window_no} 的总评...")
+        await self._ensure_ai_summary(window_no, posts)
+        logger.info(f"✅ 窗口 {window_no} 分析完整性检查完成")
+
+    async def _ensure_ai_summary(self, window_no: str, posts: list[dict]):
+        """
+        检查并确保窗口的总评已生成
+        如果总评不存在，则调用 AI 生成并存储
+        """
+        try:
+            # 检查是否已有分析记录
+            conn = sqlite3.connect(self.db_path)
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT COUNT(*) FROM llm_analyses WHERE daily_no LIKE ? || '-%'",
+                (window_no,)
+            )
+            analysis_count = cur.fetchone()[0]
+
+            # 检查是否已有总评记录（用特殊 daily_no 标记）
+            ws = get_window_by_no(window_no)[0]
+            cur.execute(
+                "SELECT comment FROM llm_analyses WHERE window_start = ? AND daily_no = ?",
+                (ws, "SUMMARY")
+            )
+            existing_summary = cur.fetchone()
+            conn.close()
+
+            if analysis_count == 0:
+                logger.warning(f"窗口 {window_no} 没有任何分析记录，无法生成总评")
+                return
+
+            # 如果已有总评且不为空，跳过
+            if existing_summary and existing_summary[0] and existing_summary[0].strip():
+                logger.info(f"窗口 {window_no} 已有总评，跳过预生成")
+                return
+
+            # 生成总评
+            logger.info(f"📝 窗口 {window_no} 缺少总评，正在预生成...")
+            ai_summary, summary_model, summary_tokens = await generate_ai_summary(
+                self.context, posts, window_no, self.llm_provider_id
+            )
+
+            if ai_summary and ai_summary.strip():
+                # 存储总评到数据库（使用特殊 daily_no = "SUMMARY"）
+                conn = sqlite3.connect(self.db_path)
+                cur = conn.cursor()
+                window_start = get_window_by_no(window_no)[0]
+                cur.execute("""
+                    INSERT OR REPLACE INTO llm_analyses 
+                    (window_start, daily_no, link_id, title, comment, analyzed_at, model_used)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    window_start, "SUMMARY", 0, "AI总评", 
+                    ai_summary, 
+                    datetime.now(timezone.utc).isoformat(),
+                    summary_model or "unknown"
+                ))
+                conn.commit()
+                conn.close()
+                logger.info(f"✅ 窗口 {window_no} 总评预生成完成")
+            else:
+                logger.warning(f"窗口 {window_no} 总评生成失败，返回为空")
+
+        except Exception as e:
+            logger.error(f"预生成总评失败: {e}")
 
     async def _evening_report_loop(self):
         if not self.evening_report_enabled:
@@ -445,7 +539,7 @@ class HeiboxYard(Star):
 
             html_content = self.report_generator.generate_evening_report(
                 posts=posts, 
-                issue_no=1, 
+                issue_no=issue_no, 
                 report_date=report_date,
                 community_name="庭院社区", 
                 theme="default",
@@ -457,7 +551,7 @@ class HeiboxYard(Star):
                 model_used=model_str,
             )
 
-            html_path = self.report_generator.save_report(html_content)
+            html_path = self.report_generator.save_report(html_content, window_no=window_no)
             logger.info("晚报 HTML 已保存: " + html_path)
 
             if self.evening_report_format == "html":
@@ -468,7 +562,7 @@ class HeiboxYard(Star):
                 if image_url:
                     if image_url.startswith("base64://"):
                         img_data = base64.b64decode(image_url[9:])
-                        image_path = self.report_generator.save_image(img_data)
+                        image_path = self.report_generator.save_image(img_data, window_no=window_no)
                     else:
                         image_path = image_url
                     logger.info("晚报 PNG 已保存: " + image_path)
@@ -846,25 +940,37 @@ class HeiboxYard(Star):
     @filter.command("分析今日帖子")
     async def cmd_analyze_today(self, event: AstrMessageEvent):
         """启动 LLM 分析
-        用法: /分析今日帖子 [窗口编号]
-        例如: /分析今日帖子 20260621
+        用法: /分析今日帖子 [窗口编号] [--force]
+        例如: 
+          /分析今日帖子 20260621
+          /分析今日帖子 20260621 --force
         不传参数则分析当前窗口
+        加 --force 则强制重新分析所有帖子（覆盖已有评论）
         """
         msg = event.message_str.strip()
         parts = msg.split()
-        
-        if len(parts) >= 2:
-            window_no = parts[1].strip()
-            if not (len(window_no) == 8 and window_no.isdigit()):
-                yield event.plain_result("❌ 窗口编号格式错误，应为 YYYYMMDD\n例如: /分析今日帖子 20260621")
-                return
-        else:
+
+        force_reanalyze = False
+        window_no = None
+
+        for part in parts[1:]:
+            if part == "--force":
+                force_reanalyze = True
+            elif len(part) == 8 and part.isdigit():
+                window_no = part
+
+        if window_no is None:
             window_no = get_current_window_no()
 
-        yield event.plain_result(
-            f"🤖 正在启动 LLM 分析（窗口 {window_no}），请稍候..."
-        )
-        asyncio.create_task(self._run_llm_analysis(window_no=window_no))
+        if force_reanalyze:
+            yield event.plain_result(
+                f"🤖 正在强制重新分析所有帖子（窗口 {window_no}），将覆盖已有评论，请稍候..."
+            )
+        else:
+            yield event.plain_result(
+                f"🤖 正在启动 LLM 分析（窗口 {window_no}），已有评论保留，只补全缺失的，请稍候..."
+            )
+        asyncio.create_task(self._run_llm_analysis(window_no=window_no, force_reanalyze=force_reanalyze))
 
     @filter.command("今日分析")
     async def cmd_today_analysis(self, event: AstrMessageEvent):
@@ -956,15 +1062,28 @@ class HeiboxYard(Star):
             self.context, posts, window_no, self.llm_provider_id
         )
 
+        # 计算期号
+        issue_no = self.report_generator.calculate_issue_no(window_no)
+
         report_date = datetime.fromtimestamp(window_end, tz=timezone(timedelta(hours=8))).strftime("%Y年%m月%d日")
+        # 计算统计信息
+        total_comments = len(posts)
+        elapsed_time = "手动生成"
+        tokens_used = "--"
+        cost_estimate = "--"
+
         html_content = self.report_generator.generate_evening_report(
-            posts=posts, issue_no=1, report_date=report_date,
+            posts=posts, issue_no=issue_no, report_date=report_date,
             community_name="庭院社区", theme="default",
             ai_summary=ai_summary,
+            total_comments=total_comments,
+            elapsed_time=elapsed_time,
+            tokens_used=tokens_used,
+            cost_estimate=cost_estimate,
             model_used=summary_model if summary_model else "--",
         )
 
-        html_path = self.report_generator.save_report(html_content)
+        html_path = self.report_generator.save_report(html_content, window_no=window_no)
         yield event.plain_result(f"✅ 晚报 HTML 已保存\n📄 {html_path}")
 
         if self.evening_report_format == "html":
@@ -975,12 +1094,154 @@ class HeiboxYard(Star):
             if image_url:
                 if image_url.startswith("base64://"):
                     img_data = base64.b64decode(image_url[9:])
-                    tmp_path = self.report_generator.save_image(img_data)
+                    tmp_path = self.report_generator.save_image(img_data, window_no=window_no)
                     yield event.image_result(tmp_path)
                 else:
                     yield event.image_result(image_url)
             else:
                 yield event.plain_result("❌ 图片渲染失败，但 HTML 已保存")
+
+    @filter.command("调整窗口")
+    async def cmd_adjust_window(self, event: AstrMessageEvent):
+        """调整帖子到指定窗口编号
+        用法: /调整窗口 <帖子序号> <目标窗口编号>
+        例如: /调整窗口 4 20260623
+        - 帖子序号: 当前窗口内的帖子序号（如 1, 2, 3...）
+        - 目标窗口编号: 要移动到的窗口编号（如 20260623）
+        """
+        msg = event.message_str.strip()
+        parts = msg.split()
+
+        if len(parts) < 3:
+            yield event.plain_result(
+                "❌ 用法: /调整窗口 <帖子序号> <目标窗口编号>\n"
+                "例如: /调整窗口 4 20260623"
+            )
+            return
+
+        # 解析参数
+        try:
+            post_seq = int(parts[1])
+        except ValueError:
+            yield event.plain_result("❌ 帖子序号必须是数字，例如: /调整窗口 4 20260623")
+            return
+
+        target_window_no = parts[2].strip()
+        if not (len(target_window_no) == 8 and target_window_no.isdigit()):
+            yield event.plain_result("❌ 目标窗口编号格式错误，应为 YYYYMMDD\n例如: /调整窗口 4 20260623")
+            return
+
+        # 确定源窗口（当前窗口）
+        source_window_no = get_current_window_no()
+
+        # 获取源窗口的帖子列表
+        source_posts = self.post_manager.get_posts_by_window_no(source_window_no)
+        if not source_posts:
+            yield event.plain_result(f"📭 当前窗口 {source_window_no} 内没有帖子")
+            return
+
+        # 检查序号是否有效
+        if post_seq < 1 or post_seq > len(source_posts):
+            yield event.plain_result(
+                f"❌ 帖子序号 {post_seq} 超出范围\n"
+                f"当前窗口 {source_window_no} 共有 {len(source_posts)} 个帖子"
+            )
+            return
+
+        # 获取目标帖子
+        link_id, old_daily_no = source_posts[post_seq - 1]
+
+        # 执行调整
+        try:
+            result_msg = await self._adjust_post_window(link_id, old_daily_no, source_window_no, target_window_no)
+            yield event.plain_result(result_msg)
+        except Exception as e:
+            logger.error(f"调整窗口失败: {e}", exc_info=True)
+            yield event.plain_result(f"❌ 调整失败: {str(e)}")
+
+    async def _adjust_post_window(self, link_id: int, old_daily_no: str, 
+                                   source_window_no: str, target_window_no: str) -> str:
+        """执行帖子窗口调整的核心逻辑"""
+
+        # 1. 获取目标窗口的时间范围
+        target_window_start, target_window_end = get_window_by_no(target_window_no)
+
+        # 2. 获取帖子的完整信息
+        full_post = self.post_manager._get_full_post(link_id)
+        if not full_post:
+            return f"❌ 无法获取帖子 ID={link_id} 的完整数据"
+
+        detail = full_post["detail"]
+        content_text = full_post["content"]
+        saved_images = full_post["images"]
+        topics_str = full_post["topics"]
+
+        # 3. 获取目标窗口的新编号
+        new_daily_no = self.post_manager.get_next_daily_no(target_window_no)
+
+        # 4. 保存到目标窗口
+        self.post_manager.save_post(
+            link_id, new_daily_no, target_window_start, target_window_no,
+            detail, content_text, saved_images, topics_str, source="feed"
+        )
+
+        # 5. 删除源窗口中的旧记录
+        conn = sqlite3.connect(self.db_path)
+        cur = conn.cursor()
+        cur.execute("DELETE FROM posts WHERE link_id = ? AND date_str = ?", (link_id, source_window_no))
+        deleted = cur.rowcount
+        conn.commit()
+        conn.close()
+
+        # 6. 重新编号源窗口中剩余的帖子（确保编号连续）
+        renumbered = self.post_manager.renumber_window_posts(source_window_no)
+
+        # 7. 同步移动 AI 分析记录
+        await self._move_analysis_record(link_id, old_daily_no, source_window_no, target_window_no, new_daily_no)
+
+        logger.info(f"✅ 帖子调整完成: #{old_daily_no} (窗口{source_window_no}) -> #{new_daily_no} (窗口{target_window_no}), link_id={link_id}")
+
+        # 构建返回消息
+        msg_lines = [
+            "✅ 调整成功！",
+            f"📌 帖子 ID: {link_id}",
+            f"📋 原编号: #{old_daily_no} (窗口 {source_window_no})",
+            f"📋 新编号: #{new_daily_no} (窗口 {target_window_no})",
+            f"🕐 新窗口时间: {ts_to_bj_str(target_window_start)} ~ {ts_to_bj_str(target_window_end)}",
+        ]
+        if renumbered > 0:
+            msg_lines.append(f"🔄 源窗口 {source_window_no} 已重新编号 {renumbered} 个帖子")
+
+        return "\n".join(msg_lines)
+
+    async def _move_analysis_record(self, link_id: int, old_daily_no: str, 
+                                     source_window_no: str, target_window_no: str, new_daily_no: str):
+        """移动 AI 分析记录到目标窗口"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cur = conn.cursor()
+
+            # 检查是否有分析记录
+            cur.execute(
+                "SELECT id FROM llm_analyses WHERE link_id = ? AND daily_no = ?",
+                (link_id, old_daily_no)
+            )
+            row = cur.fetchone()
+
+            if row:
+                # 更新分析记录的窗口信息和 daily_no
+                target_window_start, _ = get_window_by_no(target_window_no)
+                cur.execute("""
+                    UPDATE llm_analyses 
+                    SET window_start = ?, daily_no = ?
+                    WHERE link_id = ? AND daily_no = ?
+                """, (target_window_start, new_daily_no, link_id, old_daily_no))
+                conn.commit()
+                logger.info(f"📝 AI分析记录已同步移动: #{old_daily_no} -> #{new_daily_no}")
+
+            conn.close()
+        except Exception as e:
+            logger.warning(f"移动 AI 分析记录失败: {e}")
 
     # ==================== 生命周期 ====================
 
