@@ -91,16 +91,61 @@ class AtMessageFetcher:
                 return h
         return min(self.fetch_hours)
 
+    def _get_target_window_no(self, fetch_hour: int) -> str:
+        """
+        获取@消息应该归入的目标窗口编号
+
+        特殊处理：在22:00执行拉取时，拉取的是 recent_hours 小时内的消息
+        例如22:00拉取最近6小时的消息（16:00-22:00），这些消息应该归入当前窗口
+        但22:00是窗口分界线，get_current_window_no() 在22:00后会返回下一个窗口
+
+        解决方案：
+        - 如果当前时间是22:00整（或接近22:00），且拉取小时包含22
+          则使用上一个窗口的编号
+        - 否则使用当前窗口编号
+        """
+        now_bj = datetime.now(timezone(timedelta(hours=8)))
+        current_hour = now_bj.hour
+        current_minute = now_bj.minute
+
+        # 获取当前窗口编号（可能已经是下一个窗口）
+        current_window_no = get_current_window_no()
+
+        # 如果在22:00-22:05之间执行，且拉取小时是22
+        # 说明这是22:00的定时拉取，应该归入上一个窗口
+        if fetch_hour == 22 and current_hour == 22 and current_minute < 10:
+            # 上一个窗口 = 当前日期（因为22:00后窗口编号是明天）
+            # 例如 2026-06-25 22:00，当前窗口编号是 20260626
+            # 上一个窗口编号是 20260625
+            try:
+                window_start, _ = get_window_by_no(current_window_no)
+                # 上一个窗口的结束时间 = 当前窗口的开始时间
+                # 上一个窗口编号 = 当前窗口开始时间对应的日期
+                prev_window_end = window_start
+                prev_dt = datetime.fromtimestamp(prev_window_end, tz=timezone(timedelta(hours=8)))
+                prev_window_no = prev_dt.strftime("%Y%m%d")
+                logger.info(f"22:00 定时拉取特殊处理: 使用上一个窗口编号 {prev_window_no} (当前窗口={current_window_no})")
+                return prev_window_no
+            except Exception as e:
+                logger.warning(f"计算上一个窗口编号失败: {e}，回退到当前窗口 {current_window_no}")
+                return current_window_no
+
+        return current_window_no
+
     async def fetch_and_process(self) -> int:
         """
         拉取 @消息并处理帖子
-        所有@消息归入当前窗口编号
+        所有@消息归入当前窗口编号（22:00特殊处理）
         返回处理的帖子数量
         """
         try:
-            # 确定当前窗口编号
-            target_window_no = get_current_window_no()
-            logger.info(f"@消息拉取: 当前窗口编号={target_window_no}")
+            # 确定当前执行的小时（用于22:00特殊处理）
+            now_bj = datetime.now(timezone(timedelta(hours=8)))
+            fetch_hour = now_bj.hour
+
+            # 确定目标窗口编号（处理22:00分界线问题）
+            target_window_no = self._get_target_window_no(fetch_hour)
+            logger.info(f"@消息拉取: 当前时间={now_bj.strftime('%H:%M')}, 目标窗口编号={target_window_no}")
 
             link_ids = await self.post_manager.fetch_at_messages(recent_hours=self.recent_hours)
             if not link_ids:

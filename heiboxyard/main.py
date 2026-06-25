@@ -491,22 +491,19 @@ class HeiboxYard(Star):
                 await asyncio.sleep(wait_seconds)
 
                 logger.info("执行每日晚报生成")
-                # 定时任务不传入 analysis_tokens（因为 LLM 分析是独立任务，token 已分别记录）
-                await self._generate_and_save_evening_report(send=self.evening_report_auto_send)
+                # 先执行一次 LLM 分析（补全缺失评论），获取 token 信息
+                analysis_tokens = await self._run_llm_analysis(force_reanalyze=False)
+                # 生成晚报，传入 analysis_tokens
+                await self._generate_and_save_evening_report(
+                    send=self.evening_report_auto_send,
+                    analysis_tokens=analysis_tokens
+                )
             except Exception as e:
                 logger.error("晚报定时循环异常: " + str(e))
                 await asyncio.sleep(60)
-
     async def _generate_and_save_evening_report(self, window_no: str = None, send: bool = False,
                                                 analysis_tokens: dict = None, summary_tokens: dict = None):
-        """生成晚报
-
-        Args:
-            window_no: 窗口编号（如 "20260621"），None 则使用当前窗口
-            send: 是否自动发送
-            analysis_tokens: 帖子分析累积的 token 信息（可选）
-            summary_tokens: 总评生成的 token 信息（可选）
-        """
+        """生成晚报，可传入帖子分析 token 和总评 token"""
         import time
         start_time = time.time()
 
@@ -555,7 +552,7 @@ class HeiboxYard(Star):
                 if row[9]:
                     model_used_set.add(row[9])
 
-            # 生成AI总评价
+            # 生成AI总评价（同时获取总评 token）
             ai_summary, summary_model, summary_token_info = await generate_ai_summary(
                 self.context, posts, window_no, self.llm_provider_id
             )
@@ -571,27 +568,31 @@ class HeiboxYard(Star):
                 all_models.add(summary_model)
             model_str = ", ".join(all_models) if all_models else "--"
 
-            # ========== Token 统计（真实数据，非估算）==========
-            # 合并帖子分析 token 和总评 token
+            # ========== Token 统计（汇总帖子分析 + 总评） ==========
             total_tokens = 0
             total_cache_hit = 0
             total_completion = 0
 
+            # 累加帖子分析 token（从 analysis_tokens）
             if analysis_tokens:
                 total_tokens += analysis_tokens.get("total_tokens", 0)
                 total_cache_hit += analysis_tokens.get("prompt_cache_hit_tokens", 0)
                 total_completion += analysis_tokens.get("completion_tokens", 0)
 
+            # 累加总评 token
             if summary_token_info:
                 total_tokens += summary_token_info.get("total_tokens", 0)
                 total_cache_hit += summary_token_info.get("prompt_cache_hit_tokens", 0)
                 total_completion += summary_token_info.get("completion_tokens", 0)
 
-            # 格式化: 总/缓存命中/输出
             if total_tokens > 0:
                 tokens_str = f"{total_tokens}/{total_cache_hit}/{total_completion}"
             else:
                 tokens_str = "--"
+
+            # 计算期号
+            issue_no = self.report_generator.calculate_issue_no(window_no)
+            generation_time = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
 
             html_content = self.report_generator.generate_evening_report(
                 posts=posts, 
@@ -628,7 +629,6 @@ class HeiboxYard(Star):
 
         except Exception as e:
             logger.error("生成晚报失败: " + str(e), exc_info=True)
-
     async def _render_evening_report_image(self, html_content: str) -> Optional[str]:
         try:
             logger.info("开始调用 AstrBot T2I 渲染...")

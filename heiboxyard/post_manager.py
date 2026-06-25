@@ -409,23 +409,65 @@ class PostManager:
 
             total = len(rows)
             window_start, _ = get_window_by_no(window_no)
+
+            # ========== 修复：清理残留的 AI 分析记录 ==========
+            # 获取该窗口下所有有效的 link_id
+            valid_link_ids = [row[0] for row in rows]
+            if valid_link_ids:
+                placeholders = ",".join(["?"] * len(valid_link_ids))
+                # 删除该窗口下不在 posts 表中的 llm_analyses 记录
+                cur.execute(f"""
+                    DELETE FROM llm_analyses 
+                    WHERE window_start = ? AND link_id NOT IN ({placeholders})
+                """, (window_start, *valid_link_ids))
+                deleted_count = cur.rowcount
+                if deleted_count > 0:
+                    logger.info(f"清理残留 AI 分析记录: 窗口 {window_no} 删除 {deleted_count} 条无效记录")
+
+            # 同时清理该窗口下 daily_no 为 NULL 或空字符串的记录（避免后续冲突）
+            cur.execute("""
+                DELETE FROM llm_analyses 
+                WHERE window_start = ? AND (daily_no IS NULL OR daily_no = '')
+            """, (window_start,))
+            null_deleted = cur.rowcount
+            if null_deleted > 0:
+                logger.info(f"清理空 daily_no 的 AI 分析记录: {null_deleted} 条")
+            # ==================================================
+
             renumbered = 0
 
-            for new_seq, (link_id, old_daily_no, create_at) in enumerate(rows, start=1):
-                new_daily_no = format_daily_no(window_no, new_seq)
-                if old_daily_no != new_daily_no:
-                    # 更新 posts 表
-                    cur.execute(
-                        "UPDATE posts SET daily_no = ? WHERE link_id = ? AND date_str = ?",
-                        (new_daily_no, link_id, window_no)
-                    )
-                    # 同步更新 llm_analyses 表
+            # 第一步：将所有帖子编号改为临时编号，避免 UNIQUE 冲突
+            temp_prefix = f"TEMP-{int(datetime.now(timezone.utc).timestamp())}"
+            for idx, (link_id, old_daily_no, create_at) in enumerate(rows):
+                temp_daily_no = f"{temp_prefix}-{idx}"
+                # 更新 posts 表
+                cur.execute(
+                    "UPDATE posts SET daily_no = ? WHERE link_id = ? AND date_str = ?",
+                    (temp_daily_no, link_id, window_no)
+                )
+                # 同步更新 llm_analyses 表（只更新有记录且 daily_no 不为空的）
+                if old_daily_no:
                     cur.execute(
                         "UPDATE llm_analyses SET daily_no = ? WHERE window_start = ? AND daily_no = ?",
-                        (new_daily_no, window_start, old_daily_no)
+                        (temp_daily_no, window_start, old_daily_no)
                     )
-                    renumbered += 1
-                    logger.info(f"重新编号: #{old_daily_no} -> #{new_daily_no}, link_id={link_id}")
+
+            # 第二步：将临时编号改为最终编号
+            for new_seq, (link_id, _, create_at) in enumerate(rows, start=1):
+                final_daily_no = format_daily_no(window_no, new_seq)
+                temp_daily_no = f"{temp_prefix}-{new_seq - 1}"
+                # 更新 posts 表
+                cur.execute(
+                    "UPDATE posts SET daily_no = ? WHERE link_id = ? AND date_str = ?",
+                    (final_daily_no, link_id, window_no)
+                )
+                # 同步更新 llm_analyses 表
+                cur.execute(
+                    "UPDATE llm_analyses SET daily_no = ? WHERE window_start = ? AND daily_no = ?",
+                    (final_daily_no, window_start, temp_daily_no)
+                )
+                renumbered += 1
+                logger.info(f"重新编号: {temp_daily_no} -> #{final_daily_no}, link_id={link_id}")
 
             conn.commit()
 
