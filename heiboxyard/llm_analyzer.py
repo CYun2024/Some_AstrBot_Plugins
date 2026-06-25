@@ -1,6 +1,9 @@
 """
-小黑盒帖子 LLM 分析模块（增强版）
-支持：图片分析结果、用户历史记忆、群友式评论
+小黑盒帖子 LLM 分析模块（重构版）
+核心改进：
+- llm_analyses 表以 link_id 为硬绑定键，daily_no 仅作展示排序用
+- 所有更新/删除/查询操作优先通过 link_id 定位，避免 daily_no 变化导致失联
+- 增加 link_id 独立索引，支持快速级联更新
 """
 import asyncio
 import json
@@ -119,14 +122,20 @@ def _build_analysis_prompt(posts: list[dict]) -> str:
 # ========== 数据库操作 ==========
 
 class LLMAnalysisDB:
-    """LLM 分析结果数据库管理"""
+    """LLM 分析结果数据库管理（重构版）
+
+    绑定机制变更：
+    - 旧版：通过 (window_start, daily_no) 联合唯一约束绑定
+    - 新版：通过 link_id 建立硬绑定，daily_no 仅用于展示排序
+    - 所有更新/删除/查询操作优先通过 link_id 定位
+    """
 
     def __init__(self, db_path: Path):
         self.db_path = db_path
         self._init_db()
 
     def _init_db(self):
-        """初始化分析结果表（兼容旧版，新增字段）"""
+        """初始化分析结果表（重构版）"""
         conn = sqlite3.connect(self.db_path)
         cur = conn.cursor()
 
@@ -155,14 +164,16 @@ class LLMAnalysisDB:
                     raw_response TEXT,
                     analyzed_at TEXT,
                     model_used TEXT,
-                    UNIQUE(window_start, daily_no)
+                    UNIQUE(link_id),           -- 硬绑定：每个帖子只有一条分析记录
+                    UNIQUE(window_start, daily_no)  -- 软约束：同一窗口内 daily_no 不重复
                 )
             """)
             cur.execute("CREATE INDEX idx_analysis_window ON llm_analyses(window_start)")
             cur.execute("CREATE INDEX idx_analysis_window_no ON llm_analyses(window_start, daily_no)")
-            logger.info("LLM 分析结果表初始化完成")
+            cur.execute("CREATE INDEX idx_analysis_link ON llm_analyses(link_id)")  -- 硬绑定索引
+            logger.info("LLM 分析结果表初始化完成（重构版，link_id 硬绑定）")
         else:
-            # 迁移：检查并添加新字段
+            # 迁移：检查并添加新字段和索引
             cur.execute("PRAGMA table_info(llm_analyses)")
             existing_cols = {row[1] for row in cur.fetchall()}
 
@@ -178,9 +189,13 @@ class LLMAnalysisDB:
                 cur.execute("PRAGMA table_info(llm_analyses)")
                 for row in cur.fetchall():
                     if row[1] == "daily_no" and row[2] != "TEXT":
-                        # 需要重建表来修改类型
                         migrations.append("RECREATE_TABLE_FOR_DAILY_NO_TEXT")
                         break
+
+            # 检查索引是否存在
+            cur.execute("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_analysis_link'")
+            if not cur.fetchone():
+                migrations.append("CREATE INDEX idx_analysis_link ON llm_analyses(link_id)")
 
             for sql in migrations:
                 if sql == "RECREATE_TABLE_FOR_DAILY_NO_TEXT":
@@ -206,6 +221,7 @@ class LLMAnalysisDB:
                                 raw_response TEXT,
                                 analyzed_at TEXT,
                                 model_used TEXT,
+                                UNIQUE(link_id),
                                 UNIQUE(window_start, daily_no)
                             )
                         """)
@@ -221,9 +237,10 @@ class LLMAnalysisDB:
                         cur.execute("ALTER TABLE llm_analyses_new RENAME TO llm_analyses")
                         cur.execute("CREATE INDEX idx_analysis_window ON llm_analyses(window_start)")
                         cur.execute("CREATE INDEX idx_analysis_window_no ON llm_analyses(window_start, daily_no)")
-                        logger.info("LLM分析表 daily_no 类型迁移为 TEXT")
+                        cur.execute("CREATE INDEX idx_analysis_link ON llm_analyses(link_id)")
+                        logger.info("LLM分析表重构完成：daily_no 类型迁移为 TEXT，增加 link_id 硬绑定")
                     except Exception as e:
-                        logger.warning(f"daily_no 类型迁移失败: {e}")
+                        logger.warning(f"表重构失败: {e}")
                 else:
                     try:
                         cur.execute(sql)
@@ -236,6 +253,101 @@ class LLMAnalysisDB:
 
         conn.commit()
         conn.close()
+
+    # ========== 硬绑定操作方法（推荐）==========
+
+    def get_analysis_by_link_id(self, link_id: int) -> Optional[dict]:
+        """通过 link_id 获取分析记录（硬绑定，最可靠）"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT window_start, daily_no, link_id, title, username, userid,
+                       create_at, create_at_str, content_length, image_count, image_paths,
+                       image_descriptions, comment, tags, analyzed_at, model_used
+                FROM llm_analyses WHERE link_id = ?
+            """, (link_id,))
+            row = cur.fetchone()
+            conn.close()
+            if row:
+                return {
+                    "window_start": row[0], "daily_no": row[1], "link_id": row[2],
+                    "title": row[3], "username": row[4], "userid": row[5],
+                    "create_at": row[6], "create_at_str": row[7],
+                    "content_length": row[8], "image_count": row[9],
+                    "image_paths": json.loads(row[10]) if row[10] else [],
+                    "image_descriptions": json.loads(row[11]) if row[11] else [],
+                    "comment": row[12], "tags": json.loads(row[13]) if row[13] else [],
+                    "analyzed_at": row[14], "model_used": row[15],
+                }
+            return None
+        except Exception as e:
+            logger.error(f"通过 link_id 查询分析记录失败: {e}")
+            return None
+
+    def update_by_link_id(self, link_id: int, new_daily_no: str = None, 
+                          new_window_start: int = None, new_comment: str = None) -> bool:
+        """通过 link_id 更新分析记录（硬绑定，无视 daily_no 变化）
+
+        Args:
+            link_id: 帖子ID（永恒不变）
+            new_daily_no: 新的 daily_no（可选）
+            new_window_start: 新的 window_start（可选）
+            new_comment: 新的评论内容（可选）
+        """
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cur = conn.cursor()
+
+            updates = []
+            params = []
+            if new_daily_no is not None:
+                updates.append("daily_no = ?")
+                params.append(str(new_daily_no))
+            if new_window_start is not None:
+                updates.append("window_start = ?")
+                params.append(new_window_start)
+            if new_comment is not None:
+                updates.append("comment = ?")
+                params.append(new_comment)
+                updates.append("analyzed_at = ?")
+                params.append(datetime.now(timezone.utc).isoformat())
+
+            if not updates:
+                conn.close()
+                return True
+
+            params.append(link_id)
+            sql = f"UPDATE llm_analyses SET {', '.join(updates)} WHERE link_id = ?"
+            cur.execute(sql, params)
+            conn.commit()
+            affected = cur.rowcount
+            conn.close()
+
+            if affected > 0:
+                logger.info(f"通过 link_id={link_id} 更新分析记录成功")
+            return True
+        except Exception as e:
+            logger.error(f"通过 link_id 更新分析记录失败: {e}")
+            return False
+
+    def delete_by_link_id(self, link_id: int) -> bool:
+        """通过 link_id 删除分析记录（硬绑定）"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cur = conn.cursor()
+            cur.execute("DELETE FROM llm_analyses WHERE link_id = ?", (link_id,))
+            deleted = cur.rowcount
+            conn.commit()
+            conn.close()
+            if deleted > 0:
+                logger.info(f"通过 link_id={link_id} 删除 {deleted} 条分析记录")
+            return True
+        except Exception as e:
+            logger.error(f"通过 link_id 删除分析记录失败: {e}")
+            return False
+
+    # ========== 兼容旧版方法（软绑定，保留但标记为不推荐）==========
 
     def get_existing_analysis_count(self, window_start: int) -> int:
         """获取指定窗口已分析的数量"""
@@ -252,15 +364,16 @@ class LLMAnalysisDB:
 
     def save_analyses(self, window_start: int, posts: list[dict], analyses: list[dict],
                       raw_response: str, model_used: str):
-        """保存分析结果"""
+        """保存分析结果（重构版：以 link_id 为主键，支持更新）"""
         conn = sqlite3.connect(self.db_path)
         cur = conn.cursor()
         analyzed_at = datetime.now(timezone.utc).isoformat()
 
         for post, analysis in zip(posts, analyses):
             try:
+                link_id = post.get('link_id')
                 daily_no = post.get('daily_no')
-                if daily_no is None:
+                if not link_id or daily_no is None:
                     continue
 
                 image_paths = post.get('image_paths', [])
@@ -269,6 +382,7 @@ class LLMAnalysisDB:
                 image_descs = post.get('image_descriptions', [])
                 image_descs_str = json.dumps(image_descs, ensure_ascii=False) if image_descs else None
 
+                # 使用 INSERT OR REPLACE，以 link_id 为唯一键自动更新
                 cur.execute("""
                     INSERT OR REPLACE INTO llm_analyses (
                         window_start, daily_no, link_id, title, username, userid,
@@ -278,7 +392,7 @@ class LLMAnalysisDB:
                 """, (
                     window_start,
                     str(daily_no),
-                    post.get('link_id', 0),
+                    link_id,
                     post.get('title', ''),
                     post.get('username', ''),
                     post.get('userid', 0),
@@ -295,16 +409,15 @@ class LLMAnalysisDB:
                     model_used
                 ))
             except Exception as e:
-                logger.error(f"保存 daily_no={post.get('daily_no')} 分析结果失败: {e}")
+                logger.error(f"保存 link_id={post.get('link_id')} 分析结果失败: {e}")
                 continue
 
         conn.commit()
         conn.close()
-        logger.info(f"已保存 {len(analyses)} 条分析结果")
-
+        logger.info(f"已保存/更新 {len(analyses)} 条分析结果")
 
     def update_comment(self, window_start: int, daily_no: str, new_comment: str) -> bool:
-        """手动更新指定帖子的 AI 评论"""
+        """手动更新指定帖子的 AI 评论（兼容旧接口）"""
         try:
             conn = sqlite3.connect(self.db_path)
             cur = conn.cursor()
@@ -326,9 +439,12 @@ class LLMAnalysisDB:
             logger.error(f"手动更新评论失败: {e}")
             return False
 
-
     def update_daily_no(self, old_daily_no: str, new_daily_no: str, window_start: int = None) -> bool:
-        """更新 AI 分析记录中的 daily_no（用于 /调整顺序 指令同步）"""
+        """更新 AI 分析记录中的 daily_no（用于 /调整顺序 指令同步）
+
+        警告：此方法依赖 daily_no 定位，在 daily_no 已变化后可能失效。
+        推荐使用 update_by_link_id() 方法。
+        """
         try:
             conn = sqlite3.connect(self.db_path)
             cur = conn.cursor()
@@ -394,14 +510,8 @@ class LLMAnalysisDB:
             logger.error(f"获取分析报告失败: {e}")
             return None
 
-
-
     def get_analysis_report_by_prefix(self, window_no: str) -> Optional[list[dict]]:
-        """获取指定窗口编号的完整分析报告
-        
-        Args:
-            window_no: 窗口编号（如 "20260621"）
-        """
+        """获取指定窗口编号的完整分析报告（兼容旧接口）"""
         try:
             conn = sqlite3.connect(self.db_path)
             cur = conn.cursor()
@@ -409,7 +519,7 @@ class LLMAnalysisDB:
                 SELECT daily_no, link_id, title, username, create_at_str, content_length,
                        image_count, comment, tags, analyzed_at, model_used
                 FROM llm_analyses
-                WHERE daily_no LIKE ? || '-%'
+                WHERE daily_no LIKE ? || '-_%'
                 ORDER BY daily_no
             """, (window_no,))
             rows = cur.fetchall()
@@ -436,38 +546,11 @@ class LLMAnalysisDB:
             return None
 
     def delete_analysis_by_link_id(self, link_id: int) -> bool:
-        """根据 link_id 删除 AI 分析记录
-
-        Args:
-            link_id: 帖子ID
-
-        Returns:
-            是否成功删除
-        """
-        try:
-            conn = sqlite3.connect(self.db_path)
-            cur = conn.cursor()
-            cur.execute("DELETE FROM llm_analyses WHERE link_id = ?", (link_id,))
-            deleted_count = cur.rowcount
-            conn.commit()
-            conn.close()
-            if deleted_count > 0:
-                logger.info(f"已删除 link_id={link_id} 的 {deleted_count} 条 AI 分析记录")
-                return True
-            return False
-        except Exception as e:
-            logger.error(f"删除 AI 分析记录失败 link_id={link_id}: {e}")
-            return False
+        """根据 link_id 删除 AI 分析记录（硬绑定，最可靠）"""
+        return self.delete_by_link_id(link_id)
 
     def has_analysis(self, link_id: int) -> bool:
-        """检查帖子是否已有 AI 分析记录
-
-        Args:
-            link_id: 帖子ID
-
-        Returns:
-            是否有分析记录
-        """
+        """检查帖子是否已有 AI 分析记录（硬绑定）"""
         try:
             conn = sqlite3.connect(self.db_path)
             cur = conn.cursor()
@@ -480,16 +563,7 @@ class LLMAnalysisDB:
             return False
 
     def get_missing_analyses(self, window_start: int, expected_posts: list[dict]) -> list[dict]:
-        """
-        检查指定窗口中哪些帖子缺少 AI 评论
-
-        Args:
-            window_start: 窗口起始时间戳
-            expected_posts: 期望分析的帖子列表
-
-        Returns:
-            缺少评论的帖子列表（包含完整帖子数据）
-        """
+        """检查指定窗口中哪些帖子缺少 AI 评论（使用硬绑定 link_id 检查）"""
         if not expected_posts:
             return []
 
@@ -497,9 +571,9 @@ class LLMAnalysisDB:
             conn = sqlite3.connect(self.db_path)
             cur = conn.cursor()
 
-            # 获取该窗口下所有已有评论的 daily_no
+            # 获取该窗口下所有已有评论的 link_id（硬绑定查询）
             cur.execute("""
-                SELECT daily_no, comment FROM llm_analyses
+                SELECT link_id, comment FROM llm_analyses
                 WHERE window_start = ?
             """, (window_start,))
             existing = {row[0]: row[1] for row in cur.fetchall()}
@@ -507,8 +581,8 @@ class LLMAnalysisDB:
 
             missing = []
             for post in expected_posts:
-                daily_no = post.get('daily_no')
-                comment = existing.get(daily_no)
+                link_id = post.get('link_id')
+                comment = existing.get(link_id)
                 # 检查评论是否为空或异常
                 if not comment or comment.strip() in (
                     '', 'LLM 返回结果异常，无法生成评论',
@@ -542,7 +616,6 @@ class LLMAnalysisDB:
         except Exception as e:
             logger.error(f"获取评论数量失败: {e}")
             return 0
-
 
 
 # ========== LLM 调用 ==========
@@ -593,16 +666,7 @@ class LLMPostAnalyzer:
             return None
 
     async def _call_llm(self, prompt: str, image_urls: list[str] = None) -> tuple[Optional[str], Optional[str], dict]:
-        """调用 LLM，返回 (completion_text, model_used, token_info)
-
-        token_info 格式: {
-            "total_tokens": int,
-            "prompt_tokens": int,
-            "completion_tokens": int,
-            "prompt_cache_hit_tokens": int,
-            "prompt_cache_miss_tokens": int,
-        }
-        """
+        """调用 LLM，返回 (completion_text, model_used, token_info)"""
         token_info = {
             "total_tokens": 0,
             "prompt_tokens": 0,
@@ -639,7 +703,7 @@ class LLMPostAnalyzer:
 
             model_used = getattr(llm_resp, 'model', provider.meta().id) or provider.meta().id
 
-            # ====== 修复：优先检查 usage 属性，兼容对象和字典 ======
+            # 提取 token 信息
             usage = getattr(llm_resp, 'usage', None)
             if usage:
                 if isinstance(usage, dict):
@@ -648,7 +712,6 @@ class LLMPostAnalyzer:
                     token_info["completion_tokens"] = usage.get('completion_tokens', 0) or 0
                     token_info["prompt_cache_hit_tokens"] = usage.get('prompt_cache_hit_tokens', 0) or 0
                     token_info["prompt_cache_miss_tokens"] = usage.get('prompt_cache_miss_tokens', 0) or 0
-                    # DeepSeek 兼容：prompt_tokens_details.cached_tokens
                     if token_info["prompt_cache_hit_tokens"] == 0:
                         ptd = usage.get('prompt_tokens_details')
                         if ptd and isinstance(ptd, dict):
@@ -657,13 +720,11 @@ class LLMPostAnalyzer:
                                 token_info["prompt_cache_hit_tokens"] = cached
                                 token_info["prompt_cache_miss_tokens"] = token_info["prompt_tokens"] - cached
                 else:
-                    # 对象属性访问（例如 CompletionUsage）
                     token_info["total_tokens"] = getattr(usage, 'total_tokens', 0) or 0
                     token_info["prompt_tokens"] = getattr(usage, 'prompt_tokens', 0) or 0
                     token_info["completion_tokens"] = getattr(usage, 'completion_tokens', 0) or 0
                     token_info["prompt_cache_hit_tokens"] = getattr(usage, 'prompt_cache_hit_tokens', 0) or 0
                     token_info["prompt_cache_miss_tokens"] = getattr(usage, 'prompt_cache_miss_tokens', 0) or 0
-                    # DeepSeek 兼容：prompt_tokens_details.cached_tokens
                     if token_info["prompt_cache_hit_tokens"] == 0:
                         ptd = getattr(usage, 'prompt_tokens_details', None)
                         if ptd:
@@ -671,23 +732,17 @@ class LLMPostAnalyzer:
                             if cached:
                                 token_info["prompt_cache_hit_tokens"] = cached
                                 token_info["prompt_cache_miss_tokens"] = token_info["prompt_tokens"] - cached
-                logger.debug(f"Token 提取成功: {token_info}")
             else:
-                # 降级：尝试 raw_usage
                 raw_usage = getattr(llm_resp, 'raw_usage', None)
                 if raw_usage:
                     if isinstance(raw_usage, dict):
-                        token_info["total_tokens"] = raw_usage.get('total_tokens', 0) or 0
-                        token_info["prompt_tokens"] = raw_usage.get('prompt_tokens', 0) or 0
-                        token_info["completion_tokens"] = raw_usage.get('completion_tokens', 0) or 0
-                        token_info["prompt_cache_hit_tokens"] = raw_usage.get('prompt_cache_hit_tokens', 0) or 0
-                        token_info["prompt_cache_miss_tokens"] = raw_usage.get('prompt_cache_miss_tokens', 0) or 0
+                        for key in token_info:
+                            token_info[key] = raw_usage.get(key, 0) or 0
                     else:
                         for key in token_info:
                             val = getattr(raw_usage, key, 0) or 0
                             token_info[key] = val
                 else:
-                    # 最终降级：直接属性
                     for key in token_info:
                         val = getattr(llm_resp, key, 0) or 0
                         token_info[key] = val
@@ -701,11 +756,7 @@ class LLMPostAnalyzer:
             return None, None, token_info
 
     async def analyze_posts(self, window_start: int, posts: list[dict]) -> tuple[bool, dict]:
-        """分析一批帖子，分批调用 LLM
-
-        Returns:
-            (是否全部成功, 累积的token使用信息字典)
-        """
+        """分析一批帖子，分批调用 LLM"""
         accumulated_tokens = {
             "total_tokens": 0,
             "prompt_tokens": 0,
@@ -721,7 +772,6 @@ class LLMPostAnalyzer:
         total = len(posts)
         logger.info(f"开始分析 {total} 个帖子，每批最多 {self._batch_size} 个")
 
-        # 为每个帖子获取历史记忆
         if self.memory_db:
             for p in posts:
                 userid = p.get('userid')
@@ -742,7 +792,6 @@ class LLMPostAnalyzer:
             prompt = _build_analysis_prompt(batch)
             completion_text, model_used, batch_tokens = await self._call_llm(prompt)
 
-            # 累积 token
             for key in accumulated_tokens:
                 accumulated_tokens[key] += batch_tokens.get(key, 0)
 
@@ -776,7 +825,6 @@ class LLMPostAnalyzer:
             try:
                 self.db.save_analyses(window_start, batch, analyses, completion_text, model_used or "unknown")
 
-                # 保存到用户记忆库
                 if self.memory_db:
                     for post, analysis in zip(batch, analyses):
                         userid = post.get('userid')
@@ -817,23 +865,11 @@ class LLMPostAnalyzer:
         return self.db.get_analysis_report(window_start)
 
     async def get_report_by_prefix(self, window_no: str) -> Optional[list[dict]]:
-        """获取分析报告（按窗口编号）
-        
-        Args:
-            window_no: 窗口编号（如 "20260621"）
-        """
+        """获取分析报告（按窗口编号）"""
         return self.db.get_analysis_report_by_prefix(window_no)
 
     async def analyze_single_post(self, post: dict) -> tuple[Optional[dict], dict]:
-        """
-        对单个帖子进行 AI 分析（用于补全漏掉的评论）
-
-        Args:
-            post: 帖子数据字典
-
-        Returns:
-            (分析结果字典, token使用信息字典)，失败返回 (None, token_info)
-        """
+        """对单个帖子进行 AI 分析（用于补全漏掉的评论）"""
         token_info = {
             "total_tokens": 0,
             "prompt_tokens": 0,
@@ -842,14 +878,11 @@ class LLMPostAnalyzer:
             "prompt_cache_miss_tokens": 0,
         }
         try:
-            # 构建单帖子的 prompt
             prompt = _build_single_analysis_prompt(post)
-
             logger.info(f"补全分析帖子 #{post.get('daily_no')} - {post.get('title', '(无标题)')}")
 
             completion_text, model_used, batch_tokens = await self._call_llm(prompt)
 
-            # 记录 token
             for key in token_info:
                 token_info[key] = batch_tokens.get(key, 0)
 
@@ -857,13 +890,11 @@ class LLMPostAnalyzer:
                 logger.error(f"单帖子分析 LLM 调用失败: #{post.get('daily_no')}")
                 return None, token_info
 
-            # 尝试解析 JSON
             analysis = self._safe_json_parse_single(completion_text)
             if analysis:
                 analysis['model_used'] = model_used or "unknown"
                 return analysis, token_info
 
-            # 解析失败，尝试直接提取评论内容
             logger.warning(f"单帖子 JSON 解析失败，尝试直接提取: #{post.get('daily_no')}")
             comment = self._extract_comment_from_text(completion_text)
             if comment:
@@ -902,7 +933,6 @@ class LLMPostAnalyzer:
                 return data[0]
             return None
         except json.JSONDecodeError:
-            # 尝试提取 JSON 对象
             start = cleaned.find("{")
             end = cleaned.rfind("}")
             if start != -1 and end != -1 and end > start:
@@ -919,11 +949,8 @@ class LLMPostAnalyzer:
         if not text:
             return None
 
-        # 移除 markdown 代码块
         cleaned = text.replace("```json", "").replace("```", "")
 
-        # 尝试找到 comment 后面的内容
-        # 查找 comment 关键字位置
         idx = cleaned.lower().find('"comment"')
         if idx == -1:
             idx = cleaned.lower().find("'comment'")
@@ -931,7 +958,6 @@ class LLMPostAnalyzer:
             idx = cleaned.lower().find('comment')
 
         if idx != -1:
-            # 找到 comment 后的第一个引号
             after = cleaned[idx + 7:]
             quote_idx = -1
             for i, c in enumerate(after):
@@ -939,14 +965,12 @@ class LLMPostAnalyzer:
                     quote_idx = i
                     break
             if quote_idx != -1:
-                # 找到匹配的结束引号
                 quote_char = after[quote_idx]
                 start = quote_idx + 1
                 end = after.find(quote_char, start)
                 if end != -1:
                     return after[start:end].strip()
 
-        # 如果没有 JSON 格式，取前 200 字作为评论
         cleaned = cleaned.strip()
         if len(cleaned) > 10:
             return cleaned[:200].strip()
@@ -954,16 +978,7 @@ class LLMPostAnalyzer:
         return None
 
     async def fill_missing_analyses(self, window_start: int, posts: list[dict]) -> tuple[int, int, dict]:
-        """
-        补全窗口中缺失的 AI 评论
-
-        Args:
-            window_start: 窗口起始时间戳
-            posts: 该窗口的所有帖子列表
-
-        Returns:
-            (成功补全数量, 仍然缺失数量, 累积token使用信息)
-        """
+        """补全窗口中缺失的 AI 评论"""
         accumulated_tokens = {
             "total_tokens": 0,
             "prompt_tokens": 0,
@@ -981,7 +996,6 @@ class LLMPostAnalyzer:
         success_count = 0
         for post in missing_posts:
             try:
-                # 获取历史记忆
                 if self.memory_db:
                     userid = post.get('userid')
                     username = post.get('username', '')
@@ -992,12 +1006,10 @@ class LLMPostAnalyzer:
 
                 analysis, single_tokens = await self.analyze_single_post(post)
 
-                # 累积补全的 token
                 for key in accumulated_tokens:
                     accumulated_tokens[key] += single_tokens.get(key, 0)
 
                 if analysis and analysis.get('comment'):
-                    # 保存到数据库
                     self.db.save_analyses(
                         window_start, 
                         [post], 
@@ -1006,7 +1018,6 @@ class LLMPostAnalyzer:
                         analysis.get('model_used', 'unknown')
                     )
 
-                    # 保存到用户记忆库
                     if self.memory_db:
                         userid = post.get('userid')
                         if userid:
@@ -1028,7 +1039,6 @@ class LLMPostAnalyzer:
                 else:
                     logger.warning(f"补全失败: #{post.get('daily_no')}")
 
-                # 每次请求间隔 3 秒，避免过快
                 await asyncio.sleep(3)
 
             except Exception as e:
@@ -1054,7 +1064,7 @@ def _build_single_analysis_prompt(post: dict) -> str:
     lines.append(f"标题: {post.get('title', '(无标题)')}")
     lines.append(f"作者: {post.get('username', '未知用户')}")
     if post.get('user_memory'):
-        lines.append(f"作者背景:\n{post['user_memory']}")
+        lines.append(f"作者背景:\n{p['user_memory']}")
     lines.append(f"发布时间: {post.get('create_at_str', '未知')}")
 
     content = post.get('content', '') or '(无内容)'
