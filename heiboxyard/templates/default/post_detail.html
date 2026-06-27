@@ -22,9 +22,15 @@
     </div>
     {% endif %}
 
+    <!-- AI 评论 -->
     <div class="ai-comment">
         <div class="comment-label">韶梦说</div>
         <div class="comment-text">{{ post.comment | default("暂无评论") }}</div>
     </div>
+
+    <!-- 热评 -->
+    {% if post.hot_comments_html %}
+    {{ post.hot_comments_html | safe }}
+    {% endif %}
 </div>
 {% endfor %}

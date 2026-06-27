@@ -21,10 +21,14 @@
                     {% endfor %}
                 </div>
                 {% endif %}
-                <!-- AI评论放下面，不截断 -->
+                <!-- AI评论 -->
                 <div class="brief-comment-full">
                     {{ post.comment | default("暂无评论") }}
                 </div>
+                <!-- 热评 -->
+                {% if post.hot_comments_html %}
+                {{ post.hot_comments_html | safe }}
+                {% endif %}
             </div>
         </div>
     </div>
