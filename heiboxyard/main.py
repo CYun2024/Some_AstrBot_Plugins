@@ -5,6 +5,7 @@
 - 所有帖子转移/调整操作使用 link_id 硬绑定级联同步
 - 支持评论数据展示
 - 修复数据失联问题
+- 支持热评阈值配置，在分析及晚报中显示热评
 """
 import asyncio
 import base64
@@ -76,10 +77,14 @@ class HeiboxYard(Star):
         self.at_fetch_hours = self.config.get("at_fetch_hours", [4, 10, 16, 22])
         self.at_fetch_recent_hours = self.config.get("at_fetch_recent_hours", 6)
 
+        # ========== 热评阈值 ==========
+        self.hot_comment_threshold = self.config.get("hot_comment_threshold", 10)
+
         logger.info(f"配置加载: interval_hours={self.interval_hours}, feed_topic_ids={self.feed_topic_ids}")
         logger.info(f"LLM分析: enabled={self.llm_analysis_enabled}, time={self.llm_analysis_time}")
         logger.info(f"晚报: enabled={self.evening_report_enabled}, auto_send={self.evening_report_auto_send}")
         logger.info(f"@消息: enabled={self.at_fetch_enabled}, hours={self.at_fetch_hours}")
+        logger.info(f"热评阈值: {self.hot_comment_threshold}")
 
         # ========== 路径初始化 ==========
         raw_path = self.plugin_config.get("program_path", DEFAULT_PROGRAM_PATH) if hasattr(self, 'plugin_config') else DEFAULT_PROGRAM_PATH
@@ -270,7 +275,7 @@ class HeiboxYard(Star):
                 await asyncio.sleep(60)
 
     async def _run_llm_analysis(self, window_no: str = None, force_reanalyze: bool = False) -> dict:
-        """执行 LLM 分析（重构版：使用 link_id 硬绑定）"""
+        """执行 LLM 分析（重构版：使用 link_id 硬绑定，并附带热评）"""
         accumulated_tokens = {
             "total_tokens": 0,
             "prompt_tokens": 0,
@@ -310,6 +315,17 @@ class HeiboxYard(Star):
                         pass
 
                 image_descriptions = self.image_analyzer.db.get_descriptions_for_post(link_id)
+
+                # 获取热评（点赞数>=阈值）
+                all_comments = self.post_manager.get_top_comments(link_id)
+                hot_comments = [c for c in all_comments if c.get('up', 0) >= self.hot_comment_threshold]
+                # 为每个热评添加时间字符串
+                for hc in hot_comments:
+                    if hc.get('comment_time'):
+                        hc['time_str'] = ts_to_bj_str(hc['comment_time'])
+                    else:
+                        hc['time_str'] = ''
+
                 posts.append({
                     "link_id": link_id, "daily_no": daily_no,
                     "title": title or "(无标题)", "username": username or f"用户{link_id}",
@@ -317,6 +333,7 @@ class HeiboxYard(Star):
                     "create_at_str": ts_to_bj_str(create_at) if create_at else "未知",
                     "content": content or "", "image_paths": image_paths,
                     "image_descriptions": image_descriptions,
+                    "hot_comments": hot_comments,  # 传递热评列表
                 })
 
             existing_count = self.llm_analyzer.db.get_existing_analysis_count(window_start)
@@ -462,7 +479,7 @@ class HeiboxYard(Star):
 
     async def _generate_and_save_evening_report(self, window_no: str = None, send: bool = False,
                                                 analysis_tokens: dict = None, summary_tokens: dict = None):
-        """生成晚报"""
+        """生成晚报，包含热评"""
         import time
         start_time = time.time()
 
@@ -476,7 +493,7 @@ class HeiboxYard(Star):
             cur = conn.cursor()
 
             cur.execute("""
-                SELECT p.daily_no, p.title, p.username, p.userid, p.avatar,
+                SELECT p.link_id, p.daily_no, p.title, p.username, p.userid, p.avatar,
                        p.create_at, p.content, p.image_urls, l.comment, l.model_used
                 FROM posts p
                 LEFT JOIN llm_analyses l ON p.link_id = l.link_id
@@ -499,15 +516,31 @@ class HeiboxYard(Star):
             posts = []
             model_used_set = set()
             for row in rows:
+                link_id = row[0]
+                # 获取热评
+                all_comments = self.post_manager.get_top_comments(link_id)
+                hot_comments = [c for c in all_comments if c.get('up', 0) >= self.hot_comment_threshold]
+                for hc in hot_comments:
+                    if hc.get('comment_time'):
+                        hc['time_str'] = ts_to_bj_str(hc['comment_time'])
+                    else:
+                        hc['time_str'] = ''
+
                 posts.append({
-                    "daily_no": row[0], "title": row[1], "username": row[2],
-                    "userid": row[3], "avatar": row[4],
-                    "create_at_str": ts_to_bj_str(row[5]) if row[5] else "未知",
-                    "content": row[6], "image_paths": row[7],
-                    "comment": row[8] or "暂无评论",
+                    "link_id": link_id,
+                    "daily_no": row[1],
+                    "title": row[2],
+                    "username": row[3],
+                    "userid": row[4],
+                    "avatar": row[5],
+                    "create_at_str": ts_to_bj_str(row[6]) if row[6] else "未知",
+                    "content": row[7],
+                    "image_paths": row[8],
+                    "comment": row[9] or "暂无评论",
+                    "hot_comments": hot_comments,
                 })
-                if row[9]:
-                    model_used_set.add(row[9])
+                if row[10]:
+                    model_used_set.add(row[10])
 
             ai_summary, summary_model, summary_token_info = await generate_ai_summary(
                 self.context, posts, window_no, self.llm_provider_id
@@ -721,6 +754,15 @@ class HeiboxYard(Star):
             if had_analysis:
                 self.llm_analyzer.db.delete_by_link_id(link_id)
                 image_descriptions = self.image_analyzer.db.get_descriptions_for_post(link_id)
+                # 获取热评
+                all_comments = self.post_manager.get_top_comments(link_id)
+                hot_comments = [c for c in all_comments if c.get('up', 0) >= self.hot_comment_threshold]
+                for hc in hot_comments:
+                    if hc.get('comment_time'):
+                        hc['time_str'] = ts_to_bj_str(hc['comment_time'])
+                    else:
+                        hc['time_str'] = ''
+
                 post = {
                     "link_id": link_id,
                     "daily_no": new_daily_no if in_window else None,
@@ -732,6 +774,7 @@ class HeiboxYard(Star):
                     "content": content_text,
                     "image_paths": saved_images,
                     "image_descriptions": image_descriptions,
+                    "hot_comments": hot_comments,
                 }
                 target_ws = window_start if in_window else post_window_start
                 await self.llm_analyzer.analyze_posts(target_ws, [post])
@@ -862,7 +905,7 @@ class HeiboxYard(Star):
         author_display = username if username else f"用户{userid}"
         content_cleaned = clean_html_tags(content) if content else "无内容"
 
-        # 获取评论
+        # 获取评论（热评全部显示，不限制）
         top_comments = self.post_manager.get_top_comments(link_id)
         comments_text = ""
         if top_comments:
@@ -1011,7 +1054,7 @@ class HeiboxYard(Star):
         conn = sqlite3.connect(self.db_path)
         cur = conn.cursor()
         cur.execute("""
-            SELECT p.daily_no, p.title, p.username, p.userid, p.avatar,
+            SELECT p.link_id, p.daily_no, p.title, p.username, p.userid, p.avatar,
                    p.create_at, p.content, p.image_urls, l.comment
             FROM posts p
             LEFT JOIN llm_analyses l ON p.link_id = l.link_id
@@ -1026,12 +1069,27 @@ class HeiboxYard(Star):
 
         posts = []
         for row in rows:
+            link_id = row[0]
+            all_comments = self.post_manager.get_top_comments(link_id)
+            hot_comments = [c for c in all_comments if c.get('up', 0) >= self.hot_comment_threshold]
+            for hc in hot_comments:
+                if hc.get('comment_time'):
+                    hc['time_str'] = ts_to_bj_str(hc['comment_time'])
+                else:
+                    hc['time_str'] = ''
+
             posts.append({
-                "daily_no": row[0], "title": row[1], "username": row[2],
-                "userid": row[3], "avatar": row[4],
-                "create_at_str": ts_to_bj_str(row[5]) if row[5] else "未知",
-                "content": row[6], "image_paths": row[7],
-                "comment": row[8] or "暂无评论",
+                "link_id": link_id,
+                "daily_no": row[1],
+                "title": row[2],
+                "username": row[3],
+                "userid": row[4],
+                "avatar": row[5],
+                "create_at_str": ts_to_bj_str(row[6]) if row[6] else "未知",
+                "content": row[7],
+                "image_paths": row[8],
+                "comment": row[9] or "暂无评论",
+                "hot_comments": hot_comments,
             })
 
         ai_summary, summary_model, summary_tokens = await generate_ai_summary(

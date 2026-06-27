@@ -92,5 +92,11 @@
     "type": "string",
     "default": "",
     "hint": "在目标群内执行 /sid 获取完整会话ID（如 onebot:GroupMessage:123456789）"
+  },
+  "hot_comment_threshold": {
+    "description": "热评点赞数阈值，只有点赞数>=此值的评论才被视为热评并显示在晚报及AI分析中",
+    "type": "int",
+    "default": 10,
+    "hint": "默认10，调低可显示更多评论"
   }
 }

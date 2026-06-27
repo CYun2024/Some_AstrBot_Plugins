@@ -1,8 +1,8 @@
 """
 晚报报告生成器（重构版）
 负责将帖子数据 + AI评论 组装成 HTML 晚报，并支持转图片
+增加热评显示，只显示点赞数>=阈值的评论，显示用户名、头像、时间，不显示点赞数
 """
-
 import asyncio
 import base64
 import json
@@ -72,7 +72,7 @@ class EveningReportGenerator:
         生成晚报 HTML
 
         Args:
-            posts: 帖子列表
+            posts: 帖子列表，每个帖子应包含 hot_comments 字段（热评列表）
             issue_no: 期号
             report_date: 报告日期
             community_name: 社区名称
@@ -163,7 +163,10 @@ class EveningReportGenerator:
 
         comment = post.get("comment", "") or "暂无评论"
 
-        # daily_no 可能是字符串格式如 "20260620-1"
+        # 处理热评
+        hot_comments = post.get("hot_comments", [])
+        hot_comments_html = self._render_hot_comments(hot_comments)
+
         daily_no = post.get("daily_no", 0)
         daily_no_str = str(daily_no) if daily_no else "0"
 
@@ -176,7 +179,40 @@ class EveningReportGenerator:
             "comment": comment,
             "image_data_list": image_data_list,
             "image_count": len(image_data_list),
+            "hot_comments_html": hot_comments_html,   # 新增
         }
+
+    def _render_hot_comments(self, hot_comments: list[dict]) -> str:
+        """生成热评 HTML 片段"""
+        if not hot_comments:
+            return ""
+
+        lines = ['<div class="hot-comments">']
+        lines.append('<div class="hot-label">热评喵</div>')
+        for hc in hot_comments:
+            username = hc.get('username', '匿名')
+            text = hc.get('text', '')
+            avatar_url = hc.get('avatar', '')
+            avatar_data = self._resolve_avatar(avatar_url) if avatar_url else ''
+            time_str = hc.get('time_str', '')  # 已格式化
+
+            # 头像
+            avatar_img = f'<img src="{avatar_data}" class="hot-avatar" alt="{username}">' if avatar_data else ''
+            # 时间
+            time_html = f'<span class="hot-time">{time_str}</span>' if time_str else ''
+
+            lines.append(f'''
+            <div class="hot-comment">
+                {avatar_img}
+                <div class="hot-body">
+                    <span class="hot-username">{username}</span>
+                    {time_html}
+                    <div class="hot-text">{text}</div>
+                </div>
+            </div>
+            ''')
+        lines.append('</div>')
+        return "\n".join(lines)
 
     # ================================================================
     # 头像处理（修复版：支持下载网络头像）
@@ -187,16 +223,13 @@ class EveningReportGenerator:
         if not avatar:
             return self._get_default_avatar()
 
-        # 1. 本地路径且存在
         if os.path.exists(avatar):
             return self._image_to_base64(avatar) or self._get_default_avatar()
 
-        # 2. HTTP URL：尝试下载并缓存
         if avatar.startswith("http"):
             cached = self._get_cached_avatar(avatar)
             if cached:
                 return cached
-            # 同步下载（晚报生成通常在异步上下文外调用）
             try:
                 downloaded = self._download_avatar_sync(avatar)
                 if downloaded:
@@ -208,7 +241,6 @@ class EveningReportGenerator:
         return self._get_default_avatar()
 
     def _get_cached_avatar(self, url: str) -> Optional[str]:
-        """检查是否有缓存的头像 base64"""
         import hashlib
         url_hash = hashlib.md5(url.encode()).hexdigest()
         cache_path = self.avatar_cache_dir / f"{url_hash}.txt"
@@ -220,7 +252,6 @@ class EveningReportGenerator:
         return None
 
     def _save_avatar_cache(self, url: str, base64_data: str):
-        """缓存头像 base64"""
         import hashlib
         url_hash = hashlib.md5(url.encode()).hexdigest()
         cache_path = self.avatar_cache_dir / f"{url_hash}.txt"
@@ -230,7 +261,6 @@ class EveningReportGenerator:
             logger.warning(f"保存头像缓存失败: {e}")
 
     def _download_avatar_sync(self, url: str) -> Optional[str]:
-        """同步下载头像并转为 base64（用于非异步上下文）"""
         import urllib.request
         import urllib.error
         try:
@@ -259,7 +289,6 @@ class EveningReportGenerator:
             return None
 
     async def _download_avatar_async(self, url: str) -> Optional[str]:
-        """异步下载头像并转为 base64"""
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=10),

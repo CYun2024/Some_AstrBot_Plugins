@@ -3,8 +3,11 @@
 负责：数据库操作、图片下载、内容解析、帖子入库流程、评论存储
 核心改进：
 - 新增 post_comments 表存储前三评论，以 link_id + rank 硬绑定
+- 增加 comment_time 字段，记录评论发布时间
 - 所有 daily_no 变更操作自动级联同步 llm_analyses（通过 link_id 硬绑定）
 - 统一 sync 方法，避免数据失联
+- 修复重置/调整顺序时的 UNIQUE 约束冲突问题
+- 修复 swap_daily_no 按 daily_no 排序，确保序号与编号对应
 """
 import asyncio
 import json
@@ -77,7 +80,6 @@ class PostManager:
             migrations.append("ALTER TABLE posts ADD COLUMN source TEXT DEFAULT 'feed'")
         if "date_str" not in existing_cols:
             migrations.append("ALTER TABLE posts ADD COLUMN date_str TEXT")
-        # 新增：评论相关字段（用于快速统计）
         if "top_comment_count" not in existing_cols:
             migrations.append("ALTER TABLE posts ADD COLUMN top_comment_count INTEGER DEFAULT 0")
 
@@ -93,7 +95,7 @@ class PostManager:
             logger.info("数据库迁移完成")
 
     def _init_db(self):
-        """初始化数据库（重构版：增加 post_comments 表）"""
+        """初始化数据库（重构版：增加 post_comments 表，含 comment_time）"""
         conn = sqlite3.connect(self.db_path)
         cur = conn.cursor()
 
@@ -139,7 +141,7 @@ class PostManager:
                     except Exception as e:
                         logger.warning(f"创建索引失败 {idx_name}: {e}")
 
-        # 新增：post_comments 表（存储前三评论）
+        # 新增：post_comments 表（存储前三评论），包含 comment_time
         cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='post_comments'")
         if not cur.fetchone():
             cur.execute("""
@@ -155,6 +157,7 @@ class PostManager:
                     up INTEGER DEFAULT 0,
                     has_image BOOLEAN DEFAULT 0,
                     images TEXT,
+                    comment_time INTEGER,
                     fetched_at TEXT,
                     UNIQUE(link_id, rank)
                 )
@@ -163,6 +166,12 @@ class PostManager:
             cur.execute("CREATE INDEX idx_comments_rank ON post_comments(link_id, rank)")
             logger.info("评论表 post_comments 初始化完成")
         else:
+            # 检查并添加 comment_time 列
+            cur.execute("PRAGMA table_info(post_comments)")
+            existing_cols = {row[1] for row in cur.fetchall()}
+            if "comment_time" not in existing_cols:
+                cur.execute("ALTER TABLE post_comments ADD COLUMN comment_time INTEGER")
+                logger.info("评论表添加 comment_time 列")
             # 确保索引存在
             for idx_name, idx_sql in [
                 ("idx_comments_link", "CREATE INDEX idx_comments_link ON post_comments(link_id)"),
@@ -181,12 +190,7 @@ class PostManager:
     # ==================== 评论操作 ====================
 
     def save_top_comments(self, link_id: int, top_comments: list[dict]):
-        """保存帖子前三评论（硬绑定：link_id + rank）
-
-        Args:
-            link_id: 帖子ID
-            top_comments: link.py 返回的 top_comments 列表
-        """
+        """保存帖子前三评论（硬绑定：link_id + rank），包含评论时间"""
         if not top_comments:
             return
 
@@ -206,11 +210,20 @@ class PostManager:
                 images = comment.get("images", [])
                 images_str = json.dumps(images, ensure_ascii=False) if images else None
 
+                # 提取评论时间（尝试多个键名）
+                comment_time = None
+                for key in ("create_at", "created_at", "time", "create_time"):
+                    if key in comment and comment[key]:
+                        comment_time = comment[key]
+                        break
+                if comment_time is None:
+                    comment_time = int(datetime.now(timezone.utc).timestamp())
+
                 cur.execute("""
                     INSERT INTO post_comments 
                     (link_id, comment_id, rank, username, user_id, avatar, 
-                     text, up, has_image, images, fetched_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     text, up, has_image, images, comment_time, fetched_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     link_id,
                     comment.get("comment_id", 0),
@@ -222,6 +235,7 @@ class PostManager:
                     comment.get("up", 0),
                     1 if comment.get("has_image", False) else 0,
                     images_str,
+                    comment_time,
                     datetime.now(timezone.utc).isoformat()
                 ))
                 valid_count += 1
@@ -239,13 +253,13 @@ class PostManager:
             logger.error(f"保存评论失败 link_id={link_id}: {e}")
 
     def get_top_comments(self, link_id: int) -> list[dict]:
-        """获取帖子的前三评论"""
+        """获取帖子的前三评论（包含 comment_time）"""
         try:
             conn = sqlite3.connect(self.db_path)
             cur = conn.cursor()
             cur.execute("""
                 SELECT comment_id, rank, username, user_id, avatar, 
-                       text, up, has_image, images
+                       text, up, has_image, images, comment_time
                 FROM post_comments
                 WHERE link_id = ?
                 ORDER BY rank
@@ -265,6 +279,7 @@ class PostManager:
                     "up": row[6],
                     "has_image": bool(row[7]),
                     "images": json.loads(row[8]) if row[8] else [],
+                    "comment_time": row[9],
                 })
             return results
         except Exception as e:
@@ -289,11 +304,7 @@ class PostManager:
 
     def sync_llm_analysis_by_link_id(self, link_id: int, new_daily_no: str = None,
                                       new_window_start: int = None) -> bool:
-        """通过 link_id 级联同步 llm_analyses 的 daily_no/window_start
-
-        这是核心同步方法，所有修改 posts.daily_no 的操作后必须调用。
-        使用 link_id 硬绑定，不受 daily_no 变化影响。
-        """
+        """通过 link_id 级联同步 llm_analyses 的 daily_no/window_start"""
         try:
             conn = sqlite3.connect(self.db_path)
             cur = conn.cursor()
@@ -326,16 +337,11 @@ class PostManager:
             return False
 
     def sync_all_analyses_in_window(self, window_no: str) -> int:
-        """同步整个窗口的所有分析记录（用于批量重编号后修复）
-
-        遍历窗口内所有帖子，确保 llm_analyses 的 daily_no 与 posts 一致。
-        返回同步的帖子数量。
-        """
+        """同步整个窗口的所有分析记录"""
         try:
             conn = sqlite3.connect(self.db_path)
             cur = conn.cursor()
 
-            # 获取窗口内所有帖子的 link_id 和 daily_no
             cur.execute(
                 "SELECT link_id, daily_no, window_start FROM posts WHERE date_str = ? ORDER BY daily_no",
                 (window_no,)
@@ -430,11 +436,7 @@ class PostManager:
     def save_post(self, link_id: int, daily_no: Optional[str], window_start: Optional[int],
                   window_no: Optional[str], detail: dict, content_text: str, saved_images: list[str],
                   topics_str: str, source: str = "feed", top_comments: list[dict] = None):
-        """保存帖子到数据库（重构版：支持评论存储）
-
-        Args:
-            top_comments: link.py 返回的 top_comments 列表（可选）
-        """
+        """保存帖子到数据库（包含评论）"""
         self._ensure_db()
         conn = sqlite3.connect(self.db_path)
         self._ensure_table_schema(conn)
@@ -457,11 +459,9 @@ class PostManager:
         conn.commit()
         conn.close()
 
-        # 保存评论
         if top_comments:
             self.save_top_comments(link_id, top_comments)
 
-        # 级联同步：如果 daily_no 或 window_start 变化，同步更新 llm_analyses
         if daily_no or window_start:
             self.sync_llm_analysis_by_link_id(link_id, daily_no, window_start)
 
@@ -491,55 +491,10 @@ class PostManager:
         conn.close()
         return rows
 
+    # ========== 修复后的重新编号方法（避免 UNIQUE 冲突） ==========
+
     def renumber_window_posts(self, window_no: str) -> int:
-        """重新编号指定窗口中的所有帖子，确保编号连续，并级联同步分析记录
-
-        返回重新编号的帖子数量
-        """
-        self._ensure_db()
-        conn = sqlite3.connect(self.db_path)
-        cur = conn.cursor()
-
-        cur.execute(
-            "SELECT link_id, daily_no, window_start FROM posts WHERE date_str = ? ORDER BY create_at, link_id",
-            (window_no,)
-        )
-        rows = cur.fetchall()
-
-        if not rows:
-            conn.close()
-            return 0
-
-        renumbered = 0
-        for new_seq, (link_id, old_daily_no, window_start) in enumerate(rows, start=1):
-            new_daily_no = format_daily_no(window_no, new_seq)
-            if old_daily_no != new_daily_no:
-                # 更新 posts 表
-                cur.execute(
-                    "UPDATE posts SET daily_no = ? WHERE link_id = ? AND date_str = ?",
-                    (new_daily_no, link_id, window_no)
-                )
-                # 级联同步 llm_analyses（通过 link_id 硬绑定）
-                cur.execute(
-                    "UPDATE llm_analyses SET daily_no = ? WHERE link_id = ?",
-                    (new_daily_no, link_id)
-                )
-                renumbered += 1
-                logger.info(f"重新编号: #{old_daily_no} -> #{new_daily_no}, link_id={link_id}")
-
-        conn.commit()
-        conn.close()
-
-        if renumbered > 0:
-            logger.info(f"窗口 {window_no} 重新编号完成: {renumbered} 个帖子")
-
-        return renumbered
-
-    def swap_daily_no(self, window_no: str, seq1: int, seq2: int) -> tuple[bool, str]:
-        """交换窗口内两个帖子的 daily_no，通过 link_id 级联同步 AI 评论记录
-
-        重构版：不再使用临时 daily_no 避免 UNIQUE 冲突，而是直接通过 link_id 更新。
-        """
+        """重新编号指定窗口中的所有帖子（用于调整窗口后源窗口）"""
         self._ensure_db()
         conn = sqlite3.connect(self.db_path)
         cur = conn.cursor()
@@ -550,12 +505,63 @@ class PostManager:
                 (window_no,)
             )
             rows = cur.fetchall()
+            if not rows:
+                conn.close()
+                return 0
 
+            window_start = rows[0][2]
+            valid_link_ids = [row[0] for row in rows]
+
+            # 1. 先将该窗口所有有效帖子的 llm_analyses 设为唯一临时值
+            for link_id in valid_link_ids:
+                temp_no = f"__temp_renum_{link_id}_{window_no}"
+                cur.execute(
+                    "UPDATE llm_analyses SET daily_no = ? WHERE link_id = ? AND window_start = ?",
+                    (temp_no, link_id, window_start)
+                )
+
+            # 2. 重新分配新编号
+            renumbered = 0
+            for new_seq, (link_id, old_daily_no, ws) in enumerate(rows, start=1):
+                new_daily_no = format_daily_no(window_no, new_seq)
+                if old_daily_no != new_daily_no:
+                    cur.execute(
+                        "UPDATE posts SET daily_no = ? WHERE link_id = ? AND date_str = ?",
+                        (new_daily_no, link_id, window_no)
+                    )
+                    cur.execute(
+                        "UPDATE llm_analyses SET daily_no = ? WHERE link_id = ?",
+                        (new_daily_no, link_id)
+                    )
+                    renumbered += 1
+                    logger.info(f"重新编号: #{old_daily_no} -> #{new_daily_no}, link_id={link_id}")
+
+            conn.commit()
+            conn.close()
+            if renumbered > 0:
+                logger.info(f"窗口 {window_no} 重新编号完成: {renumbered} 个帖子")
+            return renumbered
+        except Exception as e:
+            conn.rollback()
+            conn.close()
+            logger.error(f"renumber_window_posts 失败: {e}")
+            return 0
+
+    def swap_daily_no(self, window_no: str, seq1: int, seq2: int) -> tuple[bool, str]:
+        """交换窗口内两个帖子的 daily_no（使用临时值避免唯一约束冲突）"""
+        self._ensure_db()
+        conn = sqlite3.connect(self.db_path)
+        cur = conn.cursor()
+        try:
+            # 关键修复：按 daily_no 排序，确保序号与编号一致
+            cur.execute(
+                "SELECT link_id, daily_no, window_start FROM posts WHERE date_str = ? ORDER BY daily_no",
+                (window_no,)
+            )
+            rows = cur.fetchall()
             if not rows:
                 return False, f"📭 窗口 {window_no} 内没有帖子"
-
             total = len(rows)
-
             if seq1 < 1 or seq1 > total:
                 return False, f"❌ 序号 {seq1} 超出范围，窗口 {window_no} 共有 {total} 个帖子"
             if seq2 < 1 or seq2 > total:
@@ -563,38 +569,28 @@ class PostManager:
             if seq1 == seq2:
                 return False, "❌ 两个序号相同，无需交换"
 
-            link_id_1, old_daily_no_1, ws1 = rows[seq1 - 1]
-            link_id_2, old_daily_no_2, ws2 = rows[seq2 - 1]
+            link_id_1, old_no_1, ws1 = rows[seq1 - 1]
+            link_id_2, old_no_2, ws2 = rows[seq2 - 1]
 
-            # 直接交换：通过 link_id 更新，不需要临时值
-            cur.execute(
-                "UPDATE posts SET daily_no = ? WHERE link_id = ?",
-                (old_daily_no_2, link_id_1)
-            )
-            cur.execute(
-                "UPDATE posts SET daily_no = ? WHERE link_id = ?",
-                (old_daily_no_1, link_id_2)
-            )
-
-            # 级联同步 llm_analyses（通过 link_id 硬绑定）
-            cur.execute(
-                "UPDATE llm_analyses SET daily_no = ? WHERE link_id = ?",
-                (old_daily_no_2, link_id_1)
-            )
-            cur.execute(
-                "UPDATE llm_analyses SET daily_no = ? WHERE link_id = ?",
-                (old_daily_no_1, link_id_2)
-            )
+            # 使用临时值交换，避免唯一约束冲突
+            temp_no = f"__tmp_swap_{link_id_1}_{int(datetime.now().timestamp())}"
+            # 1) 将 link_id_1 改为临时值
+            cur.execute("UPDATE posts SET daily_no = ? WHERE link_id = ?", (temp_no, link_id_1))
+            cur.execute("UPDATE llm_analyses SET daily_no = ? WHERE link_id = ?", (temp_no, link_id_1))
+            # 2) 将 link_id_2 改为 old_no_1
+            cur.execute("UPDATE posts SET daily_no = ? WHERE link_id = ?", (old_no_1, link_id_2))
+            cur.execute("UPDATE llm_analyses SET daily_no = ? WHERE link_id = ?", (old_no_1, link_id_2))
+            # 3) 将 link_id_1 改为 old_no_2
+            cur.execute("UPDATE posts SET daily_no = ? WHERE link_id = ?", (old_no_2, link_id_1))
+            cur.execute("UPDATE llm_analyses SET daily_no = ? WHERE link_id = ?", (old_no_2, link_id_1))
 
             conn.commit()
-
-            logger.info(f"✅ 交换完成: #{old_daily_no_1} <-> #{old_daily_no_2}, link_ids={link_id_1},{link_id_2}")
+            logger.info(f"✅ 交换完成: #{old_no_1} <-> #{old_no_2}, link_ids={link_id_1},{link_id_2}")
             return True, (
                 f"✅ 交换成功！\n"
-                f"📌 #{old_daily_no_1} (ID:{link_id_1}) <-> #{old_daily_no_2} (ID:{link_id_2})\n"
+                f"📌 #{old_no_1} (ID:{link_id_1}) <-> #{old_no_2} (ID:{link_id_2})\n"
                 f"📋 窗口 {window_no} 共 {total} 个帖子"
             )
-
         except Exception as e:
             conn.rollback()
             logger.error(f"交换 daily_no 失败: {e}")
@@ -603,11 +599,7 @@ class PostManager:
             conn.close()
 
     def reset_daily_order(self, window_no: str) -> tuple[int, str]:
-        """重置窗口内帖子的 daily_no 顺序，按 create_at 重新连续编号
-        同时通过 link_id 级联同步 AI 评论记录中的 daily_no
-
-        重构版：不再使用临时编号，直接通过 link_id 更新。
-        """
+        """重置窗口内帖子的 daily_no 顺序（先设临时值再更新，避免唯一约束冲突）"""
         self._ensure_db()
         conn = sqlite3.connect(self.db_path)
         cur = conn.cursor()
@@ -618,54 +610,49 @@ class PostManager:
                 (window_no,)
             )
             rows = cur.fetchall()
-
             if not rows:
                 return 0, f"📭 窗口 {window_no} 内没有帖子"
 
+            window_start = rows[0][3]
+            valid_link_ids = [row[0] for row in rows]
             total = len(rows)
 
-            # 清理残留：删除该窗口下不在 posts 表中的 llm_analyses 记录
-            valid_link_ids = [row[0] for row in rows]
+            # 1. 删除残留记录（不属于当前帖子的）
             if valid_link_ids:
                 placeholders = ",".join(["?"] * len(valid_link_ids))
                 cur.execute(f"""
                     DELETE FROM llm_analyses 
                     WHERE window_start = ? AND link_id NOT IN ({placeholders})
-                """, (rows[0][3], *valid_link_ids))
+                """, (window_start, *valid_link_ids))
                 deleted_count = cur.rowcount
                 if deleted_count > 0:
-                    logger.info(f"清理残留 AI 分析记录: 窗口 {window_no} 删除 {deleted_count} 条无效记录")
+                    logger.info(f"清理残留 AI 分析记录: 窗口 {window_no} 删除 {deleted_count} 条")
 
-            # 清理空 daily_no 的记录
-            cur.execute("""
-                DELETE FROM llm_analyses 
-                WHERE window_start = ? AND (daily_no IS NULL OR daily_no = '')
-            """, (rows[0][3],))
-            null_deleted = cur.rowcount
-            if null_deleted > 0:
-                logger.info(f"清理空 daily_no 的 AI 分析记录: {null_deleted} 条")
+            # 2. 将当前窗口所有有效帖子的 daily_no 设为唯一临时值（防止更新时冲突）
+            for link_id in valid_link_ids:
+                temp_no = f"__temp_{link_id}_{window_no}"
+                cur.execute(
+                    "UPDATE llm_analyses SET daily_no = ? WHERE link_id = ? AND window_start = ?",
+                    (temp_no, link_id, window_start)
+                )
 
+            # 3. 重新分配新编号
             renumbered = 0
-            for new_seq, (link_id, old_daily_no, create_at, window_start) in enumerate(rows, start=1):
+            for new_seq, (link_id, old_daily_no, create_at, ws) in enumerate(rows, start=1):
                 final_daily_no = format_daily_no(window_no, new_seq)
-
-                # 更新 posts 表
                 cur.execute(
                     "UPDATE posts SET daily_no = ? WHERE link_id = ?",
                     (final_daily_no, link_id)
                 )
-                # 级联同步 llm_analyses（通过 link_id 硬绑定）
                 cur.execute(
                     "UPDATE llm_analyses SET daily_no = ? WHERE link_id = ?",
                     (final_daily_no, link_id)
                 )
-
                 if old_daily_no != final_daily_no:
                     renumbered += 1
                     logger.info(f"重新编号: #{old_daily_no} -> #{final_daily_no}, link_id={link_id}")
 
             conn.commit()
-
             if renumbered > 0:
                 logger.info(f"窗口 {window_no} 重新编号完成: {renumbered}/{total} 个帖子")
                 return renumbered, (
@@ -680,13 +667,14 @@ class PostManager:
                     f"📋 窗口 {window_no} 共 {total} 个帖子\n"
                     f"📌 所有帖子编号已经是正确的顺序"
                 )
-
         except Exception as e:
             conn.rollback()
             logger.error(f"重置 daily_no 顺序失败: {e}")
             return 0, f"❌ 重置失败: {str(e)}"
         finally:
             conn.close()
+
+    # ==================== 图片相关 ====================
 
     def delete_image_analyses(self, link_id: int):
         """删除帖子的图片分析记录"""
@@ -696,8 +684,6 @@ class PostManager:
         cur.execute("DELETE FROM image_analyses WHERE link_id = ?", (link_id,))
         conn.commit()
         conn.close()
-
-    # ==================== 图片下载 ====================
 
     async def download_image(self, url: str, filename: str) -> Optional[Path]:
         """下载单张图片"""
@@ -789,7 +775,7 @@ class PostManager:
         }
 
     async def fetch_link_detail(self, link_id: int) -> Optional[dict]:
-        """拉取单个帖子详情（重构版：返回包含 top_comments）"""
+        """拉取单个帖子详情（包含 top_comments）"""
         script_path = self.program_path / "src" / "link.py"
         if not script_path.exists():
             script_path = self.program_path / "link.py"
@@ -892,12 +878,7 @@ class PostManager:
 
     async def process_single_post(self, link_id: int, target_window_no: str = None,
                                    source: str = "feed", at_receive_time: int = None) -> bool:
-        """处理单个帖子：拉取详情、下载图片、入库、保存评论
-
-        重构版：
-        - 解析并保存 top_comments
-        - 级联同步 llm_analyses（通过 link_id 硬绑定）
-        """
+        """处理单个帖子"""
         existing = self.get_existing_post(link_id)
         if existing:
             _, content, image_urls, old_window, old_date_str, old_daily_no, old_source = existing
@@ -935,17 +916,13 @@ class PostManager:
 
         real_create_at = detail.get("create_at", 0)
 
-        # 解析内容
-        content_raw = detail.get("content", "")
-        content_text, image_urls = self.parse_content(content_raw)
+        content_text, image_urls = self.parse_content(detail.get("content", ""))
         saved_images = await self.download_images(link_id, image_urls)
         topics_list = detail.get("topics", [])
         topics_str = self.parse_topics(topics_list)
 
-        # 解析评论
         top_comments = detail.get("top_comments", [])
 
-        # 确定归属窗口
         if source == "at" and target_window_no:
             window_start, window_end = get_window_by_no(target_window_no)
             window_no = target_window_no
@@ -955,7 +932,6 @@ class PostManager:
             window_no = get_date_str_from_ts(window_end)
             logger.info(f"推荐流 link_id={link_id} 按发布时间归入窗口 {window_no}")
 
-        # 获取编号并入库（包含评论）
         daily_no = self.get_next_daily_no(window_no)
         self.save_post(
             link_id, daily_no, window_start, window_no, detail,

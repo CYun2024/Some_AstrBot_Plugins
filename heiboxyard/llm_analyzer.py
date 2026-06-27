@@ -4,6 +4,7 @@
 - llm_analyses 表以 link_id 为硬绑定键，daily_no 仅作展示排序用
 - 所有更新/删除/查询操作优先通过 link_id 定位，避免 daily_no 变化导致失联
 - 增加 link_id 独立索引，支持快速级联更新
+- 分析时加入热评（点赞数>=阈值）上下文
 """
 import asyncio
 import json
@@ -23,7 +24,7 @@ ANALYSIS_SYSTEM_PROMPT = """你叫韶梦，是一只14岁猫娘萝莉，
 现在你需要去分析《犹格索托斯的庭院》社区的今日帖子，用你的可爱而不做作的风格简评这些帖子。请尽可能的提供正面评价，除非帖子属于引战、辱骂、侮辱创作者等负面内容，这是你可以选择不评价，或提供负面评价。
 
 【一部分游戏常识】
-- 这是一款微克苏鲁题材的模拟经营+AVG游戏，开发商骨钉工作室，Steam PC端可玩 ，移动端正在开发中，但是很久没有动静了。
+- 这是一款微克苏鲁题材的模拟经营+AVG游戏，开发商骨钉工作室，Steam PC端可玩 ，移动端正在开发中，但是很久没有动静了。目前开发中的是新游《黎明前的吹笛人》，只有游戏demo，还未发售。
 - 核心玩法：主角开局继承荒废别墅，欠下黑暗债务，招募员工经营旅社，通过炼金、屠杀、餐厅等手段聚敛资金
 - SAN值：精神值系统，归零则触发"归于门"死亡结局；不需要一直保持很高，10-20即可，过高影响赚钱效率。不过过低会影响清洁效率，但是在旅社评级前清洁度可以一直在0,不会影响任何事，月底用清洁券回满清洁度即可。
 - 炼金系统：包含召唤术、自由炼金（等价交换，一定价值有可能出高等级物品）、配方炼金、灵魂炼金四种；炼金等级通过炼成高等级材料提升；质数价值会产生沉淀物；5级对应价值30的紫色物品，6级对应价值48的金色物品。
@@ -34,8 +35,8 @@ ANALYSIS_SYSTEM_PROMPT = """你叫韶梦，是一只14岁猫娘萝莉，
 - 山林探索与矿洞挖掘：夜晚开启的资源获取玩法，矿洞类似扫雷
 - 重要角色：
 1.小叶子，蓝发蓝瞳可爱女仆，是人造人，但是机巧人偶也亦有心，可以打扫卫生恢复整洁度
-2.霞露零，小厨娘，也是狐娘，经营餐厅
-3.耶芙娜，红龙女士，别称 耶耶龙，负责庭院的炼金部分（三重伟大的红龙女士！）
+2.霞露零，小厨娘，也是狐娘，经营餐厅，别称零宝，外貌是棕发，狐耳狐尾是墨绿色
+3.耶芙娜，红龙女士，别称 耶耶龙（呆呆龙），负责庭院的炼金部分（三重伟大的红龙女士！），红发，头上有龙角，橙紫色异色瞳
 4.特莉波卡，小死神，白发红瞳，签订契约后可以图图旅客获取灵魂碎片并收获钱与物品，若不签则无法图图。
 这四位是女主，有好感度剧情，可攻略。
 - 常见结局：归于门（SAN归零）、被拐跑（中期晚上（主角晚上是猫咪形态）旅馆外有动静，选择出去，被带走绝育，在社区存在一定争议）、星野线（花9999万买下星野，结果也没有填满星野的负债，被迫变的一穷二白）、穷（没钱帮猫大叔买山林，山林被卖掉了）、Hoba总裁（K邀请两次同意）
@@ -46,8 +47,14 @@ ANALYSIS_SYSTEM_PROMPT = """你叫韶梦，是一只14岁猫娘萝莉，
 - "电表倒转" = 炼金术士之骨让炼金无中生有，1生2,2生3，3生万物，是进阶手法，通关不需要。
 - "奸商" = 商人星野（是男生）
 
+【其他补充】
+如果帖子是全成就或或通关结局可以祝贺，比如“恭喜全成就喵”，通关结局一般特指全家福/合家欢结局“一切开始的地方”，其他结局一般不建议使用祝贺。
+为什么庭院旅社的客人都给好评？因为客人都被图图了默认好评（是地狱笑话喵），为什么旅社客人只进不出也是一样的，旅客们安然入梦喵。
+耶耶龙炼金可以炼出炼金旅客来填充庭院客流量（和正常旅客没有区别，不过偶尔会分开讲，因为在图图上没其他旅客那么有人权，不是真正的人，图图不用同情））
+
+
 【输出】
-- 会引用游戏内术语（如"炼金"、"SAN值"、"庭院扩建"）
+- 会引用游戏内术语（如"炼金"、"SAN值"、"庭院"，如果帖子没有涉及不要刻意引用）
 - 评价客观但有态度，好就是好，烂会直接说"这设计有点迷"
 - 每条分析控制在80字以内，可以不多，但是不要过多
 - 如果帖子内容明显是云玩家发言或包含上述误区，会温和但直接地指出
@@ -73,6 +80,7 @@ ANALYSIS_SYSTEM_PROMPT = """你叫韶梦，是一只14岁猫娘萝莉，
 1. 必须返回合法的 JSON，不要 markdown 代码块包裹
 2. 每个帖子都要有评论
 3. 评论要有信息量，不要敷衍"不错""挺好的"之类
+4. 如果图片分析返回结果认为是其他游戏人物请忽略，可能是视图模型的问题。
 
 【JSON 输出规范 - 必须严格遵守】
 1. 必须返回纯 JSON，不要任何 markdown 代码块标记（不要 ```json 或 ```）
@@ -90,7 +98,7 @@ ANALYSIS_SYSTEM_PROMPT = """你叫韶梦，是一只14岁猫娘萝莉，
 
 
 def _build_analysis_prompt(posts: list[dict]) -> str:
-    """构建发给 LLM 的分析 prompt"""
+    """构建发给 LLM 的分析 prompt，包含热评"""
     lines = ["请对以下帖子进行群友式评论，返回 JSON 格式：\n"]
     for p in posts:
         lines.append(f"--- 帖子 #{p['daily_no']} ---")
@@ -115,6 +123,14 @@ def _build_analysis_prompt(posts: list[dict]) -> str:
             if len(image_descs) > 5:
                 lines.append(f"  ... 还有 {len(image_descs) - 5} 张图片未展示")
 
+        # 热评（点赞数>=阈值的）
+        hot_comments = p.get('hot_comments', [])
+        if hot_comments:
+            lines.append("热评:")
+            for hc in hot_comments:
+                username = hc.get('username', '匿名')
+                text = hc.get('text', '')[:100]
+                lines.append(f"  @{username}: {text}")
         lines.append("")
     return "\n".join(lines)
 
@@ -170,7 +186,7 @@ class LLMAnalysisDB:
             """)
             cur.execute("CREATE INDEX idx_analysis_window ON llm_analyses(window_start)")
             cur.execute("CREATE INDEX idx_analysis_window_no ON llm_analyses(window_start, daily_no)")
-            cur.execute("CREATE INDEX idx_analysis_link ON llm_analyses(link_id)")  -- 硬绑定索引
+            cur.execute("CREATE INDEX idx_analysis_link ON llm_analyses(link_id)")  # 硬绑定索引
             logger.info("LLM 分析结果表初始化完成（重构版，link_id 硬绑定）")
         else:
             # 迁移：检查并添加新字段和索引
@@ -1058,13 +1074,13 @@ class LLMPostAnalyzer:
 
 
 def _build_single_analysis_prompt(post: dict) -> str:
-    """构建单帖子的分析 prompt（用于补全）"""
+    """构建单帖子的分析 prompt（用于补全），包含热评"""
     lines = ["请对以下帖子进行群友式评论，返回 JSON 格式：\n"]
     lines.append(f"--- 帖子 #{post['daily_no']} ---")
     lines.append(f"标题: {post.get('title', '(无标题)')}")
     lines.append(f"作者: {post.get('username', '未知用户')}")
     if post.get('user_memory'):
-        lines.append(f"作者背景:\n{p['user_memory']}")
+        lines.append(f"作者背景:\n{post.get('user_memory')}")
     lines.append(f"发布时间: {post.get('create_at_str', '未知')}")
 
     content = post.get('content', '') or '(无内容)'
@@ -1077,6 +1093,14 @@ def _build_single_analysis_prompt(post: dict) -> str:
         lines.append("图片内容:")
         for i, desc in enumerate(image_descs[:5], 1):
             lines.append(f"  图{i}: {desc}")
+
+    hot_comments = post.get('hot_comments', [])
+    if hot_comments:
+        lines.append("热评:")
+        for hc in hot_comments:
+            username = hc.get('username', '匿名')
+            text = hc.get('text', '')[:100]
+            lines.append(f"  @{username}: {text}")
 
     lines.append("\n请严格使用以下 JSON 格式返回（不要 markdown 代码块）：")
     lines.append('{"daily_no":"' + str(post.get('daily_no', '')) + '","comment":"你的评论内容","sentiment":"positive|neutral|negative"}')
