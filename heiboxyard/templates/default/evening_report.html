@@ -93,13 +93,13 @@
         }
         .summary-icon { font-size: 20px; }
         .summary-title {
-            font-size: 15px;
+            font-size: 16px;
             font-weight: 600;
-            color: #8a6b5a;
+            color: #d4a373;
             letter-spacing: 1px;
         }
         .summary-text {
-            font-size: 14px;
+            font-size: 15px;
             line-height: 1.9;
             color: #4d3b2f;
             text-indent: 2em;
@@ -222,17 +222,18 @@
             margin-top: 4px;
         }
         .comment-label {
-            font-size: 12px;
+            font-size: 16px;
             color: #d4a373;
             font-weight: 600;
             letter-spacing: 1px;
             margin-bottom: 4px;
         }
         .comment-text {
-            font-size: 14px;
+            font-size: 16px;
             color: #4d3b2f;
             line-height: 1.7;
             font-style: normal;
+            font-weight: 600;
         }
 
         /* ---------- 热评样式（新增） ---------- */
@@ -338,7 +339,7 @@
         }
         .brief-meta {
             font-size: 12px;
-            color: #b0a090;
+            color: #8a7a6a;
             display: flex;
             gap: 6px;
             flex-wrap: wrap;
@@ -349,24 +350,27 @@
             display: flex;
             gap: 6px;
             margin-top: 8px;
-            flex-wrap: wrap;
+            flex-wrap: nowrap;
         }
         .brief-thumb {
-            width: 120px;
-            height: 120px;
+            flex: 0 0 calc(33.333% - 4px);
+            width: calc(33.333% - 4px);
+            height: auto;
+            aspect-ratio: 1 / 1;
             border-radius: 8px;
             object-fit: cover;
             background: #f0e8e0;
         }
         .brief-comment-full {
-            font-size: 12px;
-            color: #8a7a6a;
+            font-size: 15px;
+            color: #4d3b2f;
             line-height: 1.5;
             margin-top: 8px;
             padding: 10px 12px;
             background: #ffffff;
             border-radius: 8px;
             border-left: 3px solid #d4a373;
+            font-weight: 600;
         }
 
         /* 数据面板 - 竖排统一排版 */
@@ -426,6 +430,7 @@
 <base target="_blank">
 <base target="_blank">
 <base target="_blank">
+<base target="_blank">
 </head>
 <body>
     <div class="report-container">
@@ -466,7 +471,7 @@
                         <span class="stat-row-value">{{ generation_time | default("--") }}</span>
                     </div>
                     <div class="stat-row">
-                        <span class="stat-row-label">Tokens</span>
+                        <span class="stat-row-label">tokens输入/输出</span>
                         <span class="stat-row-value">{{ tokens_used | default("--") }}</span>
                     </div>
                     <div class="stat-row">
