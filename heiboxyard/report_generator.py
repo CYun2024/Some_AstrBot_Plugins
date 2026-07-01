@@ -414,6 +414,8 @@ class EveningReportGenerator:
             else:
                 filename = f"evening_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
 
+        # 确保 reports 目录存在（兼容外部传入的 data_dir 可能变化的情况）
+        self.reports_dir.mkdir(parents=True, exist_ok=True)
         file_path = self.reports_dir / filename
         file_path.write_text(html_content, encoding="utf-8")
         logger.info(f"晚报 HTML 已保存: {file_path}")
@@ -427,6 +429,8 @@ class EveningReportGenerator:
             else:
                 filename = f"evening_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
 
+        # 确保 reports 目录存在
+        self.reports_dir.mkdir(parents=True, exist_ok=True)
         file_path = self.reports_dir / filename
         file_path.write_bytes(image_data)
         logger.info(f"晚报图片已保存: {file_path}")

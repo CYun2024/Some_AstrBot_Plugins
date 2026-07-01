@@ -20,6 +20,7 @@ from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 import astrbot.api.message_components as Comp
 from astrbot.api import AstrBotConfig
+from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 from .utils import (
     clean_html_tags, get_current_window, get_current_window_no, get_window_by_no,
@@ -98,8 +99,9 @@ class HeiboxYard(Star):
         if not self.program_path.exists():
             logger.error(f"小黑盒程序路径不存在: {self.program_path}")
 
-        data_dir = plugin_dir / "data"
-        data_dir.mkdir(exist_ok=True)
+        # 使用 AstrBot 标准插件数据目录: data/plugin_data/heiboxyard/
+        data_dir = Path(get_astrbot_data_path()) / "plugin_data" / "heiboxyard"
+        data_dir.mkdir(parents=True, exist_ok=True)
         self.db_path = data_dir / "posts.db"
         self.image_dir = data_dir / "images"
         self.image_dir.mkdir(exist_ok=True)
@@ -478,139 +480,193 @@ class HeiboxYard(Star):
                 await asyncio.sleep(60)
 
     async def _generate_and_save_evening_report(self, window_no: str = None, send: bool = False,
-                                                analysis_tokens: dict = None, summary_tokens: dict = None):
-        """生成晚报，包含热评"""
-        import time
-        start_time = time.time()
+                                                    analysis_tokens: dict = None, summary_tokens: dict = None):
+            """生成晚报，包含热评
 
-        try:
-            if window_no is None:
-                window_no = get_current_window_no()
+            修复：
+            1. 模型显示：单独查询 llm_analyses 表中所有 model_used（包括 SUMMARY 记录）
+            2. Tokens 显示：正确累加 analysis_tokens 和 summary_tokens
+            3. 总评显示：优先从数据库读取已有总评，避免重复生成且解决 link_id=0 无法 JOIN 的问题
+            """
+            import time
+            start_time = time.time()
 
-            window_start, window_end = get_window_by_no(window_no)
+            try:
+                if window_no is None:
+                    window_no = get_current_window_no()
 
-            conn = sqlite3.connect(self.db_path)
-            cur = conn.cursor()
+                window_start, window_end = get_window_by_no(window_no)
 
-            cur.execute("""
-                SELECT p.link_id, p.daily_no, p.title, p.username, p.userid, p.avatar,
-                       p.create_at, p.content, p.image_urls, l.comment, l.model_used
-                FROM posts p
-                LEFT JOIN llm_analyses l ON p.link_id = l.link_id
-                WHERE p.date_str = ? ORDER BY p.daily_no
-            """, (window_no,))
-            rows = cur.fetchall()
+                conn = sqlite3.connect(self.db_path)
+                cur = conn.cursor()
 
-            cur.execute("""
-                SELECT COUNT(*) FROM llm_analyses 
-                WHERE daily_no LIKE ? || '-_%'
-            """, (window_no,))
-            total_comments = cur.fetchone()[0]
+                # 查询帖子数据（不通过 JOIN 获取 model_used，因为总评 link_id=0 不会匹配）
+                cur.execute("""
+                    SELECT p.link_id, p.daily_no, p.title, p.username, p.userid, p.avatar,
+                           p.create_at, p.content, p.image_urls, l.comment
+                    FROM posts p
+                    LEFT JOIN llm_analyses l ON p.link_id = l.link_id
+                    WHERE p.date_str = ? ORDER BY p.daily_no
+                """, (window_no,))
+                rows = cur.fetchall()
 
-            conn.close()
+                # 查询评论数量
+                cur.execute("""
+                    SELECT COUNT(*) FROM llm_analyses 
+                    WHERE daily_no LIKE ? || '-_%'
+                """, (window_no,))
+                total_comments = cur.fetchone()[0]
 
-            if not rows:
-                logger.info("窗口 " + window_no + " 没有帖子")
-                return
+                # 查询所有使用过的模型（包括帖子分析和总评）
+                cur.execute("""
+                    SELECT DISTINCT model_used FROM llm_analyses
+                    WHERE window_start = ? AND model_used IS NOT NULL AND model_used != ''
+                """, (window_start,))
+                model_rows = cur.fetchall()
 
-            posts = []
-            model_used_set = set()
-            for row in rows:
-                link_id = row[0]
-                # 获取热评
-                all_comments = self.post_manager.get_top_comments(link_id)
-                hot_comments = [c for c in all_comments if c.get('up', 0) >= self.hot_comment_threshold]
-                for hc in hot_comments:
-                    if hc.get('comment_time'):
-                        hc['time_str'] = ts_to_bj_str(hc['comment_time'])
-                    else:
-                        hc['time_str'] = ''
+                # 查询已有总评
+                cur.execute("""
+                    SELECT comment, model_used FROM llm_analyses
+                    WHERE window_start = ? AND daily_no = ?
+                """, (window_start, "SUMMARY"))
+                summary_row = cur.fetchone()
 
-                posts.append({
-                    "link_id": link_id,
-                    "daily_no": row[1],
-                    "title": row[2],
-                    "username": row[3],
-                    "userid": row[4],
-                    "avatar": row[5],
-                    "create_at_str": ts_to_bj_str(row[6]) if row[6] else "未知",
-                    "content": row[7],
-                    "image_paths": row[8],
-                    "comment": row[9] or "暂无评论",
-                    "hot_comments": hot_comments,
-                })
-                if row[10]:
-                    model_used_set.add(row[10])
+                conn.close()
 
-            ai_summary, summary_model, summary_token_info = await generate_ai_summary(
-                self.context, posts, window_no, self.llm_provider_id
-            )
+                if not rows:
+                    logger.info("窗口 " + window_no + " 没有帖子")
+                    return
 
-            elapsed = time.time() - start_time
-            elapsed_str = str(round(elapsed, 1)) + "s"
+                # 收集模型
+                model_used_set = set()
+                for (m,) in model_rows:
+                    if m and m != "unknown":
+                        model_used_set.add(m)
 
-            report_date = datetime.fromtimestamp(window_end, tz=timezone(timedelta(hours=8))).strftime("%Y年%m月%d日")
+                posts = []
+                for row in rows:
+                    link_id = row[0]
+                    # 获取热评
+                    all_comments = self.post_manager.get_top_comments(link_id)
+                    hot_comments = [c for c in all_comments if c.get('up', 0) >= self.hot_comment_threshold]
+                    for hc in hot_comments:
+                        if hc.get('comment_time'):
+                            hc['time_str'] = ts_to_bj_str(hc['comment_time'])
+                        else:
+                            hc['time_str'] = ''
 
-            all_models = set(model_used_set)
-            if summary_model and summary_model != "unknown":
-                all_models.add(summary_model)
-            model_str = ", ".join(all_models) if all_models else "--"
+                    posts.append({
+                        "link_id": link_id,
+                        "daily_no": row[1],
+                        "title": row[2],
+                        "username": row[3],
+                        "userid": row[4],
+                        "avatar": row[5],
+                        "create_at_str": ts_to_bj_str(row[6]) if row[6] else "未知",
+                        "content": row[7],
+                        "image_paths": row[8],
+                        "comment": row[9] or "暂无评论",
+                        "hot_comments": hot_comments,
+                    })
 
-            total_tokens = 0
-            total_cache_hit = 0
-            total_completion = 0
+                # 总评处理：优先使用数据库中已有的总评
+                ai_summary = None
+                summary_model = None
+                summary_token_info = None
 
-            if analysis_tokens:
-                total_tokens += analysis_tokens.get("total_tokens", 0)
-                total_cache_hit += analysis_tokens.get("prompt_cache_hit_tokens", 0)
-                total_completion += analysis_tokens.get("completion_tokens", 0)
-
-            if summary_token_info:
-                total_tokens += summary_token_info.get("total_tokens", 0)
-                total_cache_hit += summary_token_info.get("prompt_cache_hit_tokens", 0)
-                total_completion += summary_token_info.get("completion_tokens", 0)
-
-            tokens_str = f"{total_tokens}/{total_cache_hit}/{total_completion}" if total_tokens > 0 else "--"
-
-            issue_no = self.report_generator.calculate_issue_no(window_no)
-            generation_time = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
-
-            html_content = self.report_generator.generate_evening_report(
-                posts=posts, 
-                issue_no=issue_no, 
-                report_date=report_date,
-                community_name="庭院社区", 
-                theme="default",
-                ai_summary=ai_summary,
-                total_comments=total_comments,
-                generation_time=generation_time,
-                tokens_used=tokens_str,
-                model_used=model_str,
-            )
-
-            html_path = self.report_generator.save_report(html_content, window_no=window_no)
-            logger.info("晚报 HTML 已保存: " + html_path)
-
-            if self.evening_report_format == "html":
-                if send and self.evening_report_target_group:
-                    await self._send_file_to_group(self.evening_report_target_group, html_path)
-            else:
-                image_url = await self._render_evening_report_image(html_content)
-                if image_url:
-                    if image_url.startswith("base64://"):
-                        img_data = base64.b64decode(image_url[9:])
-                        image_path = self.report_generator.save_image(img_data, window_no=window_no)
-                    else:
-                        image_path = image_url
-                    logger.info("晚报 PNG 已保存: " + image_path)
-                    if send and self.evening_report_target_group:
-                        await self._send_image_to_group(self.evening_report_target_group, image_path)
+                if summary_row and summary_row[0] and summary_row[0].strip():
+                    ai_summary = summary_row[0].strip()
+                    summary_model = summary_row[1]
+                    logger.info(f"窗口 {window_no} 使用数据库中已有总评")
                 else:
-                    logger.error("晚报图片渲染失败")
+                    logger.info(f"窗口 {window_no} 数据库中无总评，调用 AI 生成...")
+                    ai_summary, summary_model, summary_token_info = await generate_ai_summary(
+                        self.context, posts, window_no, self.llm_provider_id
+                    )
+                    # 保存新生成的总评到数据库
+                    if ai_summary and ai_summary.strip():
+                        conn = sqlite3.connect(self.db_path)
+                        cur = conn.cursor()
+                        cur.execute("""
+                            INSERT OR REPLACE INTO llm_analyses 
+                            (window_start, daily_no, link_id, title, comment, analyzed_at, model_used)
+                            VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """, (
+                            window_start, "SUMMARY", 0, "AI总评",
+                            ai_summary,
+                            datetime.now(timezone.utc).isoformat(),
+                            summary_model or "unknown"
+                        ))
+                        conn.commit()
+                        conn.close()
+                        logger.info(f"窗口 {window_no} 总评已保存到数据库")
 
-        except Exception as e:
-            logger.error("生成晚报失败: " + str(e), exc_info=True)
+                elapsed = time.time() - start_time
+                elapsed_str = str(round(elapsed, 1)) + "s"
 
+                report_date = datetime.fromtimestamp(window_end, tz=timezone(timedelta(hours=8))).strftime("%Y年%m月%d日")
+
+                # 模型字符串
+                if summary_model and summary_model != "unknown":
+                    model_used_set.add(summary_model)
+                model_str = ", ".join(model_used_set) if model_used_set else "--"
+
+                # Tokens 统计：累加帖子分析 + 总评
+                total_input = 0
+                total_completion = 0
+
+                if analysis_tokens:
+                    total_input += analysis_tokens.get("prompt_tokens", 0) or 0
+                    total_completion += analysis_tokens.get("completion_tokens", 0) or 0
+
+                # 如果总评是新生成的，使用其 token 信息；如果已有总评，使用传入的 summary_tokens 或 0
+                if summary_token_info:
+                    total_input += summary_token_info.get("prompt_tokens", 0) or 0
+                    total_completion += summary_token_info.get("completion_tokens", 0) or 0
+                elif summary_tokens:
+                    total_input += summary_tokens.get("prompt_tokens", 0) or 0
+                    total_completion += summary_tokens.get("completion_tokens", 0) or 0
+
+                tokens_str = f"{total_input}/{total_completion}" if total_input > 0 or total_completion > 0 else "--"
+
+                issue_no = self.report_generator.calculate_issue_no(window_no)
+                generation_time = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
+
+                html_content = self.report_generator.generate_evening_report(
+                    posts=posts,
+                    issue_no=issue_no,
+                    report_date=report_date,
+                    community_name="庭院社区",
+                    theme="default",
+                    ai_summary=ai_summary,
+                    total_comments=total_comments,
+                    generation_time=generation_time,
+                    tokens_used=tokens_str,
+                    model_used=model_str,
+                )
+
+                html_path = self.report_generator.save_report(html_content, window_no=window_no)
+                logger.info("晚报 HTML 已保存: " + html_path)
+
+                if self.evening_report_format == "html":
+                    if send and self.evening_report_target_group:
+                        await self._send_file_to_group(self.evening_report_target_group, html_path)
+                else:
+                    image_url = await self._render_evening_report_image(html_content)
+                    if image_url:
+                        if image_url.startswith("base64://"):
+                            img_data = base64.b64decode(image_url[9:])
+                            image_path = self.report_generator.save_image(img_data, window_no=window_no)
+                        else:
+                            image_path = image_url
+                        logger.info("晚报 PNG 已保存: " + image_path)
+                        if send and self.evening_report_target_group:
+                            await self._send_image_to_group(self.evening_report_target_group, image_path)
+                    else:
+                        logger.error("晚报图片渲染失败")
+
+            except Exception as e:
+                logger.error("生成晚报失败: " + str(e), exc_info=True)
     async def _render_evening_report_image(self, html_content: str) -> Optional[str]:
         try:
             logger.info("开始调用 AstrBot T2I 渲染...")
@@ -698,7 +754,17 @@ class HeiboxYard(Star):
 
     @filter.command("重置今日")
     async def cmd_reset_today(self, event: AstrMessageEvent):
-        window_no = get_current_window_no()
+        msg = event.message_str.strip()
+        parts = msg.split()
+
+        if len(parts) >= 2:
+            window_no = parts[1].strip()
+            if not (len(window_no) == 8 and window_no.isdigit()):
+                yield event.plain_result("❌ 窗口编号格式错误，应为 YYYYMMDD")
+                return
+        else:
+            window_no = get_current_window_no()
+
         existing_posts = self.post_manager.get_posts_by_window_no(window_no)
 
         if not existing_posts:
@@ -1061,6 +1127,13 @@ class HeiboxYard(Star):
             WHERE p.date_str = ? ORDER BY p.daily_no
         """, (window_no,))
         rows = cur.fetchall()
+
+        # 查询已有总评
+        cur.execute("""
+            SELECT comment, model_used FROM llm_analyses
+            WHERE window_start = ? AND daily_no = ?
+        """, (window_start, "SUMMARY"))
+        summary_row = cur.fetchone()
         conn.close()
 
         if not rows:
@@ -1092,19 +1165,47 @@ class HeiboxYard(Star):
                 "hot_comments": hot_comments,
             })
 
-        ai_summary, summary_model, summary_tokens = await generate_ai_summary(
-            self.context, posts, window_no, self.llm_provider_id
-        )
+        # 总评处理：优先使用数据库中已有的总评
+        ai_summary = None
+        summary_model = None
+        summary_tokens = None
+
+        if summary_row and summary_row[0] and summary_row[0].strip():
+            ai_summary = summary_row[0].strip()
+            summary_model = summary_row[1]
+            logger.info(f"[/生成晚报] 窗口 {window_no} 使用数据库中已有总评")
+        else:
+            logger.info(f"[/生成晚报] 窗口 {window_no} 数据库中无总评，调用 AI 生成...")
+            ai_summary, summary_model, summary_tokens = await generate_ai_summary(
+                self.context, posts, window_no, self.llm_provider_id
+            )
+            # 保存新生成的总评到数据库
+            if ai_summary and ai_summary.strip():
+                conn = sqlite3.connect(self.db_path)
+                cur = conn.cursor()
+                cur.execute("""
+                    INSERT OR REPLACE INTO llm_analyses 
+                    (window_start, daily_no, link_id, title, comment, analyzed_at, model_used)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    window_start, "SUMMARY", 0, "AI总评",
+                    ai_summary,
+                    datetime.now(timezone.utc).isoformat(),
+                    summary_model or "unknown"
+                ))
+                conn.commit()
+                conn.close()
+                logger.info(f"[/生成晚报] 窗口 {window_no} 总评已保存到数据库")
 
         issue_no = self.report_generator.calculate_issue_no(window_no)
         report_date = datetime.fromtimestamp(window_end, tz=timezone(timedelta(hours=8))).strftime("%Y年%m月%d日")
         total_comments = len(posts)
 
+        # 统计总评的 tokens（如果之前没有运行过 LLM 分析，analysis_tokens 为 None）
         total_input = summary_tokens.get("prompt_tokens", 0) if summary_tokens else 0
-        cache_hit = summary_tokens.get("prompt_cache_hit_tokens", 0) if summary_tokens else 0
-        completion = summary_tokens.get("completion_tokens", 0) if summary_tokens else 0
+        total_completion = summary_tokens.get("completion_tokens", 0) if summary_tokens else 0
 
-        tokens_str = f"{total_input}/{cache_hit}/{completion}" if total_input > 0 or completion > 0 else "--"
+        tokens_str = f"{total_input}/{total_completion}" if total_input > 0 or total_completion > 0 else "--"
         generation_time = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
 
         html_content = self.report_generator.generate_evening_report(

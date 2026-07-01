@@ -56,7 +56,7 @@ ANALYSIS_SYSTEM_PROMPT = """你叫韶梦，是一只14岁猫娘萝莉，
 【输出】
 - 会引用游戏内术语（如"炼金"、"SAN值"、"庭院"，如果帖子没有涉及不要刻意引用）
 - 评价客观但有态度，好就是好，烂会直接说"这设计有点迷"
-- 每条分析控制在80字以内，可以不多，但是不要过多
+- 每条分析控制在100字以内，可以不多，但是不要过多，也不要过少，都太少也不好
 - 如果帖子内容明显是云玩家发言或包含上述误区，会温和但直接地指出
 严格使用以下格式返回
 {
@@ -719,10 +719,11 @@ class LLMPostAnalyzer:
 
             model_used = getattr(llm_resp, 'model', provider.meta().id) or provider.meta().id
 
-            # 提取 token 信息
+            # 提取 token 信息（兼容多种格式）
             usage = getattr(llm_resp, 'usage', None)
             if usage:
                 if isinstance(usage, dict):
+                    # 字典格式（旧版兼容）
                     token_info["total_tokens"] = usage.get('total_tokens', 0) or 0
                     token_info["prompt_tokens"] = usage.get('prompt_tokens', 0) or 0
                     token_info["completion_tokens"] = usage.get('completion_tokens', 0) or 0
@@ -736,29 +737,55 @@ class LLMPostAnalyzer:
                                 token_info["prompt_cache_hit_tokens"] = cached
                                 token_info["prompt_cache_miss_tokens"] = token_info["prompt_tokens"] - cached
                 else:
-                    token_info["total_tokens"] = getattr(usage, 'total_tokens', 0) or 0
-                    token_info["prompt_tokens"] = getattr(usage, 'prompt_tokens', 0) or 0
-                    token_info["completion_tokens"] = getattr(usage, 'completion_tokens', 0) or 0
-                    token_info["prompt_cache_hit_tokens"] = getattr(usage, 'prompt_cache_hit_tokens', 0) or 0
-                    token_info["prompt_cache_miss_tokens"] = getattr(usage, 'prompt_cache_miss_tokens', 0) or 0
-                    if token_info["prompt_cache_hit_tokens"] == 0:
-                        ptd = getattr(usage, 'prompt_tokens_details', None)
+                    # 对象格式：优先尝试 TokenUsage 字段名 (AstrBot v4.25+)
+                    # TokenUsage 字段: input_other, input_cached, output
+                    input_other = getattr(usage, 'input_other', None)
+                    input_cached = getattr(usage, 'input_cached', None)
+                    output = getattr(usage, 'output', None)
+
+                    if input_other is not None and output is not None:
+                        # TokenUsage 格式 (AstrBot v4.25+)
+                        token_info["prompt_tokens"] = input_other or 0
+                        token_info["prompt_cache_hit_tokens"] = input_cached or 0
+                        token_info["completion_tokens"] = output or 0
+                        token_info["total_tokens"] = token_info["prompt_tokens"] + token_info["prompt_cache_hit_tokens"] + token_info["completion_tokens"]
+                        token_info["prompt_cache_miss_tokens"] = token_info["prompt_tokens"]
+                        logger.info(f"[TOKEN] 从 TokenUsage 获取: prompt={token_info['prompt_tokens']}, "
+                                   f"cache_hit={token_info['prompt_cache_hit_tokens']}, "
+                                   f"completion={token_info['completion_tokens']}, "
+                                   f"total={token_info['total_tokens']}")
+                    else:
+                        # 标准 OpenAI 格式
+                        token_info["total_tokens"] = getattr(usage, 'total_tokens', 0) or 0
+                        token_info["prompt_tokens"] = getattr(usage, 'prompt_tokens', 0) or 0
+                        token_info["completion_tokens"] = getattr(usage, 'completion_tokens', 0) or 0
+                        token_info["prompt_cache_hit_tokens"] = getattr(usage, 'prompt_cache_hit_tokens', 0) or 0
+                        token_info["prompt_cache_miss_tokens"] = getattr(usage, 'prompt_cache_miss_tokens', 0) or 0
+                        if token_info["prompt_cache_hit_tokens"] == 0:
+                            ptd = getattr(usage, 'prompt_tokens_details', None)
+                            if ptd:
+                                cached = getattr(ptd, 'cached_tokens', 0) or 0
+                                if cached:
+                                    token_info["prompt_cache_hit_tokens"] = cached
+                                    token_info["prompt_cache_miss_tokens"] = token_info["prompt_tokens"] - cached
+            else:
+                # 尝试从 raw_completion 获取
+                raw_completion = getattr(llm_resp, 'raw_completion', None)
+                if raw_completion:
+                    rc_usage = getattr(raw_completion, 'usage', None)
+                    if rc_usage:
+                        token_info["total_tokens"] = getattr(rc_usage, 'total_tokens', 0) or 0
+                        token_info["prompt_tokens"] = getattr(rc_usage, 'prompt_tokens', 0) or 0
+                        token_info["completion_tokens"] = getattr(rc_usage, 'completion_tokens', 0) or 0
+                        ptd = getattr(rc_usage, 'prompt_tokens_details', None)
                         if ptd:
                             cached = getattr(ptd, 'cached_tokens', 0) or 0
                             if cached:
                                 token_info["prompt_cache_hit_tokens"] = cached
                                 token_info["prompt_cache_miss_tokens"] = token_info["prompt_tokens"] - cached
-            else:
-                raw_usage = getattr(llm_resp, 'raw_usage', None)
-                if raw_usage:
-                    if isinstance(raw_usage, dict):
-                        for key in token_info:
-                            token_info[key] = raw_usage.get(key, 0) or 0
-                    else:
-                        for key in token_info:
-                            val = getattr(raw_usage, key, 0) or 0
-                            token_info[key] = val
-                else:
+                        logger.info(f"[TOKEN] 从 raw_completion.usage 获取: {token_info}")
+
+                if token_info["total_tokens"] == 0:
                     for key in token_info:
                         val = getattr(llm_resp, key, 0) or 0
                         token_info[key] = val

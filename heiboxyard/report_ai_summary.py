@@ -51,38 +51,69 @@ async def generate_ai_summary(context, posts: list[dict], window_no: str,
 
         model_used = getattr(llm_resp, 'model', None) or provider.meta().id
 
-        # ====== 修复：提取 token 信息（兼容对象和字典） ======
+        # ====== 修复：提取 token 信息（兼容对象和字典 + TokenUsage） ======
         usage = getattr(llm_resp, 'usage', None)
         if usage:
             if isinstance(usage, dict):
+                # 字典格式（旧版兼容）
                 token_info["total_tokens"] = usage.get('total_tokens', 0) or 0
                 token_info["prompt_tokens"] = usage.get('prompt_tokens', 0) or 0
                 token_info["completion_tokens"] = usage.get('completion_tokens', 0) or 0
                 token_info["prompt_cache_hit_tokens"] = usage.get('prompt_cache_hit_tokens', 0) or 0
                 token_info["prompt_cache_miss_tokens"] = usage.get('prompt_cache_miss_tokens', 0) or 0
+                logger.debug(f"[AI总评] Token 从字典提取: {token_info}")
             else:
-                token_info["total_tokens"] = getattr(usage, 'total_tokens', 0) or 0
-                token_info["prompt_tokens"] = getattr(usage, 'prompt_tokens', 0) or 0
-                token_info["completion_tokens"] = getattr(usage, 'completion_tokens', 0) or 0
-                token_info["prompt_cache_hit_tokens"] = getattr(usage, 'prompt_cache_hit_tokens', 0) or 0
-                token_info["prompt_cache_miss_tokens"] = getattr(usage, 'prompt_cache_miss_tokens', 0) or 0
-            logger.debug(f"[AI总评] Token 提取成功: {token_info}")
-        else:
-            # 降级处理
-            raw_usage = getattr(llm_resp, 'raw_usage', None)
-            if raw_usage:
-                if isinstance(raw_usage, dict):
-                    token_info["total_tokens"] = raw_usage.get('total_tokens', 0) or 0
-                    token_info["prompt_tokens"] = raw_usage.get('prompt_tokens', 0) or 0
-                    token_info["completion_tokens"] = raw_usage.get('completion_tokens', 0) or 0
-                    token_info["prompt_cache_hit_tokens"] = raw_usage.get('prompt_cache_hit_tokens', 0) or 0
-                    token_info["prompt_cache_miss_tokens"] = raw_usage.get('prompt_cache_miss_tokens', 0) or 0
-                else:
-                    for key in token_info:
-                        val = getattr(raw_usage, key, 0) or 0
-                        token_info[key] = val
+                # 对象格式：优先尝试 TokenUsage 字段名 (AstrBot v4.25+)
+                input_other = getattr(usage, 'input_other', None)
+                input_cached = getattr(usage, 'input_cached', None)
+                output = getattr(usage, 'output', None)
 
-        # 获取总结文本（保持原有逻辑）
+                if input_other is not None and output is not None:
+                    # TokenUsage 格式
+                    token_info["prompt_tokens"] = input_other or 0
+                    token_info["prompt_cache_hit_tokens"] = input_cached or 0
+                    token_info["completion_tokens"] = output or 0
+                    token_info["total_tokens"] = token_info["prompt_tokens"] + token_info["prompt_cache_hit_tokens"] + token_info["completion_tokens"]
+                    token_info["prompt_cache_miss_tokens"] = token_info["prompt_tokens"]
+                    logger.debug(f"[AI总评] Token 从 TokenUsage 提取: {token_info}")
+                else:
+                    # 标准 OpenAI 格式
+                    token_info["total_tokens"] = getattr(usage, 'total_tokens', 0) or 0
+                    token_info["prompt_tokens"] = getattr(usage, 'prompt_tokens', 0) or 0
+                    token_info["completion_tokens"] = getattr(usage, 'completion_tokens', 0) or 0
+                    token_info["prompt_cache_hit_tokens"] = getattr(usage, 'prompt_cache_hit_tokens', 0) or 0
+                    token_info["prompt_cache_miss_tokens"] = getattr(usage, 'prompt_cache_miss_tokens', 0) or 0
+                    logger.debug(f"[AI总评] Token 从对象提取: {token_info}")
+        else:
+            # 降级处理：尝试 raw_completion
+            raw_completion = getattr(llm_resp, 'raw_completion', None)
+            if raw_completion:
+                rc_usage = getattr(raw_completion, 'usage', None)
+                if rc_usage:
+                    token_info["total_tokens"] = getattr(rc_usage, 'total_tokens', 0) or 0
+                    token_info["prompt_tokens"] = getattr(rc_usage, 'prompt_tokens', 0) or 0
+                    token_info["completion_tokens"] = getattr(rc_usage, 'completion_tokens', 0) or 0
+                    ptd = getattr(rc_usage, 'prompt_tokens_details', None)
+                    if ptd:
+                        cached = getattr(ptd, 'cached_tokens', 0) or 0
+                        if cached:
+                            token_info["prompt_cache_hit_tokens"] = cached
+                            token_info["prompt_cache_miss_tokens"] = token_info["prompt_tokens"] - cached
+                    logger.debug(f"[AI总评] Token 从 raw_completion 提取: {token_info}")
+            else:
+                raw_usage = getattr(llm_resp, 'raw_usage', None)
+                if raw_usage:
+                    if isinstance(raw_usage, dict):
+                        token_info["total_tokens"] = raw_usage.get('total_tokens', 0) or 0
+                        token_info["prompt_tokens"] = raw_usage.get('prompt_tokens', 0) or 0
+                        token_info["completion_tokens"] = raw_usage.get('completion_tokens', 0) or 0
+                        token_info["prompt_cache_hit_tokens"] = raw_usage.get('prompt_cache_hit_tokens', 0) or 0
+                        token_info["prompt_cache_miss_tokens"] = raw_usage.get('prompt_cache_miss_tokens', 0) or 0
+                    else:
+                        for key in token_info:
+                            val = getattr(raw_usage, key, 0) or 0
+                            token_info[key] = val
+                    logger.debug(f"[AI总评] Token 从 raw_usage 提取: {token_info}")        # 获取总结文本（保持原有逻辑）
         summary = None
         if hasattr(llm_resp, 'completion_text'):
             summary = llm_resp.completion_text
@@ -110,9 +141,9 @@ def _build_summary_prompt(posts: list[dict], window_no: str) -> str:
     lines = ["今日庭院社区（窗口 " + window_no + "）共 " + str(len(posts)) + " 个帖子，请总结："]
 
     for i, p in enumerate(posts[:10], 1):
-        title = p.get('title', '(无标题)')
-        comment = p.get('comment', '')[:80]
+        title = p.get('title') or '(无标题)'
+        comment = (p.get('comment') or '')[:80]
         lines.append(str(i) + ". 《" + title + "》 - " + comment)
 
-    lines.append("请用可爱的语气总结今日社区氛围（50-100字）。")
+    lines.append("请用可爱的语气总结今日社区氛围（100字以内）。")
     return "\n".join(lines)
