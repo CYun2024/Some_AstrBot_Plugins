@@ -1243,8 +1243,9 @@ class HeiboxYard(Star):
 
         if len(parts) < 3:
             yield event.plain_result(
-                "❌ 用法: /调整窗口 <帖子序号> <目标窗口编号>\n"
-                "例如: /调整窗口 4 20260623"
+                "❌ 用法: /调整窗口 <帖子序号> <目标窗口编号> [帖子窗口编号]\n"
+                "例如: /调整窗口 4 20260623 20260622\n"
+                "说明: 帖子窗口编号省略时默认为当前窗口"
             )
             return
 
@@ -1259,14 +1260,22 @@ class HeiboxYard(Star):
             yield event.plain_result("❌ 目标窗口编号格式错误")
             return
 
-        source_window_no = get_current_window_no()
+        # 帖子窗口编号：有第4个参数则用，否则默认当前窗口
+        if len(parts) >= 4:
+            source_window_no = parts[3].strip()
+            if not (len(source_window_no) == 8 and source_window_no.isdigit()):
+                yield event.plain_result("❌ 帖子窗口编号格式错误")
+                return
+        else:
+            source_window_no = get_current_window_no()
+
         source_posts = self.post_manager.get_posts_by_window_no(source_window_no)
         if not source_posts:
-            yield event.plain_result(f"📭 当前窗口 {source_window_no} 内没有帖子")
+            yield event.plain_result(f"📭 窗口 {source_window_no} 内没有帖子")
             return
 
         if post_seq < 1 or post_seq > len(source_posts):
-            yield event.plain_result(f"❌ 序号 {post_seq} 超出范围")
+            yield event.plain_result(f"❌ 序号 {post_seq} 超出范围，窗口 {source_window_no} 共有 {len(source_posts)} 个帖子")
             return
 
         link_id, old_daily_no = source_posts[post_seq - 1]
