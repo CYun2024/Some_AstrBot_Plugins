@@ -972,3 +972,100 @@ class PostManager:
 
         logger.info(f"本次处理 {processed_count}/{len(link_ids)} 个帖子 (来源={source}, 窗口={log_window_no})")
         return processed_count
+
+    #### web端补充 #####
+    
+    def _get_db_conn(self):
+        """返回数据库连接，供外部调用"""
+        self._ensure_db()
+        return sqlite3.connect(self.db_path)
+
+    def swap_by_link_id(self, link_id1, link_id2):
+        """通过 link_id 交换两个帖子的 daily_no（必须在同一窗口）"""
+        self._ensure_db()
+        conn = self._get_db_conn()
+        cur = conn.cursor()
+        try:
+            # 获取两个帖子的 daily_no 和窗口
+            cur.execute("SELECT daily_no, date_str FROM posts WHERE link_id = ?", (link_id1,))
+            row1 = cur.fetchone()
+            cur.execute("SELECT daily_no, date_str FROM posts WHERE link_id = ?", (link_id2,))
+            row2 = cur.fetchone()
+            if not row1 or not row2:
+                return False, "帖子不存在"
+            no1, window1 = row1
+            no2, window2 = row2
+            if window1 != window2:
+                return False, "两个帖子不在同一窗口"
+            # 使用临时值交换
+            temp_no = f"__tmp_swap_{link_id1}_{int(datetime.now().timestamp())}"
+            cur.execute("UPDATE posts SET daily_no = ? WHERE link_id = ?", (temp_no, link_id1))
+            cur.execute("UPDATE llm_analyses SET daily_no = ? WHERE link_id = ?", (temp_no, link_id1))
+            cur.execute("UPDATE posts SET daily_no = ? WHERE link_id = ?", (no1, link_id2))
+            cur.execute("UPDATE llm_analyses SET daily_no = ? WHERE link_id = ?", (no1, link_id2))
+            cur.execute("UPDATE posts SET daily_no = ? WHERE link_id = ?", (no2, link_id1))
+            cur.execute("UPDATE llm_analyses SET daily_no = ? WHERE link_id = ?", (no2, link_id1))
+            conn.commit()
+            return True, f"交换成功: #{no1} <-> #{no2}"
+        except Exception as e:
+            conn.rollback()
+            return False, f"交换失败: {str(e)}"
+        finally:
+            conn.close()
+
+    def move_to_window(self, link_id, target_window_no):
+        """将帖子移动到目标窗口，重新编号，同时处理源窗口重排"""
+        self._ensure_db()
+        conn = self._get_db_conn()
+        cur = conn.cursor()
+        try:
+            # 获取帖子当前信息
+            cur.execute("SELECT daily_no, date_str, window_start FROM posts WHERE link_id = ?", (link_id,))
+            row = cur.fetchone()
+            if not row:
+                return False, "帖子不存在"
+            old_daily_no, old_window, old_window_start = row
+            if old_window == target_window_no:
+                return False, "帖子已在目标窗口"
+
+            # 获取目标窗口的窗口起止时间
+            target_start, target_end = get_window_by_no(target_window_no)
+            # 生成新 daily_no
+            cur.execute("SELECT daily_no FROM posts WHERE date_str = ? ORDER BY daily_no DESC LIMIT 1", (target_window_no,))
+            row = cur.fetchone()
+            if row and row[0]:
+                _, seq = parse_daily_no(row[0])
+                new_seq = seq + 1
+            else:
+                new_seq = 1
+            new_daily_no = format_daily_no(target_window_no, new_seq)
+
+            # 更新帖子
+            cur.execute("""
+                UPDATE posts SET daily_no = ?, window_start = ?, date_str = ?
+                WHERE link_id = ?
+            """, (new_daily_no, target_start, target_window_no, link_id))
+            # 更新 llm_analyses
+            cur.execute("""
+                UPDATE llm_analyses SET daily_no = ?, window_start = ?
+                WHERE link_id = ?
+            """, (new_daily_no, target_start, link_id))
+
+            # 重新编号源窗口
+            cur.execute(
+                "SELECT link_id, daily_no FROM posts WHERE date_str = ? ORDER BY create_at, link_id",
+                (old_window,)
+            )
+            rows = cur.fetchall()
+            for new_idx, (lid, _) in enumerate(rows, start=1):
+                final_no = format_daily_no(old_window, new_idx)
+                cur.execute("UPDATE posts SET daily_no = ? WHERE link_id = ?", (final_no, lid))
+                cur.execute("UPDATE llm_analyses SET daily_no = ? WHERE link_id = ?", (final_no, lid))
+
+            conn.commit()
+            return True, f"帖子已移动到窗口 {target_window_no}，新编号 #{new_daily_no}"
+        except Exception as e:
+            conn.rollback()
+            return False, f"移动失败: {str(e)}"
+        finally:
+            conn.close()
