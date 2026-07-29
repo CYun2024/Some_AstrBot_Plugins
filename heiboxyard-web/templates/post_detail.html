@@ -40,7 +40,7 @@
         <!-- 图片 -->
         {% if post.image_paths %}
         <div class="content-card">
-            <h3 class="card-title">&#128247; 图片 ({{ post.image_paths|length }}张) 点击可放大查看</h3>
+            <h3 class="card-title">&#128247; 图片 ({{ post.image_paths|length }}张)</h3>
             <div class="image-grid">
                 {% for img in post.image_paths %}
                 <div class="image-item">
@@ -120,7 +120,7 @@
         <!-- 调整顺序 -->
         <div class="sidebar-card">
             <h3 class="sidebar-title">&#8646; 调整顺序</h3>
-            <p class="sidebar-hint">与同窗口其他帖子交换编号（点击需要交换顺序的帖子即可）</p>
+            <p class="sidebar-hint">与同窗口其他帖子交换编号</p>
             {% if same_window_posts %}
             <div class="swap-list">
                 {% for sp in same_window_posts %}
@@ -165,8 +165,9 @@
 
 {% block extra_js %}
 <script>
-// ========== 编辑 AI 评论 ==========
+// ========== 编辑 AI 评论（允许空内容） ==========
 async function editComment(linkId) {
+    // 获取当前 AI 评论内容（若有）
     const commentBox = document.getElementById('aiCommentBox');
     let currentComment = '';
     if (commentBox) {
@@ -182,11 +183,8 @@ async function editComment(linkId) {
             showToast('输入框未找到', 'error');
             return false;
         }
-        const comment = textarea.value.trim();
-        if (!comment) {
-            showToast('评论内容不能为空', 'error');
-            return false;
-        }
+        const comment = textarea.value.trim();   // 允许空字符串
+        // 移除空值校验，直接提交
         showLoading('更新中...');
         try {
             const res = await fetch(`/yard/admin/api/post/${linkId}/comment`, {
@@ -214,7 +212,7 @@ async function editComment(linkId) {
 
 // ========== 其他功能函数 ==========
 async function analyzePost(linkId) {
-    if (!confirm('确定要为此帖子生成 AI 评论吗？\n注意：实际分析需要在 QQ 中执行指令')) return;
+    if (!confirm('确定要为此帖子生成 AI 评论吗？\n不要刷这个喵，省点余额喵')) return;
     showLoading();
     try {
         const res = await fetch(`/yard/admin/api/post/${linkId}/analyze`, {method: 'POST'});
@@ -302,10 +300,9 @@ document.addEventListener('DOMContentLoaded', function() {
     const imageItems = document.querySelectorAll('.image-item img');
     if (imageItems.length === 0) return;
 
-    // 构造图片路径数组（与模板中一致）
+    // 构造图片路径数组（从 src 提取）
     const imagePaths = [];
     imageItems.forEach(img => {
-        // 从 src 提取文件名
         const src = img.getAttribute('src');
         if (src) imagePaths.push(src);
     });

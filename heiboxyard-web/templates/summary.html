@@ -1,0 +1,110 @@
+{% extends "base.html" %}
+
+{% block title %}总评管理{% endblock %}
+{% block page_title %}总评管理{% endblock %}
+
+{% block content %}
+<div class="filter-bar">
+    <div class="filter-group">
+        <label>窗口</label>
+        <select class="filter-select" id="windowSelect" onchange="changeWindow(this.value)">
+            {% for w in all_windows %}
+            <option value="{{ w }}" {% if w == window_no %}selected{% endif %}>
+                {{ w[:4] }}-{{ w[4:6] }}-{{ w[6:] }}
+            </option>
+            {% endfor %}
+        </select>
+    </div>
+    <div class="filter-group" style="margin-left:auto;">
+        <button class="btn btn-primary btn-sm" onclick="generateSummary()">&#129302; 重新生成总评</button>
+    </div>
+</div>
+
+<div class="content-card">
+    <h3 class="card-title">&#128220; 今日总评</h3>
+    {% if summary and summary.comment %}
+    <div class="ai-comment-box" id="summaryBox">
+        <p class="ai-comment-text">{{ summary.comment }}</p>
+        <div class="ai-comment-meta">
+            <span>模型: {{ summary.model or 'unknown' }}</span>
+            {% if summary.analyzed_at %}
+            <span>时间: {{ summary.analyzed_at[:19] }}</span>
+            {% endif %}
+        </div>
+    </div>
+    <div class="sidebar-actions" style="flex-direction:row; gap:10px; margin-top:12px;">
+        <button class="btn btn-primary btn-sm" onclick="editSummary()">&#9998; 编辑总评</button>
+    </div>
+    {% else %}
+    <div class="ai-comment-empty">
+        <p class="text-muted">该窗口暂无总评</p>
+        <button class="btn btn-primary btn-sm" onclick="generateSummary()" style="margin-top:12px;">&#129302; 立即生成</button>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+function changeWindow(windowNo) {
+    window.location.href = `{{ url_for('yard_admin.summary_manage') }}?window=${windowNo}`;
+}
+
+async function generateSummary() {
+    const windowNo = '{{ window_no }}';
+    if (!confirm(`确定要为窗口 ${windowNo} 强制重新生成总评吗？`)) return;
+    showLoading('正在生成总评...');
+    try {
+        const res = await fetch('/yard/admin/api/summary/generate', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({window_no: windowNo})
+        });
+        const data = await res.json();
+        if (data.success) {
+            showToast('总评生成任务已启动，稍后将自动刷新', 'success');
+            // 10秒后刷新
+            setTimeout(() => location.reload(), 10000);
+        } else {
+            showToast('生成失败: ' + (data.error || '未知错误'), 'error');
+        }
+    } catch (e) {
+        showToast('请求失败: ' + e.message, 'error');
+    } finally {
+        hideLoading();
+    }
+}
+
+async function editSummary() {
+    const currentComment = document.querySelector('#summaryBox .ai-comment-text')?.textContent?.trim() || '';
+    const content = `<textarea class="modal-textarea" id="summaryInput" rows="6" placeholder="输入总评内容...">${currentComment}</textarea>`;
+    showModal('编辑总评', content, async () => {
+        const textarea = document.getElementById('summaryInput');
+        if (!textarea) { showToast('输入框未找到', 'error'); return false; }
+        const comment = textarea.value.trim();
+        showLoading('更新中...');
+        try {
+            const res = await fetch('/yard/admin/api/summary/update', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({window_no: '{{ window_no }}', comment})
+            });
+            const data = await res.json();
+            if (data.success) {
+                showToast('总评已更新', 'success');
+                setTimeout(() => location.reload(), 600);
+                return true;
+            } else {
+                showToast(data.error || '更新失败', 'error');
+                return false;
+            }
+        } catch (e) {
+            showToast('请求失败: ' + e.message, 'error');
+            return false;
+        } finally {
+            hideLoading();
+        }
+    });
+}
+</script>
+{% endblock %}

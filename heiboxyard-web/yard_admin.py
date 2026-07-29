@@ -118,7 +118,8 @@ def dashboard():
         today_analyzed=today_analyzed,
         recent_windows=recent_windows,
         today_posts=today_posts,
-        ts_to_bj_str=ts_to_bj_str
+        ts_to_bj_str=ts_to_bj_str,
+        nav_window=current_window_no
     )
 
 @yard_bp.route('/posts')
@@ -134,6 +135,10 @@ def posts_list():
 
     cur.execute("SELECT DISTINCT date_str FROM posts ORDER BY date_str DESC")
     all_windows = [row[0] for row in cur.fetchall()]
+    # 确保当前查询的窗口在列表中（即使没有帖子）
+    if window_no not in all_windows:
+        all_windows.append(window_no)
+        all_windows.sort(reverse=True)
 
     where_clauses = ["p.date_str = ?"]
     params = [window_no]
@@ -194,6 +199,7 @@ def posts_list():
         total_pages=total_pages,
         total=total,
         ts_to_bj_str=ts_to_bj_str,
+        nav_window=window_no,
         current_window_no=get_current_window_no()
     )
 
@@ -255,8 +261,10 @@ def post_detail(link_id):
             ORDER BY daily_no
         """, (post['date_str'], link_id))
         same_window_posts = [dict(row) for row in cur.fetchall()]
+        nav_window = post['date_str']
     else:
         same_window_posts = []
+        nav_window = get_current_window_no()
 
     conn.close()
     return render_template('post_detail.html',
@@ -265,6 +273,7 @@ def post_detail(link_id):
         all_windows=all_windows,
         same_window_posts=same_window_posts,
         ts_to_bj_str=ts_to_bj_str,
+        nav_window=nav_window,
         current_window_no=get_current_window_no()
     )
 
@@ -293,7 +302,48 @@ def reports_list():
                 'type': 'html' if f.suffix.lower() == '.html' else 'image',
                 'path': str(f)
             })
-    return render_template('reports.html', reports=report_files,current_window_no=get_current_window_no())
+    return render_template('reports.html',
+        reports=report_files,
+        nav_window=get_current_window_no(),
+        current_window_no=get_current_window_no()
+    )
+
+# ========== 总评管理页面 ==========
+@yard_bp.route('/summary')
+def summary_manage():
+    window_no = request.args.get('window', get_current_window_no())
+    window_start, _ = get_window_by_no(window_no)
+    
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT comment, model_used, analyzed_at
+        FROM llm_analyses
+        WHERE daily_no = 'SUMMARY' AND window_start = ?
+    """, (window_start,))
+    row = cur.fetchone()
+    conn.close()
+    
+    summary = None
+    if row:
+        summary = {'comment': row[0], 'model': row[1], 'analyzed_at': row[2]}
+    
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT DISTINCT date_str FROM posts ORDER BY date_str DESC")
+    all_windows = [row[0] for row in cur.fetchall()]
+    conn.close()
+    if window_no not in all_windows:
+        all_windows.append(window_no)
+        all_windows.sort(reverse=True)
+    
+    return render_template('summary.html',
+        window_no=window_no,
+        summary=summary,
+        all_windows=all_windows,
+        nav_window=window_no,
+        current_window_no=get_current_window_no()
+    )
 
 # ========== API 代理路由 ==========
 # 注意：所有 /api/* 路由都代理到插件 HTTP API
@@ -372,15 +422,64 @@ def api_reset_order():
 
 @yard_bp.route('/api/post/<int:link_id>/delete-analysis', methods=['POST'])
 def api_delete_analysis(link_id):
-    # 删除分析可以复用更新评论，传入空字符串？但插件 API 可能没有删除端点，可以调用 comment 并传入空内容
-    # 或者我们单独实现一个删除，但为了简单，这里直接代理到 update-comment，传入空字符串表示删除？
-    # 但插件 API 的 update-comment 不允许空内容，所以我们需要在插件 API 中添加 delete 端点。
-    # 由于我们已有 /api/post/<link_id>/comment 且不允许空，我们可以在插件 API 中增加 /api/post/<link_id>/delete-analysis
-    # 但修改插件 API 稍复杂，暂时返回提示。
-    return jsonify({'success': False, 'error': '请使用编辑评论功能清空内容，或等待后续支持'}), 501
+    return proxy_request('POST', f'/api/post/{link_id}/delete-analysis')
 
-# ========== 新增：仅分析不生成报告 ==========
 @yard_bp.route('/api/analyze-window', methods=['POST'])
 def api_analyze_window():
     data = request.get_json() or {}
     return proxy_request('POST', '/api/analyze-window', data)
+
+# ========== 总评相关 API ==========
+@yard_bp.route('/api/summary', methods=['GET'])
+def api_get_summary():
+    """获取指定窗口的总评"""
+    window_no = request.args.get('window_no') or get_current_window_no()
+    window_start, _ = get_window_by_no(window_no)
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT comment, model_used, analyzed_at
+        FROM llm_analyses
+        WHERE daily_no = 'SUMMARY' AND window_start = ?
+    """, (window_start,))
+    row = cur.fetchone()
+    conn.close()
+    if row:
+        return jsonify({
+            'success': True,
+            'comment': row[0],
+            'model': row[1],
+            'analyzed_at': row[2]
+        })
+    return jsonify({'success': False, 'comment': None})
+
+@yard_bp.route('/api/summary/update', methods=['POST'])
+def api_update_summary():
+    """更新或插入总评"""
+    data = request.get_json() or {}
+    window_no = data.get('window_no') or get_current_window_no()
+    comment = data.get('comment', '').strip()
+    window_start, _ = get_window_by_no(window_no)
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM llm_analyses WHERE daily_no = 'SUMMARY' AND window_start = ?", (window_start,))
+    exists = cur.fetchone()[0] > 0
+    if exists:
+        cur.execute("""
+            UPDATE llm_analyses SET comment = ?, analyzed_at = ?
+            WHERE daily_no = 'SUMMARY' AND window_start = ?
+        """, (comment, datetime.now(timezone.utc).isoformat(), window_start))
+    else:
+        cur.execute("""
+            INSERT INTO llm_analyses (window_start, daily_no, link_id, title, comment, analyzed_at, model_used)
+            VALUES (?, 'SUMMARY', 0, 'AI总评', ?, ?, 'manual')
+        """, (window_start, comment, datetime.now(timezone.utc).isoformat()))
+    conn.commit()
+    conn.close()
+    return jsonify({'success': True, 'message': '总评已更新'})
+
+@yard_bp.route('/api/summary/generate', methods=['POST'])
+def api_generate_summary():
+    """触发插件重新生成总评（异步）"""
+    data = request.get_json() or {}
+    return proxy_request('POST', '/api/summary/generate', data)

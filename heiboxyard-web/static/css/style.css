@@ -989,3 +989,78 @@ body {
     .post-detail-meta { flex-direction: column; gap: var(--space-1); }
     .report-grid { grid-template-columns: 1fr; }
 }
+
+/* ===== 晚报列表 - 一行一条 ===== */
+
+.report-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.report-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 18px;
+    background: var(--kimi-color-bg-secondary, #f5f5f7);
+    border-radius: 12px;
+    border: 1px solid var(--kimi-color-border, rgba(0,0,0,0.06));
+    transition: background 0.2s, box-shadow 0.2s;
+}
+
+.report-item:hover {
+    background: var(--kimi-color-bg-hover, #eaeaea);
+    box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+}
+
+.report-info {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex: 1;
+    min-width: 0;
+}
+
+.report-icon {
+    font-size: 1.3rem;
+    flex-shrink: 0;
+}
+
+.report-name {
+    font-weight: 600;
+    font-size: 0.95rem;
+    color: var(--kimi-color-text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+}
+
+.report-meta {
+    color: var(--kimi-color-text-tertiary, #999);
+    font-size: 0.85rem;
+    flex-shrink: 0;
+}
+
+.report-actions {
+    flex-shrink: 0;
+    margin-left: 12px;
+}
+
+/* 响应式：小屏幕下调整 */
+@media (max-width: 640px) {
+    .report-item {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 10px;
+    }
+    .report-actions {
+        margin-left: 0;
+        width: 100%;
+    }
+    .report-actions .btn {
+        width: 100%;
+        text-align: center;
+    }
+}
