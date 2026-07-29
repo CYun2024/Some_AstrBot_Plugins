@@ -34,6 +34,7 @@ from .image_analyzer import ImagePostAnalyzer
 from .memory_db import UserMemoryDB
 from .report_generator import EveningReportGenerator
 from .report_ai_summary import generate_ai_summary
+from .http_api import HeiboxYardAPI
 
 DEFAULT_PROGRAM_PATH = "heibox-comment-bot-master"
 
@@ -143,6 +144,9 @@ class HeiboxYard(Star):
             enabled=self.at_fetch_enabled
         )
 
+        # ========== HTTP API ==========
+        self.api = HeiboxYardAPI(self)
+
         # ========== 任务管理 ==========
         self._lock = asyncio.Lock()
         self._tasks = []
@@ -156,6 +160,7 @@ class HeiboxYard(Star):
             asyncio.create_task(self._llm_analysis_loop(), name="llm_analysis_task"),
             asyncio.create_task(self._evening_report_loop(), name="evening_report_task"),
         ]
+        self._tasks.append(asyncio.create_task(self.api.start(), name="http_api"))
         self.at_fetcher.start()
 
     # ==================== Feed 拉取 ====================
@@ -399,7 +404,7 @@ class HeiboxYard(Star):
 
         return filled, still_missing, accumulated_tokens
 
-    async def _ensure_ai_summary(self, window_no: str, posts: list[dict]):
+    async def _ensure_ai_summary(self, window_no: str, posts: list[dict] = None):
         """检查并确保窗口的总评已生成"""
         try:
             conn = sqlite3.connect(self.db_path)
@@ -409,7 +414,6 @@ class HeiboxYard(Star):
                 (window_no,)
             )
             analysis_count = cur.fetchone()[0]
-
             ws = get_window_by_no(window_no)[0]
             cur.execute(
                 "SELECT comment FROM llm_analyses WHERE window_start = ? AND daily_no = ?",
@@ -426,7 +430,36 @@ class HeiboxYard(Star):
                 logger.info(f"窗口 {window_no} 已有总评")
                 return
 
-            logger.info(f"📝 窗口 {window_no} 预生成总评...")
+            # 如果未传入 posts，则从数据库构建
+            if posts is None:
+                conn = sqlite3.connect(self.db_path)
+                cur = conn.cursor()
+                cur.execute("""
+                    SELECT p.link_id, p.daily_no, p.title, p.username, p.create_at, p.content,
+                        l.comment, l.userid
+                    FROM posts p
+                    JOIN llm_analyses l ON p.link_id = l.link_id
+                    WHERE p.date_str = ? AND l.daily_no != 'SUMMARY'
+                    ORDER BY p.daily_no
+                """, (window_no,))
+                rows = cur.fetchall()
+                conn.close()
+                posts = []
+                for row in rows:
+                    posts.append({
+                        'link_id': row[0],
+                        'daily_no': row[1],
+                        'title': row[2],
+                        'username': row[3],
+                        'create_at': row[4],
+                        'content': row[5],
+                        'comment': row[6],
+                        'userid': row[7],
+                    })
+                if not posts:
+                    logger.warning(f"窗口 {window_no} 没有可用的帖子评论，无法生成总评")
+                    return
+
             ai_summary, summary_model, summary_tokens = await generate_ai_summary(
                 self.context, posts, window_no, self.llm_provider_id
             )
@@ -434,25 +467,48 @@ class HeiboxYard(Star):
             if ai_summary and ai_summary.strip():
                 conn = sqlite3.connect(self.db_path)
                 cur = conn.cursor()
-                window_start = get_window_by_no(window_no)[0]
                 cur.execute("""
                     INSERT OR REPLACE INTO llm_analyses 
                     (window_start, daily_no, link_id, title, comment, analyzed_at, model_used)
                     VALUES (?, ?, ?, ?, ?, ?, ?)
                 """, (
-                    window_start, "SUMMARY", 0, "AI总评", 
-                    ai_summary, 
+                    ws, "SUMMARY", 0, "AI总评",
+                    ai_summary,
                     datetime.now(timezone.utc).isoformat(),
                     summary_model or "unknown"
                 ))
                 conn.commit()
                 conn.close()
-                logger.info(f"✅ 窗口 {window_no} 总评预生成完成")
+                logger.info(f"窗口 {window_no} 总评生成完成")
             else:
                 logger.warning(f"窗口 {window_no} 总评生成失败")
-
         except Exception as e:
             logger.error(f"预生成总评失败: {e}")
+
+    async def _force_regenerate_summary(self, window_no: str):
+        """强制重新生成指定窗口的总评（先删后建）"""
+        try:
+            window_start, _ = get_window_by_no(window_no)
+            logger.info(f"🔄 强制重新生成总评: 窗口 {window_no}")
+
+            # 1. 删除现有总评
+            conn = sqlite3.connect(self.db_path)
+            cur = conn.cursor()
+            cur.execute(
+                "DELETE FROM llm_analyses WHERE window_start = ? AND daily_no = 'SUMMARY'",
+                (window_start,)
+            )
+            deleted = cur.rowcount
+            conn.commit()
+            conn.close()
+            if deleted > 0:
+                logger.info(f"已删除旧总评 (窗口 {window_no})")
+
+            # 2. 调用原有的确保方法（此时已无总评，会重新生成）
+            await self._ensure_ai_summary(window_no, posts=None)
+
+        except Exception as e:
+            logger.error(f"强制重新生成总评失败: {e}", exc_info=True)
 
     # ==================== 晚报生成 ====================
 
@@ -1385,6 +1441,7 @@ class HeiboxYard(Star):
     async def terminate(self):
         """插件卸载时清理任务"""
         self.at_fetcher.stop()
+        await self.api.stop()
         for task in self._tasks:
             if task and not task.done():
                 task.cancel()

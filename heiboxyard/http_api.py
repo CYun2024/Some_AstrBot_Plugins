@@ -24,8 +24,9 @@ class HeiboxYardAPI:
         self.app.router.add_post('/api/fetch-at', self.handle_fetch_at)
         self.app.router.add_post('/api/generate-report', self.handle_generate_report)
         self.app.router.add_post('/api/reset-order', self.handle_reset_order)
-        # 新增：仅分析，不生成晚报
         self.app.router.add_post('/api/analyze-window', self.handle_analyze_window)
+        self.app.router.add_post('/api/post/{link_id}/delete-analysis', self.handle_delete_analysis)
+        self.app.router.add_post('/api/summary/generate', self.handle_summary_generate)
 
     async def start(self, host='127.0.0.1', port=5001):
         self.runner = web.AppRunner(self.app)
@@ -102,16 +103,22 @@ class HeiboxYardAPI:
         success, msg = self.plugin.post_manager.move_to_window(link_id, target_window_no)
         return web.json_response({'success': success, 'message': msg})
 
+    async def handle_delete_analysis(self, request):
+        link_id = int(request.match_info['link_id'])
+        try:
+            self.plugin.llm_analyzer.db.delete_by_link_id(link_id)
+            return web.json_response({'success': True, 'message': 'AI 评论已删除'})
+        except Exception as e:
+            logger.error(f"删除分析记录失败 link_id={link_id}: {e}")
+            return web.json_response({'success': False, 'error': str(e)}, status=500)
+
     async def handle_update_comment(self, request):
-        """更新 AI 评论（若不存在则自动创建记录）"""
         data = await request.json()
         link_id = int(request.match_info['link_id'])
-        comment = data.get('comment', '').strip()
-        if not comment:
-            return web.json_response({'success': False, 'error': '评论内容不能为空'}, status=400)
+        comment = data.get('comment', '')   # 可为空
 
         pm = self.plugin.post_manager
-        # 1. 检查 llm_analyses 中是否存在该 link_id
+        # 检查记录是否存在
         conn = pm._get_db_conn()
         cur = conn.cursor()
         cur.execute("SELECT COUNT(*) FROM llm_analyses WHERE link_id = ?", (link_id,))
@@ -119,10 +126,9 @@ class HeiboxYardAPI:
         conn.close()
 
         if exists:
-            # 存在则直接更新
             self.plugin.llm_analyzer.db.update_by_link_id(link_id, new_comment=comment)
         else:
-            # 2. 不存在则从 posts 表读取帖子信息，插入一条新分析记录
+            # 插入新记录（含空评论）
             conn = pm._get_db_conn()
             cur = conn.cursor()
             cur.execute("SELECT * FROM posts WHERE link_id = ?", (link_id,))
@@ -134,7 +140,6 @@ class HeiboxYardAPI:
             post_dict = dict(zip(cols, row))
             conn.close()
 
-            # 构建分析所需的帖子数据（与 analyze_single_post 格式保持一致）
             post = {
                 'link_id': post_dict['link_id'],
                 'daily_no': post_dict['daily_no'],
@@ -147,21 +152,18 @@ class HeiboxYardAPI:
                 'image_paths': json.loads(post_dict['image_urls']) if post_dict['image_urls'] else [],
                 'window_start': post_dict['window_start'],
             }
-            # 构造分析结果（仅含手动填写的评论）
             analysis = {
                 'daily_no': post_dict['daily_no'],
                 'comment': comment,
-                'sentiment': 'neutral',   # 默认中性
+                'sentiment': 'neutral',
             }
-            # 调用 save_analyses 插入新记录
             self.plugin.llm_analyzer.db.save_analyses(
                 post_dict['window_start'],
                 [post],
                 [analysis],
                 json.dumps(analysis, ensure_ascii=False),
-                'manual'   # 标记为手动编辑
+                'manual'
             )
-
         return web.json_response({'success': True, 'message': '评论已更新'})
 
     async def handle_analyze_post(self, request):
@@ -259,6 +261,13 @@ class HeiboxYardAPI:
             'success': True,
             'message': f'AI 分析任务已启动 (窗口 {window_no})'
         })
+
+    async def handle_summary_generate(self, request):
+        data = await request.json() or {}
+        window_no = data.get('window_no') or get_current_window_no()
+        # 改为强制重新生成
+        asyncio.create_task(self.plugin._force_regenerate_summary(window_no))
+        return web.json_response({'success': True, 'message': f'总评重新生成任务已启动 (窗口 {window_no})'})
 
 def ts_to_bj_str(ts):
     from datetime import datetime, timezone, timedelta
