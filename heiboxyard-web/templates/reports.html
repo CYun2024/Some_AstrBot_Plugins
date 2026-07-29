@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+
+{% block title %}晚报归档{% endblock %}
+{% block page_title %}晚报归档{% endblock %}
+
+{% block content %}
+<div class="section">
+    <div class="section-header">
+        <h2 class="section-title">
+            <span class="section-icon">&#128240;</span>
+            已生成的晚报
+        </h2>
+        <button class="btn btn-primary btn-sm" onclick="showToast('请在QQ中使用 /生成晚报 指令生成新晚报', 'info')">
+            <span>&#10133;</span> 生成新晚报
+        </button>
+    </div>
+
+    {% if reports %}
+    <div class="report-grid">
+        {% for r in reports %}
+        <div class="report-card">
+            <div class="report-card-header">
+                {% if r.type == 'html' %}
+                <span class="report-icon">&#128202;</span>
+                {% else %}
+                <span class="report-icon">&#127748;</span>
+                {% endif %}
+                <span class="report-name">{{ r.name }}</span>
+            </div>
+            <div class="report-card-meta">
+                <span>&#128336; {{ r.mtime }}</span>
+                <span>&#128230; {{ r.size }}</span>
+            </div>
+            <div class="report-card-actions">
+                {% if r.type == 'html' %}
+                <a href="/yard/view/{{ r.name }}" target="_blank" class="btn btn-ghost btn-sm">预览</a>
+                {% else %}
+                <a href="/yard/image/{{ r.name }}" target="_blank" class="btn btn-ghost btn-sm">查看</a>
+                {% endif %}
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty-state">
+        <div class="empty-icon">&#128240;</div>
+        <p>还没有生成过晚报</p>
+        <p class="empty-hint">使用「生成晚报」功能创建第一份晚报</p>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

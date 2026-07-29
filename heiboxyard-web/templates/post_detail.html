@@ -1,0 +1,362 @@
+{% extends "base.html" %}
+
+{% block title %}帖子 #{{ post.daily_no }}{% endblock %}
+{% block page_title %}帖子详情 #{{ post.daily_no }}{% endblock %}
+
+{% block content %}
+<!-- 帖子头部信息 -->
+<div class="post-header-card">
+    <div class="post-header-top">
+        <span class="post-id-badge">#{{ post.daily_no }}</span>
+        <span class="source-tag source-{{ post.source }}">{{ post.source }}</span>
+        <span class="window-tag">{{ post.date_str[:4] }}-{{ post.date_str[4:6] }}-{{ post.date_str[6:] }}</span>
+    </div>
+    <h1 class="post-detail-title">{{ post.title or '(无标题)' }}</h1>
+    <div class="post-detail-meta">
+        <span class="meta-item">&#128100; @{{ post.username or '匿名' }}</span>
+        <span class="meta-item">&#128336; {{ ts_to_bj_str(post.create_at) }}</span>
+        <span class="meta-item">&#128279; ID: {{ post.link_id }}</span>
+    </div>
+    {% if post.topics %}
+    <div class="post-topics">
+        {% for topic in post.topics %}
+        <span class="topic-chip">#{{ topic }}</span>
+        {% endfor %}
+    </div>
+    {% endif %}
+</div>
+
+<div class="detail-grid">
+    <!-- 左侧：内容和图片 -->
+    <div class="detail-main">
+        <!-- 内容 -->
+        <div class="content-card">
+            <h3 class="card-title">&#128196; 帖子内容</h3>
+            <div class="post-content-text">
+                {{ post.content or '(无内容)' }}
+            </div>
+        </div>
+
+        <!-- 图片 -->
+        {% if post.image_paths %}
+        <div class="content-card">
+            <h3 class="card-title">&#128247; 图片 ({{ post.image_paths|length }}张) 点击可放大查看</h3>
+            <div class="image-grid">
+                {% for img in post.image_paths %}
+                <div class="image-item">
+                    <img src="/yard/images/{{ img.split('/')[-1] }}" alt="帖子图片" loading="lazy"
+                         onerror="this.parentElement.innerHTML='<div class='image-error'>图片加载失败</div>'">
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+        {% endif %}
+
+        <!-- 热评 -->
+        {% if comments %}
+        <div class="content-card">
+            <h3 class="card-title">&#128172; 热评 ({{ comments|length }}条)</h3>
+            <div class="comments-list">
+                {% for c in comments %}
+                <div class="comment-item">
+                    <div class="comment-header">
+                        <span class="comment-rank">#{{ c.rank }}</span>
+                        <span class="comment-author">@{{ c.username or '匿名' }}</span>
+                        {% if c.time_str %}
+                        <span class="comment-time">{{ c.time_str }}</span>
+                        {% endif %}
+                        <span class="comment-up">&#10084; {{ c.up or 0 }}</span>
+                    </div>
+                    <div class="comment-text">{{ c.text or '(无内容)' }}</div>
+                    {% if c.images %}
+                    <div class="comment-images">
+                        {% for ci in c.images %}
+                        <img src="{{ ci }}" alt="评论图片" class="comment-img" loading="lazy">
+                        {% endfor %}
+                    </div>
+                    {% endif %}
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+        {% endif %}
+    </div>
+
+    <!-- 右侧：操作面板 -->
+    <div class="detail-sidebar">
+        <!-- AI 评论 -->
+        <div class="sidebar-card">
+            <h3 class="sidebar-title">&#129302; AI 评论</h3>
+            {% if post.ai_comment %}
+            <div class="ai-comment-box" id="aiCommentBox">
+                <p class="ai-comment-text">{{ post.ai_comment }}</p>
+                <div class="ai-comment-meta">
+                    <span>模型: {{ post.model_used or 'unknown' }}</span>
+                    {% if post.analyzed_at %}
+                    <span>时间: {{ post.analyzed_at[:19] }}</span>
+                    {% endif %}
+                </div>
+            </div>
+            {% else %}
+            <div class="ai-comment-empty" id="aiCommentBox">
+                <p class="text-muted">暂无 AI 评论</p>
+            </div>
+            {% endif %}
+            <div class="sidebar-actions">
+                <button class="btn btn-primary btn-sm btn-block" onclick="editComment({{ post.link_id }})">
+                    &#9998; 编辑评论
+                </button>
+                <button class="btn btn-secondary btn-sm btn-block" onclick="analyzePost({{ post.link_id }})">
+                    &#129302; 生成 AI 评论
+                </button>
+                {% if post.ai_comment %}
+                <button class="btn btn-danger btn-sm btn-block" onclick="deleteAnalysis({{ post.link_id }})">
+                    &#128465; 删除评论
+                </button>
+                {% endif %}
+            </div>
+        </div>
+
+        <!-- 调整顺序 -->
+        <div class="sidebar-card">
+            <h3 class="sidebar-title">&#8646; 调整顺序</h3>
+            <p class="sidebar-hint">与同窗口其他帖子交换编号（点击需要交换顺序的帖子即可）</p>
+            {% if same_window_posts %}
+            <div class="swap-list">
+                {% for sp in same_window_posts %}
+                <div class="swap-item" onclick="swapOrder({{ post.link_id }}, {{ sp.link_id }})">
+                    <span class="swap-badge">#{{ sp.daily_no }}</span>
+                    <span class="swap-title">{{ sp.title or '(无标题)' }}</span>
+                    <span class="swap-author">@{{ sp.username or '匿名' }}</span>
+                </div>
+                {% endfor %}
+            </div>
+            {% else %}
+            <p class="text-muted">窗口内没有其他帖子</p>
+            {% endif %}
+        </div>
+
+        <!-- 调整窗口 -->
+        <div class="sidebar-card">
+            <h3 class="sidebar-title">&#128260; 调整窗口</h3>
+            <p class="sidebar-hint">将帖子移动到其他窗口</p>
+            <select class="filter-select" id="targetWindow" style="width: 100%; margin-bottom: 8px;">
+                {% for w in all_windows %}
+                {% if w != post.date_str %}
+                <option value="{{ w }}">{{ w[:4] }}-{{ w[4:6] }}-{{ w[6:] }}</option>
+                {% endif %}
+                {% endfor %}
+            </select>
+            <button class="btn btn-primary btn-sm btn-block" onclick="moveWindow({{ post.link_id }})">
+                确认移动
+            </button>
+        </div>
+    </div>
+</div>
+
+<!-- ========== 图片查看器 DOM ========== -->
+<div id="imageViewer" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.9); z-index:9999; justify-content:center; align-items:center; flex-direction:column;">
+    <button id="viewerClose" style="position:absolute; top:20px; right:30px; background:none; border:none; color:#fff; font-size:36px; cursor:pointer;">&times;</button>
+    <button id="viewerPrev" style="position:absolute; top:50%; left:20px; transform:translateY(-50%); background:none; border:none; color:#fff; font-size:48px; cursor:pointer;">&#10094;</button>
+    <button id="viewerNext" style="position:absolute; top:50%; right:20px; transform:translateY(-50%); background:none; border:none; color:#fff; font-size:48px; cursor:pointer;">&#10095;</button>
+    <img id="viewerImage" style="max-width:90%; max-height:90%; object-fit:contain;" src="" alt="放大图片">
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+// ========== 编辑 AI 评论 ==========
+async function editComment(linkId) {
+    const commentBox = document.getElementById('aiCommentBox');
+    let currentComment = '';
+    if (commentBox) {
+        const textElem = commentBox.querySelector('.ai-comment-text');
+        if (textElem) {
+            currentComment = textElem.textContent.trim();
+        }
+    }
+    const content = `<textarea class="modal-textarea" id="commentInput" rows="6" placeholder="输入 AI 评论内容...">${currentComment}</textarea>`;
+    showModal('编辑 AI 评论', content, async () => {
+        const textarea = document.getElementById('commentInput');
+        if (!textarea) {
+            showToast('输入框未找到', 'error');
+            return false;
+        }
+        const comment = textarea.value.trim();
+        if (!comment) {
+            showToast('评论内容不能为空', 'error');
+            return false;
+        }
+        showLoading('更新中...');
+        try {
+            const res = await fetch(`/yard/admin/api/post/${linkId}/comment`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({comment})
+            });
+            const data = await res.json();
+            if (data.success) {
+                showToast('评论已更新', 'success');
+                setTimeout(() => location.reload(), 600);
+                return true;
+            } else {
+                showToast(data.error || '更新失败', 'error');
+                return false;
+            }
+        } catch (e) {
+            showToast('请求失败: ' + e.message, 'error');
+            return false;
+        } finally {
+            hideLoading();
+        }
+    });
+}
+
+// ========== 其他功能函数 ==========
+async function analyzePost(linkId) {
+    if (!confirm('确定要为此帖子生成 AI 评论吗？\n注意：实际分析需要在 QQ 中执行指令')) return;
+    showLoading();
+    try {
+        const res = await fetch(`/yard/admin/api/post/${linkId}/analyze`, {method: 'POST'});
+        const data = await res.json();
+        showToast(data.message, data.success ? 'info' : 'error');
+    } catch (e) {
+        showToast('请求失败: ' + e.message, 'error');
+    } finally {
+        hideLoading();
+    }
+}
+
+async function deleteAnalysis(linkId) {
+    if (!confirm('确定要删除此帖子的 AI 评论吗？')) return;
+    showLoading();
+    try {
+        const res = await fetch(`/yard/admin/api/post/${linkId}/delete-analysis`, {method: 'POST'});
+        const data = await res.json();
+        if (data.success) {
+            showToast('评论已删除', 'success');
+            setTimeout(() => location.reload(), 600);
+        } else {
+            showToast(data.error || '删除失败', 'error');
+        }
+    } catch (e) {
+        showToast('请求失败: ' + e.message, 'error');
+    } finally {
+        hideLoading();
+    }
+}
+
+async function swapOrder(linkId, targetLinkId) {
+    showLoading();
+    try {
+        const res = await fetch(`/yard/admin/api/post/${linkId}/reorder`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({target_link_id: targetLinkId})
+        });
+        const data = await res.json();
+        if (data.success) {
+            showToast(data.message, 'success');
+            setTimeout(() => location.reload(), 600);
+        } else {
+            showToast(data.error || '交换失败', 'error');
+        }
+    } catch (e) {
+        showToast('请求失败: ' + e.message, 'error');
+    } finally {
+        hideLoading();
+    }
+}
+
+async function moveWindow(linkId) {
+    const targetWindow = document.getElementById('targetWindow').value;
+    if (!targetWindow) {
+        showToast('请选择目标窗口', 'error');
+        return;
+    }
+    if (!confirm(`确定要将帖子移动到窗口 ${targetWindow} 吗？`)) return;
+    showLoading();
+    try {
+        const res = await fetch(`/yard/admin/api/post/${linkId}/move-window`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({target_window_no: targetWindow})
+        });
+        const data = await res.json();
+        if (data.success) {
+            showToast(data.message, 'success');
+            setTimeout(() => location.href = '{{ url_for("yard_admin.posts_list") }}', 800);
+        } else {
+            showToast(data.error || '移动失败', 'error');
+        }
+    } catch (e) {
+        showToast('请求失败: ' + e.message, 'error');
+    } finally {
+        hideLoading();
+    }
+}
+
+// ========== 图片查看器 JavaScript ==========
+document.addEventListener('DOMContentLoaded', function() {
+    // 获取所有图片项（仅限帖子图片，不包括评论图片）
+    const imageItems = document.querySelectorAll('.image-item img');
+    if (imageItems.length === 0) return;
+
+    // 构造图片路径数组（与模板中一致）
+    const imagePaths = [];
+    imageItems.forEach(img => {
+        // 从 src 提取文件名
+        const src = img.getAttribute('src');
+        if (src) imagePaths.push(src);
+    });
+
+    const viewer = document.getElementById('imageViewer');
+    const viewerImg = document.getElementById('viewerImage');
+    const viewerClose = document.getElementById('viewerClose');
+    const viewerPrev = document.getElementById('viewerPrev');
+    const viewerNext = document.getElementById('viewerNext');
+
+    let currentIndex = 0;
+
+    function openViewer(index) {
+        if (index < 0 || index >= imagePaths.length) return;
+        currentIndex = index;
+        viewerImg.src = imagePaths[currentIndex];
+        viewer.style.display = 'flex';
+        document.body.style.overflow = 'hidden';
+    }
+
+    function closeViewer() {
+        viewer.style.display = 'none';
+        document.body.style.overflow = '';
+        viewerImg.src = '';
+    }
+
+    function changeImage(delta) {
+        const newIndex = currentIndex + delta;
+        if (newIndex < 0 || newIndex >= imagePaths.length) return;
+        openViewer(newIndex);
+    }
+
+    // 绑定事件
+    viewerClose.addEventListener('click', closeViewer);
+    viewerPrev.addEventListener('click', () => changeImage(-1));
+    viewerNext.addEventListener('click', () => changeImage(1));
+    viewer.addEventListener('click', (e) => {
+        if (e.target === viewer) closeViewer();
+    });
+    document.addEventListener('keydown', (e) => {
+        if (viewer.style.display !== 'flex') return;
+        if (e.key === 'Escape') closeViewer();
+        if (e.key === 'ArrowLeft') changeImage(-1);
+        if (e.key === 'ArrowRight') changeImage(1);
+    });
+
+    // 为每张图片添加点击事件
+    imageItems.forEach((img, idx) => {
+        img.style.cursor = 'pointer';
+        img.addEventListener('click', () => openViewer(idx));
+    });
+});
+</script>
+{% endblock %}

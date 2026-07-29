@@ -1,0 +1,195 @@
+{% extends "base.html" %}
+
+{% block title %}帖子管理{% endblock %}
+{% block page_title %}帖子管理{% endblock %}
+
+{% block content %}
+<!-- 筛选栏 -->
+<div class="filter-bar">
+    <div class="filter-group">
+        <label>窗口</label>
+        <select class="filter-select" id="windowSelect" onchange="changeWindow(this.value)">
+            {% for w in all_windows %}
+            <option value="{{ w }}" {% if w == window_no %}selected{% endif %}>
+                {{ w[:4] }}-{{ w[4:6] }}-{{ w[6:] }}
+            </option>
+            {% endfor %}
+        </select>
+    </div>
+    <div class="filter-group">
+        <label>来源</label>
+        <select class="filter-select" id="sourceSelect" onchange="applyFilters()">
+            <option value="">全部</option>
+            <option value="feed" {% if source == 'feed' %}selected{% endif %}>推荐流</option>
+            <option value="at" {% if source == 'at' %}selected{% endif %}>@消息</option>
+        </select>
+    </div>
+    <div class="filter-group">
+        <label>分析状态</label>
+        <select class="filter-select" id="analysisSelect" onchange="applyFilters()">
+            <option value="">全部</option>
+            <option value="yes" {% if has_analysis == 'yes' %}selected{% endif %}>已分析</option>
+            <option value="no" {% if has_analysis == 'no' %}selected{% endif %}>未分析</option>
+        </select>
+    </div>
+    <div class="filter-group filter-search">
+        <input type="text" class="filter-input" id="searchInput" placeholder="搜索标题、作者、内容..."
+               value="{{ search }}" onkeydown="if(event.key==='Enter')applyFilters()">
+        <button class="btn btn-primary btn-sm" onclick="applyFilters()">搜索</button>
+    </div>
+</div>
+
+<!-- 批量操作 -->
+<div class="batch-bar">
+    <span class="batch-info">共 {{ total }} 条帖子</span>
+    <div class="batch-actions">
+        <button class="btn btn-secondary btn-sm" onclick="resetOrder('{{ window_no }}')">
+            <span>&#128260;</span> 重置顺序
+        </button>
+        <button class="btn btn-primary btn-sm" onclick="generateReport('{{ window_no }}')">
+            <span>&#128240;</span> 生成晚报
+        </button>
+    </div>
+</div>
+
+<!-- 帖子表格 -->
+{% if posts %}
+<div class="table-wrapper">
+    <table class="data-table">
+        <thead>
+            <tr>
+                <th style="width: 140px;">编号</th>
+                <th>标题</th>
+                <th style="width: 160px;">作者</th>
+                <th style="width: 100px;">图片</th>
+                <th style="width: 100px;">评论</th>
+                <th style="width: 100px;">AI分析</th>
+                <th style="width: 80px;">操作</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for post in posts %}
+            <tr data-link-id="{{ post.link_id }}">
+                <td><span class="table-badge">#{{ post.daily_no }}</span></td>
+                <td>
+                    <div class="table-title">{{ post.title or '(无标题)' }}</div>
+                    <div class="table-meta">
+                        <span class="source-tag source-{{ post.source }}">{{ post.source }}</span>
+                        <span>{{ ts_to_bj_str(post.create_at) }}</span>
+                    </div>
+                </td>
+                <td>@{{ post.username or '匿名' }}</td>
+                <td>
+                    {% if post.image_count > 0 %}
+                    <span class="image-tag">&#128247; {{ post.image_count }}张</span>
+                    {% else %}
+                    <span class="text-muted">无</span>
+                    {% endif %}
+                </td>
+                <td>
+                    {% if post.top_comment_count > 0 %}
+                    <span class="comment-tag">&#128172; {{ post.top_comment_count }}</span>
+                    {% else %}
+                    <span class="text-muted">0</span>
+                    {% endif %}
+                </td>
+                <td>
+                    {% if post.comment %}
+                    <span class="status-badge status-success" title="{{ post.model_used or 'unknown' }}">已分析</span>
+                    {% else %}
+                    <span class="status-badge status-pending">未分析</span>
+                    {% endif %}
+                </td>
+                <td>
+                    <a href="{{ url_for('yard_admin.post_detail', link_id=post.link_id) }}" class="btn btn-ghost btn-xs">详情</a>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<!-- 分页 -->
+{% if total_pages > 1 %}
+<div class="pagination">
+    {% if page > 1 %}
+    <a href="?window={{ window_no }}&page={{ page - 1 }}&search={{ search }}&source={{ source }}&has_analysis={{ has_analysis }}" class="page-btn">&larr;</a>
+    {% endif %}
+    <span class="page-info">{{ page }} / {{ total_pages }}</span>
+    {% if page < total_pages %}
+    <a href="?window={{ window_no }}&page={{ page + 1 }}&search={{ search }}&source={{ source }}&has_analysis={{ has_analysis }}" class="page-btn">&rarr;</a>
+    {% endif %}
+</div>
+{% endif %}
+
+{% else %}
+<div class="empty-state">
+    <div class="empty-icon">&#128269;</div>
+    <p>没有找到匹配的帖子</p>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block extra_js %}
+<script>
+function changeWindow(windowNo) {
+    window.location.href = `?window=${windowNo}`;
+}
+function applyFilters() {
+    const windowNo = document.getElementById('windowSelect').value;
+    const source = document.getElementById('sourceSelect').value;
+    const hasAnalysis = document.getElementById('analysisSelect').value;
+    const search = document.getElementById('searchInput').value;
+    const params = new URLSearchParams();
+    if (windowNo) params.set('window', windowNo);
+    if (source) params.set('source', source);
+    if (hasAnalysis) params.set('has_analysis', hasAnalysis);
+    if (search) params.set('search', search);
+    window.location.href = '?' + params.toString();
+}
+
+async function resetOrder(windowNo) {
+    if (!confirm(`确定要重置窗口 ${windowNo} 的帖子顺序吗？`)) return;
+    showLoading();
+    try {
+        const res = await fetch('/yard/admin/api/reset-order', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({window_no: windowNo})
+        });
+        const data = await res.json();
+        if (data.success) {
+            showToast(data.message, 'success');
+            setTimeout(() => location.reload(), 800);
+        } else {
+            showToast(data.error || '重置失败', 'error');
+        }
+    } catch (e) {
+        showToast('请求失败: ' + e.message, 'error');
+    } finally {
+        hideLoading();
+    }
+}
+
+async function generateReport(windowNo) {
+    showLoading();
+    try {
+        const res = await fetch('/yard/admin/api/generate-report', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({window_no: windowNo})
+        });
+        const data = await res.json();
+        if (data.success) {
+            showToast('晚报生成任务已启动', 'success');
+        } else {
+            showToast(data.error || '生成失败', 'error');
+        }
+    } catch (e) {
+        showToast('请求失败: ' + e.message, 'error');
+    } finally {
+        hideLoading();
+    }
+}
+</script>
+{% endblock %}

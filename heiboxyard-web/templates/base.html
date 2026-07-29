@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>{% block title %}庭院管理端{% endblock %} — heiboxyard</title>
+    <link rel="stylesheet" href="{{ url_for('yard_admin.static', filename='css/style.css') }}">
+    {% block extra_css %}{% endblock %}
+</head>
+<body>
+    <!-- 侧边栏 -->
+    <aside class="sidebar" id="sidebar">
+        <div class="sidebar-header">
+            <div class="logo">
+                <span class="logo-icon">&#127807;</span>
+                <span class="logo-text">庭院管理端</span>
+            </div>
+            <button class="sidebar-toggle" id="sidebarToggle" aria-label="切换菜单">
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+                    <line x1="3" y1="6" x2="21" y2="6"/>
+                    <line x1="3" y1="12" x2="21" y2="12"/>
+                    <line x1="3" y1="18" x2="21" y2="18"/>
+                </svg>
+            </button>
+        </div>
+        <nav class="sidebar-nav">
+            <a href="{{ url_for('yard_admin.dashboard') }}" class="nav-item {% if request.endpoint == 'yard_admin.dashboard' %}active{% endif %}">
+                <span class="nav-icon">&#128202;</span>
+                <span class="nav-text">仪表盘</span>
+            </a>
+            <a href="{{ url_for('yard_admin.posts_list') }}" class="nav-item {% if request.endpoint == 'yard_admin.posts_list' %}active{% endif %}">
+                <span class="nav-icon">&#128221;</span>
+                <span class="nav-text">帖子管理</span>
+            </a>
+            <a href="{{ url_for('yard_admin.reports_list') }}" class="nav-item {% if request.endpoint == 'yard_admin.reports_list' %}active{% endif %}">
+                <span class="nav-icon">&#128240;</span>
+                <span class="nav-text">晚报归档</span>
+            </a>
+        </nav>
+        <div class="sidebar-footer">
+            <div class="window-badge">
+                <span class="window-label">当前窗口</span>
+                <span class="window-value" id="currentWindow">{{ current_window_no|default('—') }}</span>
+            </div>
+        </div>
+    </aside>
+
+    <!-- 遮罩层（移动端） -->
+    <div class="sidebar-overlay" id="sidebarOverlay"></div>
+
+    <!-- 主内容区 -->
+    <main class="main-content">
+        <!-- 顶部栏 -->
+        <header class="top-bar">
+            <button class="mobile-menu-btn" id="mobileMenuBtn" aria-label="打开菜单">
+                <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2">
+                    <line x1="3" y1="6" x2="21" y2="6"/>
+                    <line x1="3" y1="12" x2="21" y2="12"/>
+                    <line x1="3" y1="18" x2="21" y2="18"/>
+                </svg>
+            </button>
+            <h1 class="page-title">{% block page_title %}仪表盘{% endblock %}</h1>
+            <div class="top-actions">
+                <button class="btn btn-ghost btn-sm" id="refreshBtn" title="刷新数据">
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="23 4 23 10 17 10"/>
+                        <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+                    </svg>
+                </button>
+            </div>
+        </header>
+
+        <!-- 消息提示容器 -->
+        <div class="toast-container" id="toastContainer"></div>
+
+        <!-- 页面内容 -->
+        <div class="page-content">
+            {% block content %}{% endblock %}
+        </div>
+    </main>
+
+    <!-- 通用模态框 -->
+    <div class="modal-overlay" id="modalOverlay">
+        <div class="modal">
+            <div class="modal-header">
+                <h3 class="modal-title" id="modalTitle">标题</h3>
+                <button class="modal-close" id="modalClose">&times;</button>
+            </div>
+            <div class="modal-body" id="modalBody">
+                <!-- 动态内容 -->
+            </div>
+            <div class="modal-footer" id="modalFooter">
+                <button class="btn btn-secondary" id="modalCancel">取消</button>
+                <button class="btn btn-primary" id="modalConfirm">确认</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 加载遮罩 -->
+    <div class="loading-overlay" id="loadingOverlay">
+        <div class="loading-spinner"></div>
+        <span class="loading-text">处理中...</span>
+    </div>
+
+    <script src="{{ url_for('yard_admin.static', filename='js/common.js') }}"></script>
+    {% block extra_js %}{% endblock %}
+</body>
+</html>
