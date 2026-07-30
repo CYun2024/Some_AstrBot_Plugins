@@ -15,4 +15,4 @@
 
 7. ImageStatsPlugin ，基于morechatplus数据库的图片/表情包发送数量统计
 
-8. heiboxyard，基于 2646617098/heibox-comment-bot 和 shrimp9527/heyboxbot 项目的小黑盒社区帖子爬取与晚报分析制作
+8. heiboxyard，基于 2646617098/heibox-comment-bot 和 shrimp9527/heyboxbot 项目的小黑盒社区帖子爬取与晚报分析制作，附带一个可视化操作编辑晚报的web端
