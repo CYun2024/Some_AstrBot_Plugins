@@ -609,3 +609,17 @@ def whitelist_block():
     conn.commit()
     conn.close()
     return jsonify({'success': True, 'message': f'IP {ip} 已封禁至 {blocked_until.strftime("%Y-%m-%d %H:%M")}'})
+
+@yard_bp.route('/api/online')
+def api_online():
+    conn = get_db()
+    cur = conn.cursor()
+    # 直接用 SQLite 时间函数，避免格式问题
+    cur.execute('''
+        SELECT COUNT(DISTINCT ip) as online
+        FROM access_whitelist
+        WHERE last_access > datetime('now', '-45 seconds')
+    ''')
+    count = cur.fetchone()[0]
+    conn.close()
+    return jsonify({'online': count})

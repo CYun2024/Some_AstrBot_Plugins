@@ -113,6 +113,28 @@ body {
     font-variant-numeric: tabular-nums;
 }
 
+/* 在线人数 */
+.online-badge {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    color: var(--kimi-color-text-secondary, #666);
+    padding: 6px 12px;
+    margin-bottom: 8px;
+    background: var(--kimi-color-surface-muted, #f0f0f0);
+    border-radius: var(--radius-md);
+    justify-content: center;
+}
+#onlineDot {
+    font-size: 14px;
+    transition: color 0.3s;
+}
+#onlineCount {
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+}
+
 /* ========== Main Content ========== */
 .main-content {
     flex: 1;

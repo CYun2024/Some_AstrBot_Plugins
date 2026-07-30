@@ -49,6 +49,12 @@
             {% endif %}
         </nav>
         <div class="sidebar-footer">
+            <!-- ===== 在线人数（新增） ===== -->
+            <div class="online-badge" id="onlineBadge">
+                <span id="onlineDot" style="color: #22c55e;">●</span>
+                <span id="onlineCount">0</span> 人在线
+            </div>
+            <!-- 原有窗口信息 -->
             <div class="window-badge">
                 <span class="window-label">当前窗口</span>
                 <span class="window-value" id="currentWindow">{{ current_window_no|default('—') }}</span>
@@ -132,6 +138,14 @@
     checkWindowWarning();
     // 每分钟检查一次
     setInterval(checkWindowWarning, 60000);
+
+    // ==================== 在线人数轮询 ====================
+    // 该函数已在 common.js 中定义，这里只做初始化调用（确保 common.js 已加载）
+    // 若 common.js 未包含，可在此补充，但推荐统一放在 common.js 中
+    if (typeof updateOnlineCount === 'function') {
+        updateOnlineCount();
+        setInterval(updateOnlineCount, 10000);
+    }
     </script>
     {% block extra_js %}{% endblock %}
 </body>

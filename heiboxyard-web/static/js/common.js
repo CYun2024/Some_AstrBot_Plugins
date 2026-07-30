@@ -119,3 +119,27 @@ async function updateCurrentWindow() {
     }
 }
 setInterval(updateCurrentWindow, 60000);
+
+// ========== 在线人数更新 ==========
+async function updateOnlineCount() {
+    try {
+        const res = await fetch('/yard/admin/api/online');
+        const data = await res.json();
+        const count = data.online || 0;
+        const countEl = document.getElementById('onlineCount');
+        const dotEl = document.getElementById('onlineDot');
+        if (countEl) countEl.textContent = count;
+        if (dotEl) {
+            // 多人同时在线时显示黄色，否则绿色
+            dotEl.style.color = count > 1 ? '#facc15' : '#22c55e';
+        }
+    } catch (e) {
+        // 静默失败，不影响其他功能
+    }
+}
+
+// 页面加载后首次更新，然后每 10 秒轮询
+document.addEventListener('DOMContentLoaded', function() {
+    updateOnlineCount();
+    setInterval(updateOnlineCount, 10000);
+});

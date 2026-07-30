@@ -137,19 +137,29 @@ def is_ip_authorized(ip):
 
 def authorize_ip(ip, user_agent, path):
     today = datetime.now().strftime('%Y-%m-%d')
+    print(f"[DEBUG] authorize_ip called: ip={ip}, today={today}, path={path}")
     conn = get_db_conn()
     cur = conn.cursor()
-    cur.execute('''
-        UPDATE access_whitelist SET last_access=CURRENT_TIMESTAMP, user_agent=?, path=?
-        WHERE ip=? AND date=? AND authorized=1
-    ''', (user_agent, path, ip, today))
-    if cur.rowcount == 0:
+    # 先检查该IP今天是否有授权记录
+    cur.execute('SELECT id, last_access FROM access_whitelist WHERE ip=? AND date=? AND authorized=1', (ip, today))
+    row = cur.fetchone()
+    if row:
+        # 更新
+        cur.execute('''
+            UPDATE access_whitelist SET last_access=CURRENT_TIMESTAMP, user_agent=?, path=?
+            WHERE ip=? AND date=? AND authorized=1
+        ''', (user_agent, path, ip, today))
+        print(f"[DEBUG] Updated last_access for IP {ip}, old last_access={row[1]}")
+    else:
+        # 插入
         cur.execute('''
             INSERT INTO access_whitelist (ip, date, user_agent, path)
             VALUES (?, ?, ?, ?)
         ''', (ip, today, user_agent, path))
+        print(f"[DEBUG] Inserted new record for IP {ip}")
     conn.commit()
     conn.close()
+    print(f"[DEBUG] authorize_ip completed for IP {ip}")
 
 # ========== 文件大小/时间辅助（原有） ==========
 def get_file_size(path):
@@ -524,28 +534,36 @@ def check_access():
     if request.path == '/auth':
         return
     ip = get_client_ip()
+    print(f"[DEBUG] check_access: path={request.path}, ip={ip}, session.authorized={session.get('authorized')}")
+
     # 检查 IP 是否被封禁
     if is_ip_blocked(ip):
+        print(f"[DEBUG] IP {ip} is blocked")
         if request.path.startswith('/yard/admin/api/'):
             return jsonify({'error': 'IP blocked'}), 403
-        # 如果已登录但 IP 被封禁，强制登出
         if session.get('authorized'):
             session.clear()
             return render_template('login.html', error='您的 IP 已被封禁，请稍后再试', next_url=request.url), 403
         else:
             return render_template('login.html', error='您的 IP 已被封禁，请稍后再试', next_url=request.url), 403
 
-    # 检查是否已授权
+    # 检查是否已授权（session）
     if session.get('authorized'):
+        print(f"[DEBUG] Session authorized, updating last_access for IP {ip}")
+        authorize_ip(ip, request.headers.get('User-Agent', ''), request.path)
         return None
+
     # 检查 IP 是否在白名单中
     if is_ip_authorized(ip):
+        print(f"[DEBUG] IP {ip} is in whitelist, setting session and updating last_access")
         session['authorized'] = True
-        session['role'] = 'user'   # 白名单只能赋予普通用户权限
+        session['role'] = 'user'
+        authorize_ip(ip, request.headers.get('User-Agent', ''), request.path)
         return None
-    # 未授权，跳转登录
-    return render_template('login.html', next_url=request.url), 401
 
+    # 未授权，跳转登录
+    print(f"[DEBUG] Unauthorized, redirect to login")
+    return render_template('login.html', next_url=request.url), 401
 # ========== 原有路由 ==========
 @app.route('/')
 def index():
