@@ -1,14 +1,212 @@
 # -*- coding: utf-8 -*-
-from flask import Flask, send_file, jsonify
+from flask import Flask, send_file, jsonify, request, session, redirect, render_template
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
+import sqlite3
+from werkzeug.middleware.proxy_fix import ProxyFix   # 新增
 
 app = Flask(__name__)
 
+# ========== 配置读取（从环境变量） ==========
+SECRET_KEY = os.environ.get('SECRET_KEY', 'dev-secret-key-change-me')
+ACCESS_PASSWORD = os.environ.get('HEIBOXYARD_ACCESS_PASSWORD', 'default123')
+ADMIN_PASSWORD = os.environ.get('HEIBOXYARD_ADMIN_PASSWORD', 'admin456')
+DB_PATH = "/home/admin/qqbot/astrbot_data/plugin_data/heiboxyard/posts.db"
+
+app.secret_key = SECRET_KEY
+app.config['ACCESS_PASSWORD'] = ACCESS_PASSWORD
+app.config['ADMIN_PASSWORD'] = ADMIN_PASSWORD
+app.config['HEIBOXYARD_DB_PATH'] = DB_PATH
+
+# 应用 ProxyFix 中间件，使 Flask 识别代理转发的 Host/Proto
+# x_for=1, x_proto=1, x_host=1 表示信任 X-Forwarded-For, X-Forwarded-Proto, X-Forwarded-Host
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
+
+# ========== 原有目录配置 ==========
 GROUP_REPORTS_DIR = "/home/admin/qqbot/astrbot_data/plugin_data/astrbot_plugin_qq_group_daily_analysis/self_hosted_html_reports"
 YARD_REPORTS_DIR = "/home/admin/qqbot/astrbot_data/plugin_data/heiboxyard/reports"
 YARD_IMAGES_DIR = "/home/admin/qqbot/astrbot_data/plugin_data/heiboxyard/images"
 
+# ========== 数据库初始化与辅助函数 ==========
+def get_db_conn():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def init_db():
+    conn = get_db_conn()
+    # 白名单表
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS access_whitelist (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ip TEXT NOT NULL,
+            date TEXT NOT NULL,
+            authorized INTEGER DEFAULT 1,
+            first_access TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            last_access TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            user_agent TEXT,
+            path TEXT
+        )
+    ''')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_ip_date ON access_whitelist(ip, date)')
+    
+    # IP 封禁表
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS ip_blocklist (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ip TEXT NOT NULL UNIQUE,
+            failed_attempts INTEGER DEFAULT 0,
+            last_fail_time TIMESTAMP,
+            blocked_until TIMESTAMP,
+            note TEXT
+        )
+    ''')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_blocked_ip ON ip_blocklist(ip)')
+    conn.commit()
+    conn.close()
+
+def get_client_ip():
+    # 优先从 X-Forwarded-For 获取真实 IP（可能有多层代理）
+    forwarded = request.headers.get('X-Forwarded-For')
+    if forwarded:
+        # 取第一个 IP（最原始客户端）
+        ip = forwarded.split(',')[0].strip()
+    else:
+        ip = request.remote_addr
+    # 如果获取到的是内部 IP（127.0.0.1 或 10.0.0.x），但 XFF 可能为空，则尝试从 X-Real-IP 获取
+    if ip in ('127.0.0.1', '::1') or ip.startswith('10.') or ip.startswith('192.168.'):
+        real_ip = request.headers.get('X-Real-IP')
+        if real_ip:
+            ip = real_ip
+    return ip
+
+def is_ip_blocked(ip):
+    conn = get_db_conn()
+    cur = conn.cursor()
+    cur.execute('SELECT blocked_until FROM ip_blocklist WHERE ip=?', (ip,))
+    row = cur.fetchone()
+    conn.close()
+    if row and row[0]:
+        blocked_until = datetime.fromisoformat(row[0].replace(' ', 'T'))
+        if blocked_until > datetime.now():
+            return True
+        else:
+            # 过期则清除记录
+            conn = get_db_conn()
+            conn.execute('DELETE FROM ip_blocklist WHERE ip=?', (ip,))
+            conn.commit()
+            conn.close()
+            return False
+    return False
+
+def record_failed_attempt(ip):
+    conn = get_db_conn()
+    cur = conn.cursor()
+    cur.execute('SELECT id, failed_attempts, blocked_until FROM ip_blocklist WHERE ip=?', (ip,))
+    row = cur.fetchone()
+    now = datetime.now()
+    if row:
+        attempts = row[1] + 1
+        if attempts >= 5:
+            blocked_until = now + timedelta(hours=1)
+            conn.execute('''
+                UPDATE ip_blocklist SET failed_attempts=?, last_fail_time=?, blocked_until=?
+                WHERE ip=?
+            ''', (attempts, now.isoformat(), blocked_until.isoformat(), ip))
+        else:
+            conn.execute('''
+                UPDATE ip_blocklist SET failed_attempts=?, last_fail_time=?
+                WHERE ip=?
+            ''', (attempts, now.isoformat(), ip))
+    else:
+        conn.execute('''
+            INSERT INTO ip_blocklist (ip, failed_attempts, last_fail_time)
+            VALUES (?, 1, ?)
+        ''', (ip, now.isoformat()))
+    conn.commit()
+    conn.close()
+
+def is_ip_authorized(ip):
+    today = datetime.now().strftime('%Y-%m-%d')
+    conn = get_db_conn()
+    cur = conn.cursor()
+    cur.execute('SELECT 1 FROM access_whitelist WHERE ip=? AND date=? AND authorized=1', (ip, today))
+    row = cur.fetchone()
+    conn.close()
+    return row is not None
+
+def authorize_ip(ip, user_agent, path):
+    today = datetime.now().strftime('%Y-%m-%d')
+    conn = get_db_conn()
+    cur = conn.cursor()
+    cur.execute('''
+        UPDATE access_whitelist SET last_access=CURRENT_TIMESTAMP, user_agent=?, path=?
+        WHERE ip=? AND date=? AND authorized=1
+    ''', (user_agent, path, ip, today))
+    if cur.rowcount == 0:
+        cur.execute('''
+            INSERT INTO access_whitelist (ip, date, user_agent, path)
+            VALUES (?, ?, ?, ?)
+        ''', (ip, today, user_agent, path))
+    conn.commit()
+    conn.close()
+
+# ========== 文件大小/时间辅助（原有） ==========
+def get_file_size(path):
+    size = os.path.getsize(path)
+    for unit in ['B', 'KB', 'MB', 'GB']:
+        if size < 1024.0:
+            return f"{size:.1f} {unit}"
+        size /= 1024.0
+    return f"{size:.1f} TB"
+
+def get_file_time(path):
+    mtime = os.path.getmtime(path)
+    return datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+
+def scan_reports(report_dir, route_prefix):
+    if not os.path.exists(report_dir):
+        return [], 0, "0 B"
+    report_files = [f for f in os.listdir(report_dir)
+                    if f.lower().endswith(('.html', '.jpg', '.jpeg', '.png')) and f != 'index.html']
+    report_files.sort(key=lambda x: os.path.getmtime(os.path.join(report_dir, x)), reverse=True)
+    items = []
+    total_size = 0
+    for f in report_files:
+        file_path = os.path.join(report_dir, f)
+        size = get_file_size(file_path)
+        mtime = get_file_time(file_path)
+        total_size += os.path.getsize(file_path)
+        ext = os.path.splitext(f)[1].lower()
+        if ext in ('.jpg', '.jpeg', '.png'):
+            icon = '&#127748;'
+            route = route_prefix + '/image/' + f
+            ftype = '图片报告'
+        else:
+            icon = '&#128202;'
+            route = route_prefix + '/view/' + f
+            ftype = 'HTML报告'
+        items.append('<li class="report-item"><a href="' + route + '" class="report-link"><span class="file-icon">' + icon + '</span><div class="file-info"><div class="file-name">' + f + '</div><div class="file-meta"><span>&#128336; ' + mtime + '</span><span class="file-size">&#128230; ' + size + '</span><span class="file-size">' + ftype + '</span></div></div><span class="arrow">&#10142;</span></a></li>')
+    size_tmp = total_size
+    total_size_str = "0 B"
+    for unit in ['B', 'KB', 'MB', 'GB']:
+        if size_tmp < 1024.0:
+            total_size_str = f"{size_tmp:.1f} {unit}"
+            break
+        size_tmp /= 1024.0
+    else:
+        total_size_str = f"{size_tmp:.1f} TB"
+    return items, len(report_files), total_size_str
+
+def build_index_page(title, subtitle, icon, css, items, total_count, total_size,
+                     other_title=None, other_link=None, other_desc=None):
+    items_html = ''.join(items) if items else '<div class="empty-state"><div class="empty-icon">&#128235;</div><p>还没有报告文件哦 ~</p><p style="margin-top: 10px; font-size: 0.9em;">等待数据生成中...</p></div>'
+    nav_html = ''
+    if other_link and other_title:
+        nav_html = '<div style="text-align: center; margin-bottom: 30px;"><a href="' + other_link + '" style="display: inline-block; padding: 12px 24px; background: linear-gradient(135deg, var(--primary), var(--secondary)); color: white; text-decoration: none; border-radius: 25px; font-size: 1em; transition: all 0.3s ease; box-shadow: 0 4px 15px var(--shadow);" onmouseover="this.style.transform=\'scale(1.05)\'" onmouseout="this.style.transform=\'scale(1)\'">' + other_desc + ' &rarr;</a></div>'
+    return '<!DOCTYPE html>\n<html lang="zh-CN">\n<head>\n    <meta charset="UTF-8">\n    <meta name="viewport" content="width=device-width, initial-scale=1.0">\n    <title>' + icon + ' ' + title + ' ' + icon + '</title>\n    <style>' + css + '</style>\n</head>\n<body>\n    <div class="container">\n        <div class="header">\n            <h1>' + icon + ' ' + title + ' ' + icon + '</h1>\n            <p class="subtitle">' + subtitle + '</p>\n        </div>\n        ' + nav_html + '\n        <div class="stats">\n            <div class="stat-item">\n                <div class="stat-number">' + str(total_count) + '</div>\n                <div class="stat-label">&#128209; 报告总数</div>\n            </div>\n            <div class="stat-item">\n                <div class="stat-number">' + total_size + '</div>\n                <div class="stat-label">&#128190; 占用空间</div>\n            </div>\n            <div class="stat-item">\n                <div class="stat-number">' + datetime.now().strftime("%m-%d") + '</div>\n                <div class="stat-label">&#128197; 今日日期</div>\n            </div>\n        </div>\n        <ul class="report-list">\n            ' + items_html + '\n        </ul>\n        <div class="footer">\n            <p>Made with <span class="heart">&#9829;</span> for QQ Group Analysis</p>\n            <p style="margin-top: 5px; font-size: 0.8em;">AstrBot Plugin | 二次元风格主题</p>\n        </div>\n    </div>\n</body>\n</html>'
+
+# ========== CSS（原有） ==========
 ANIME_CSS = """
 :root {
     --primary: #ff6b9d;
@@ -275,66 +473,80 @@ MOBILE_FIX_CSS = '''<style id="mobile-auto-fix">''' + '''
 }
 </style>'''
 
-def get_file_size(path):
-    size = os.path.getsize(path)
-    for unit in ['B', 'KB', 'MB', 'GB']:
-        if size < 1024.0:
-            return f"{size:.1f} {unit}"
-        size /= 1024.0
-    return f"{size:.1f} TB"
+# ========== 认证路由（统一登录） ==========
+@app.route('/auth', methods=['POST'])
+def auth():
+    password = request.form.get('password', '').strip()
+    next_url = request.form.get('next', '/')
+    ip = get_client_ip()
 
-def get_file_time(path):
-    mtime = os.path.getmtime(path)
-    return datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+    # 检查 IP 是否已被封禁
+    if is_ip_blocked(ip):
+        return render_template('login.html', error='您的 IP 已被临时封禁，请稍后再试', next_url=next_url), 403
 
-def scan_reports(report_dir, route_prefix):
-    if not os.path.exists(report_dir):
-        return [], 0, "0 B"
-
-    report_files = [f for f in os.listdir(report_dir)
-                    if f.lower().endswith(('.html', '.jpg', '.jpeg', '.png')) and f != 'index.html']
-    report_files.sort(key=lambda x: os.path.getmtime(os.path.join(report_dir, x)), reverse=True)
-
-    items = []
-    total_size = 0
-    for f in report_files:
-        file_path = os.path.join(report_dir, f)
-        size = get_file_size(file_path)
-        mtime = get_file_time(file_path)
-        total_size += os.path.getsize(file_path)
-        ext = os.path.splitext(f)[1].lower()
-        if ext in ('.jpg', '.jpeg', '.png'):
-            icon = '&#127748;'
-            route = route_prefix + '/image/' + f
-            ftype = '图片报告'
-        else:
-            icon = '&#128202;'
-            route = route_prefix + '/view/' + f
-            ftype = 'HTML报告'
-        items.append('<li class="report-item"><a href="' + route + '" class="report-link"><span class="file-icon">' + icon + '</span><div class="file-info"><div class="file-name">' + f + '</div><div class="file-meta"><span>&#128336; ' + mtime + '</span><span class="file-size">&#128230; ' + size + '</span><span class="file-size">' + ftype + '</span></div></div><span class="arrow">&#10142;</span></a></li>')
-
-    size_tmp = total_size
-    total_size_str = "0 B"
-    for unit in ['B', 'KB', 'MB', 'GB']:
-        if size_tmp < 1024.0:
-            total_size_str = f"{size_tmp:.1f} {unit}"
-            break
-        size_tmp /= 1024.0
+    if password == app.config['ACCESS_PASSWORD']:
+        # 普通用户
+        authorize_ip(ip, request.headers.get('User-Agent', ''), request.referrer or '/')
+        session['authorized'] = True
+        session['role'] = 'user'
+        # 清除该 IP 的失败记录
+        conn = get_db_conn()
+        conn.execute('DELETE FROM ip_blocklist WHERE ip=?', (ip,))
+        conn.commit()
+        conn.close()
+        return redirect(next_url)
+    elif password == app.config['ADMIN_PASSWORD']:
+        # 管理员
+        authorize_ip(ip, request.headers.get('User-Agent', ''), request.referrer or '/')
+        session['authorized'] = True
+        session['role'] = 'admin'
+        conn = get_db_conn()
+        conn.execute('DELETE FROM ip_blocklist WHERE ip=?', (ip,))
+        conn.commit()
+        conn.close()
+        return redirect(next_url)
     else:
-        total_size_str = f"{size_tmp:.1f} TB"
+        # 密码错误
+        record_failed_attempt(ip)
+        if is_ip_blocked(ip):
+            error = '密码错误次数过多，IP 已被封禁 1 小时'
+        else:
+            error = '密码错误，请重试'
+        return render_template('login.html', error=error, next_url=next_url)
 
-    return items, len(report_files), total_size_str
+# ========== 全局请求拦截（认证检查 + 封禁检查） ==========
+@app.before_request
+def check_access():
+    # 放行静态资源
+    if request.path.startswith('/static/') or request.path == '/favicon.ico':
+        return
+    # 放行认证路由
+    if request.path == '/auth':
+        return
+    ip = get_client_ip()
+    # 检查 IP 是否被封禁
+    if is_ip_blocked(ip):
+        if request.path.startswith('/yard/admin/api/'):
+            return jsonify({'error': 'IP blocked'}), 403
+        # 如果已登录但 IP 被封禁，强制登出
+        if session.get('authorized'):
+            session.clear()
+            return render_template('login.html', error='您的 IP 已被封禁，请稍后再试', next_url=request.url), 403
+        else:
+            return render_template('login.html', error='您的 IP 已被封禁，请稍后再试', next_url=request.url), 403
 
-def build_index_page(title, subtitle, icon, css, items, total_count, total_size,
-                     other_title=None, other_link=None, other_desc=None):
-    items_html = ''.join(items) if items else '<div class="empty-state"><div class="empty-icon">&#128235;</div><p>还没有报告文件哦 ~</p><p style="margin-top: 10px; font-size: 0.9em;">等待数据生成中...</p></div>'
+    # 检查是否已授权
+    if session.get('authorized'):
+        return None
+    # 检查 IP 是否在白名单中
+    if is_ip_authorized(ip):
+        session['authorized'] = True
+        session['role'] = 'user'   # 白名单只能赋予普通用户权限
+        return None
+    # 未授权，跳转登录
+    return render_template('login.html', next_url=request.url), 401
 
-    nav_html = ''
-    if other_link and other_title:
-        nav_html = '<div style="text-align: center; margin-bottom: 30px;"><a href="' + other_link + '" style="display: inline-block; padding: 12px 24px; background: linear-gradient(135deg, var(--primary), var(--secondary)); color: white; text-decoration: none; border-radius: 25px; font-size: 1em; transition: all 0.3s ease; box-shadow: 0 4px 15px var(--shadow);" onmouseover="this.style.transform=\'scale(1.05)\'" onmouseout="this.style.transform=\'scale(1)\'">' + other_desc + ' &rarr;</a></div>'
-
-    return '<!DOCTYPE html>\n<html lang="zh-CN">\n<head>\n    <meta charset="UTF-8">\n    <meta name="viewport" content="width=device-width, initial-scale=1.0">\n    <title>' + icon + ' ' + title + ' ' + icon + '</title>\n    <style>' + css + '</style>\n</head>\n<body>\n    <div class="container">\n        <div class="header">\n            <h1>' + icon + ' ' + title + ' ' + icon + '</h1>\n            <p class="subtitle">' + subtitle + '</p>\n        </div>\n        ' + nav_html + '\n        <div class="stats">\n            <div class="stat-item">\n                <div class="stat-number">' + str(total_count) + '</div>\n                <div class="stat-label">&#128209; 报告总数</div>\n            </div>\n            <div class="stat-item">\n                <div class="stat-number">' + total_size + '</div>\n                <div class="stat-label">&#128190; 占用空间</div>\n            </div>\n            <div class="stat-item">\n                <div class="stat-number">' + datetime.now().strftime("%m-%d") + '</div>\n                <div class="stat-label">&#128197; 今日日期</div>\n            </div>\n        </div>\n        <ul class="report-list">\n            ' + items_html + '\n        </ul>\n        <div class="footer">\n            <p>Made with <span class="heart">&#9829;</span> for QQ Group Analysis</p>\n            <p style="margin-top: 5px; font-size: 0.8em;">AstrBot Plugin | 二次元风格主题</p>\n        </div>\n    </div>\n</body>\n</html>'
-
+# ========== 原有路由 ==========
 @app.route('/')
 def index():
     return '''<!DOCTYPE html>
@@ -487,17 +699,14 @@ def yard_view(filename):
 
 @app.route('/yard/image/<filename>')
 def yard_image(filename):
-    # 先尝试从报告目录查找
     safe_path = os.path.normpath(os.path.join(YARD_REPORTS_DIR, filename))
     if safe_path.startswith(os.path.normpath(YARD_REPORTS_DIR)) and os.path.exists(safe_path):
         return send_file(safe_path)
-    # 否则从图片目录查找
     safe_img = os.path.normpath(os.path.join(YARD_IMAGES_DIR, filename))
     if safe_img.startswith(os.path.normpath(YARD_IMAGES_DIR)) and os.path.exists(safe_img):
         return send_file(safe_img)
     return "File not found", 404
 
-# 专门用于帖子图片的路由
 @app.route('/yard/images/<filename>')
 def yard_images(filename):
     safe_path = os.path.normpath(os.path.join(YARD_IMAGES_DIR, filename))
@@ -525,6 +734,9 @@ try:
     print("✅ heiboxyard Web 管理端已挂载到 /yard/admin")
 except ImportError as e:
     print(f"⚠️ heiboxyard Web 管理端挂载失败: {e}")
+
+# ========== 初始化数据库 ==========
+init_db()
 
 if __name__ == '__main__':
     app.run(host='127.0.0.1', port=5000)

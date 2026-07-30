@@ -13,7 +13,7 @@ from pathlib import Path
 
 from flask import (
     Blueprint, render_template, request, jsonify,
-    current_app, abort, flash, redirect, url_for
+    current_app, abort, flash, redirect, url_for, session
 )
 
 # 导入 requests 用于代理 API
@@ -85,6 +85,31 @@ def parse_daily_no(daily_no_str):
 def format_daily_no(window_no, seq_no):
     return f"{window_no}-{seq_no:02d}"
 
+# ========== 代理请求统一函数 ==========
+
+def proxy_request(method, endpoint, data=None, timeout=30):
+    """统一的代理请求函数"""
+    if requests is None:
+        return jsonify({'success': False, 'error': 'requests 库未安装'}), 500
+    url = f"{PLUGIN_API_BASE}{endpoint}"
+    try:
+        if method == 'GET':
+            resp = requests.get(url, timeout=timeout)
+        elif method == 'POST':
+            if data is None:
+                data = {}
+            resp = requests.post(url, json=data, timeout=timeout)
+        else:
+            return jsonify({'success': False, 'error': '不支持的请求方法'}), 400
+        try:
+            return jsonify(resp.json()), resp.status_code
+        except:
+            return jsonify({'success': False, 'error': f'插件 API 返回了非 JSON 响应: {resp.text[:200]}'}), 500
+    except requests.exceptions.ConnectionError:
+        return jsonify({'success': False, 'error': '无法连接到插件 API，请确保插件已启动'}), 500
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
 # ========== 页面路由 ==========
 
 @yard_bp.route('/')
@@ -135,7 +160,6 @@ def posts_list():
 
     cur.execute("SELECT DISTINCT date_str FROM posts ORDER BY date_str DESC")
     all_windows = [row[0] for row in cur.fetchall()]
-    # 确保当前查询的窗口在列表中（即使没有帖子）
     if window_no not in all_windows:
         all_windows.append(window_no)
         all_windows.sort(reverse=True)
@@ -348,32 +372,6 @@ def summary_manage():
 # ========== API 代理路由 ==========
 # 注意：所有 /api/* 路由都代理到插件 HTTP API
 
-def proxy_request(method, endpoint, data=None, timeout=30):
-    """统一的代理请求函数"""
-    if requests is None:
-        return jsonify({'success': False, 'error': 'requests 库未安装'}), 500
-    url = f"{PLUGIN_API_BASE}{endpoint}"
-    try:
-        if method == 'GET':
-            resp = requests.get(url, timeout=timeout)
-        elif method == 'POST':
-            # 确保 data 至少是空字典
-            if data is None:
-                data = {}
-            resp = requests.post(url, json=data, timeout=timeout)
-        else:
-            return jsonify({'success': False, 'error': '不支持的请求方法'}), 400
-        # 如果插件 API 返回非 JSON，尝试解析
-        try:
-            return jsonify(resp.json()), resp.status_code
-        except:
-            # 如果响应不是 JSON，返回错误
-            return jsonify({'success': False, 'error': f'插件 API 返回了非 JSON 响应: {resp.text[:200]}'}), 500
-    except requests.exceptions.ConnectionError:
-        return jsonify({'success': False, 'error': '无法连接到插件 API，请确保插件已启动'}), 500
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
-
 @yard_bp.route('/api/stats')
 def api_stats():
     return proxy_request('GET', '/api/stats')
@@ -432,7 +430,6 @@ def api_analyze_window():
 # ========== 总评相关 API ==========
 @yard_bp.route('/api/summary', methods=['GET'])
 def api_get_summary():
-    """获取指定窗口的总评"""
     window_no = request.args.get('window_no') or get_current_window_no()
     window_start, _ = get_window_by_no(window_no)
     conn = get_db()
@@ -455,7 +452,6 @@ def api_get_summary():
 
 @yard_bp.route('/api/summary/update', methods=['POST'])
 def api_update_summary():
-    """更新或插入总评"""
     data = request.get_json() or {}
     window_no = data.get('window_no') or get_current_window_no()
     comment = data.get('comment', '').strip()
@@ -480,6 +476,136 @@ def api_update_summary():
 
 @yard_bp.route('/api/summary/generate', methods=['POST'])
 def api_generate_summary():
-    """触发插件重新生成总评（异步）"""
     data = request.get_json() or {}
     return proxy_request('POST', '/api/summary/generate', data)
+
+# ========== 新增：任务状态查询代理 ==========
+@yard_bp.route('/api/task/<task_id>', methods=['GET'])
+def api_task_status(task_id):
+    return proxy_request('GET', f'/api/task/{task_id}')
+
+# ================================================================
+# ========== 以下为新增：白名单与封禁管理（仅管理员） ==========
+# ================================================================
+
+def parse_duration(duration_str):
+    """将 '1h', '24h', '30m' 等转为 timedelta，默认 1 小时"""
+    duration_str = duration_str.lower().strip()
+    if duration_str.endswith('h'):
+        try:
+            hours = int(duration_str[:-1])
+            return timedelta(hours=hours)
+        except:
+            pass
+    elif duration_str.endswith('m'):
+        try:
+            minutes = int(duration_str[:-1])
+            return timedelta(minutes=minutes)
+        except:
+            pass
+    # 默认 1 小时
+    return timedelta(hours=1)
+
+@yard_bp.route('/whitelist')
+def whitelist():
+    """白名单管理页面，仅管理员可访问"""
+    if not session.get('authorized') or session.get('role') != 'admin':
+        abort(403)  # 返回 403 Forbidden
+
+    today = datetime.now().strftime('%Y-%m-%d')
+    conn = get_db()
+    cur = conn.cursor()
+
+    # 在线人数：最近5分钟活跃
+    five_min_ago = (datetime.now() - timedelta(minutes=5)).strftime('%Y-%m-%d %H:%M:%S')
+    cur.execute('''
+        SELECT COUNT(DISTINCT ip) as online
+        FROM access_whitelist
+        WHERE date = ? AND last_access > ?
+    ''', (today, five_min_ago))
+    online_count = cur.fetchone()[0]
+
+    # 今日白名单
+    cur.execute('''
+        SELECT id, ip, first_access, last_access, user_agent, path
+        FROM access_whitelist
+        WHERE date = ? AND authorized = 1
+        ORDER BY first_access DESC
+    ''', (today,))
+    whitelist_entries = [dict(row) for row in cur.fetchall()]
+
+    # 当前封禁列表（blocked_until > now）
+    now = datetime.now().isoformat()
+    cur.execute('''
+        SELECT id, ip, failed_attempts, last_fail_time, blocked_until, note
+        FROM ip_blocklist
+        WHERE blocked_until > ?
+        ORDER BY blocked_until DESC
+    ''', (now,))
+    blocked_entries = [dict(row) for row in cur.fetchall()]
+
+    conn.close()
+    return render_template('whitelist.html',
+        today=today,
+        whitelist=whitelist_entries,
+        blocked=blocked_entries,
+        online=online_count,
+        now=datetime.now()
+    )
+
+@yard_bp.route('/whitelist/delete/<int:id>', methods=['POST'])
+def whitelist_delete(id):
+    """解封指定封禁记录（仅管理员）"""
+    if not session.get('authorized') or session.get('role') != 'admin':
+        return jsonify({'error': 'Unauthorized'}), 403
+
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute('DELETE FROM ip_blocklist WHERE id = ?', (id,))
+    conn.commit()
+    affected = cur.rowcount
+    conn.close()
+    if affected:
+        return jsonify({'success': True, 'message': '已解封'})
+    else:
+        return jsonify({'success': False, 'error': '记录不存在'}), 404
+
+@yard_bp.route('/whitelist/block', methods=['POST'])
+def whitelist_block():
+    """手动封禁 IP（仅管理员）"""
+    if not session.get('authorized') or session.get('role') != 'admin':
+        return jsonify({'error': 'Unauthorized'}), 403
+
+    data = request.get_json() or {}
+    ip = data.get('ip', '').strip()
+    duration_str = data.get('duration', '1h').strip()
+    if not ip:
+        return jsonify({'success': False, 'error': 'IP 不能为空'}), 400
+
+    # 验证 IP 格式（简单）
+    import re
+    if not re.match(r'^(\d{1,3}\.){3}\d{1,3}$', ip):
+        return jsonify({'success': False, 'error': '无效的 IP 格式'}), 400
+
+    delta = parse_duration(duration_str)
+    blocked_until = datetime.now() + delta
+
+    conn = get_db()
+    cur = conn.cursor()
+    # 如果该 IP 已存在，则更新封禁时间，否则插入
+    cur.execute('SELECT id FROM ip_blocklist WHERE ip = ?', (ip,))
+    row = cur.fetchone()
+    if row:
+        cur.execute('''
+            UPDATE ip_blocklist
+            SET blocked_until = ?, failed_attempts = 0, last_fail_time = NULL, note = '手动封禁'
+            WHERE ip = ?
+        ''', (blocked_until.isoformat(), ip))
+    else:
+        cur.execute('''
+            INSERT INTO ip_blocklist (ip, failed_attempts, last_fail_time, blocked_until, note)
+            VALUES (?, 0, NULL, ?, '手动封禁')
+        ''', (ip, blocked_until.isoformat()))
+    conn.commit()
+    conn.close()
+    return jsonify({'success': True, 'message': f'IP {ip} 已封禁至 {blocked_until.strftime("%Y-%m-%d %H:%M")}'})

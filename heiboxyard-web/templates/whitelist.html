@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>白名单管理</title>
+    <style>
+        * { margin:0; padding:0; box-sizing:border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif;
+            background: #f5f7fa;
+            padding: 24px;
+            color: #1a1a1a;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: #fff;
+            border-radius: 16px;
+            padding: 30px 32px;
+            box-shadow: 0 2px 12px rgba(0,0,0,0.05);
+        }
+        .header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            margin-bottom: 12px;
+        }
+        h1 { font-size: 24px; font-weight: 600; }
+        .sub { color: #6b7280; font-size: 14px; margin-bottom: 20px; }
+        .stats {
+            display: flex;
+            gap: 24px;
+            margin: 16px 0 24px;
+            flex-wrap: wrap;
+        }
+        .stat-item {
+            background: #f8f9fa;
+            padding: 10px 18px;
+            border-radius: 10px;
+        }
+        .stat-item .num {
+            font-size: 28px;
+            font-weight: 600;
+            color: #22c55e;
+        }
+        .stat-item .num.online { color: #3b82f6; }
+        .stat-item .num.blocked { color: #ef4444; }
+        .stat-item .label {
+            font-size: 13px;
+            color: #6b7280;
+            margin-left: 6px;
+        }
+        .section-title {
+            font-size: 18px;
+            font-weight: 500;
+            margin: 28px 0 14px;
+            border-bottom: 1px solid #e5e7eb;
+            padding-bottom: 8px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 14px;
+        }
+        th {
+            text-align: left;
+            padding: 12px 8px;
+            border-bottom: 2px solid #e5e7eb;
+            font-weight: 500;
+            color: #6b7280;
+            font-size: 12px;
+            text-transform: uppercase;
+        }
+        td {
+            padding: 12px 8px;
+            border-bottom: 1px solid #f0f0f0;
+            vertical-align: middle;
+        }
+        tr:hover td { background: #f9fafb; }
+        .ip { font-weight: 500; font-family: monospace; }
+        .ua {
+            max-width: 180px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            color: #6b7280;
+            font-size: 13px;
+        }
+        .time { font-size: 13px; color: #6b7280; }
+        .btn {
+            background: none;
+            border: 1px solid #d1d5db;
+            padding: 4px 14px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 13px;
+            transition: 0.15s;
+        }
+        .btn-danger {
+            color: #dc2626;
+            border-color: #dc2626;
+        }
+        .btn-danger:hover { background: #fee2e2; }
+        .btn-primary {
+            color: #2563eb;
+            border-color: #2563eb;
+        }
+        .btn-primary:hover { background: #dbeafe; }
+        .btn-sm { padding: 2px 12px; font-size: 12px; }
+        .empty { text-align: center; color: #9ca3af; padding: 30px 0; }
+        .block-form {
+            background: #f8f9fa;
+            border-radius: 10px;
+            padding: 20px 24px;
+            margin-top: 16px;
+            display: flex;
+            flex-wrap: wrap;
+            align-items: flex-end;
+            gap: 16px;
+        }
+        .block-form .field {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+        .block-form .field label {
+            font-size: 13px;
+            color: #4b5563;
+            font-weight: 500;
+        }
+        .block-form .field input {
+            padding: 8px 12px;
+            border: 1px solid #d1d5db;
+            border-radius: 8px;
+            font-size: 14px;
+            background: #fff;
+            min-width: 160px;
+        }
+        .block-form .field input:focus { outline: none; border-color: #2563eb; }
+        .block-form .actions {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+        .back-link {
+            display: inline-block;
+            margin-top: 24px;
+            color: #6b7280;
+            text-decoration: none;
+            font-size: 14px;
+        }
+        .back-link:hover { text-decoration: underline; }
+        @media (max-width: 640px) {
+            .container { padding: 20px 16px; }
+            .stats { gap: 12px; }
+            .block-form { flex-direction: column; align-items: stretch; }
+            .block-form .field input { min-width: auto; }
+            table { font-size: 12px; }
+            th, td { padding: 8px 4px; }
+            .ua { max-width: 100px; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📋 白名单管理</h1>
+            <span style="font-size:14px; color:#6b7280;">{{ today }}</span>
+        </div>
+        <div class="sub">今日已授权的 IP 列表 · 仅显示当天数据</div>
+
+        <div class="stats">
+            <div class="stat-item">
+                <span class="num">{{ whitelist|length }}</span><span class="label">授权 IP</span>
+            </div>
+            <div class="stat-item">
+                <span class="num online">{{ online }}</span><span class="label">当前在线（5分钟内活跃）</span>
+            </div>
+            <div class="stat-item">
+                <span class="num blocked">{{ blocked|length }}</span><span class="label">封禁中</span>
+            </div>
+        </div>
+
+        <!-- 白名单表格 -->
+        <div class="section-title">✅ 今日授权 IP</div>
+        {% if whitelist %}
+        <table>
+            <thead>
+                <tr>
+                    <th>IP</th>
+                    <th>首次访问</th>
+                    <th>最后活跃</th>
+                    <th>User‑Agent</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for entry in whitelist %}
+                <tr>
+                    <td class="ip">{{ entry.ip }}</td>
+                    <td class="time">{{ entry.first_access }}</td>
+                    <td class="time">{{ entry.last_access }}</td>
+                    <td class="ua" title="{{ entry.user_agent or '' }}">{{ entry.user_agent or '-' }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <div class="empty">今日暂无授权记录</div>
+        {% endif %}
+
+        <!-- 封禁列表 -->
+        <div class="section-title">🚫 当前封禁 IP</div>
+        {% if blocked %}
+        <table>
+            <thead>
+                <tr>
+                    <th>IP</th>
+                    <th>失败次数</th>
+                    <th>封禁到期</th>
+                    <th>备注</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for b in blocked %}
+                <tr>
+                    <td class="ip">{{ b.ip }}</td>
+                    <td>{{ b.failed_attempts }}</td>
+                    <td class="time">{{ b.blocked_until }}</td>
+                    <td>{{ b.note or '-' }}</td>
+                    <td>
+                        <button class="btn btn-danger btn-sm" onclick="unblock({{ b.id }})">解封</button>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <div class="empty">暂无被封禁的 IP</div>
+        {% endif %}
+
+        <!-- 手动封禁表单 -->
+        <div class="section-title" style="margin-top:32px;">➕ 手动封禁 IP</div>
+        <div class="block-form">
+            <div class="field">
+                <label for="blockIp">IP 地址</label>
+                <input type="text" id="blockIp" placeholder="例如 192.168.1.100">
+            </div>
+            <div class="field">
+                <label for="blockDuration">封禁时长</label>
+                <input type="text" id="blockDuration" placeholder="例如 1h, 24h, 30m" value="1h">
+            </div>
+            <div class="actions">
+                <button class="btn btn-primary" onclick="manualBlock()">封禁</button>
+            </div>
+        </div>
+
+        <!-- 返回仪表盘：使用 url_for 生成正确链接 -->
+        <a href="{{ url_for('yard_admin.dashboard') }}" class="back-link">← 返回仪表盘</a>
+    </div>
+
+    <script>
+        async function unblock(id) {
+            if (!confirm('确定解封该 IP 吗？')) return;
+            try {
+                const res = await fetch('/yard/admin/whitelist/delete/' + id, { method: 'POST' });
+                const data = await res.json();
+                if (data.success) {
+                    location.reload();
+                } else {
+                    alert('解封失败：' + (data.error || '未知错误'));
+                }
+            } catch (e) {
+                alert('请求出错：' + e.message);
+            }
+        }
+
+        async function manualBlock() {
+            const ip = document.getElementById('blockIp').value.trim();
+            const duration = document.getElementById('blockDuration').value.trim() || '1h';
+            if (!ip) {
+                alert('请输入 IP 地址');
+                return;
+            }
+            const ipRegex = /^(\d{1,3}\.){3}\d{1,3}$/;
+            if (!ipRegex.test(ip)) {
+                alert('IP 格式无效，请使用类似 192.168.1.100 的格式');
+                return;
+            }
+            if (!confirm(`确定要封禁 IP ${ip} 时长 ${duration} 吗？`)) return;
+            try {
+                const res = await fetch('/yard/admin/whitelist/block', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ ip: ip, duration: duration })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    alert(data.message);
+                    location.reload();
+                } else {
+                    alert('封禁失败：' + (data.error || '未知错误'));
+                }
+            } catch (e) {
+                alert('请求出错：' + e.message);
+            }
+        }
+
+        // 自动刷新（每30秒）
+        setInterval(() => { location.reload(); }, 30000);
+    </script>
+</body>
+</html>
