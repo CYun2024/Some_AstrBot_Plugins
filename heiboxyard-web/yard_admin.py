@@ -9,6 +9,7 @@ import json
 import sqlite3
 import os
 import secrets
+import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -85,6 +86,102 @@ def parse_daily_no(daily_no_str):
 
 def format_daily_no(window_no, seq_no):
     return f"{window_no}-{seq_no:02d}"
+
+# ========== 操作日志相关 ==========
+_log_table_initialized = False
+
+def init_log_table():
+    """创建操作日志表（如果不存在）"""
+    conn = get_db()
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS operation_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_nickname TEXT,
+            user_ip TEXT,
+            device_id TEXT,
+            operation_type TEXT,
+            detail TEXT,
+            timestamp INTEGER
+        )
+    ''')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_op_timestamp ON operation_log(timestamp DESC)')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_op_user ON operation_log(user_nickname)')
+    conn.commit()
+    conn.close()
+
+def get_client_ip():
+    """从请求头获取真实 IP"""
+    forwarded = request.headers.get('X-Forwarded-For')
+    if forwarded:
+        return forwarded.split(',')[0].strip()
+    return request.remote_addr
+
+def log_operation(operation_type, detail=None, nickname=None, ip=None, device_id=None):
+    """记录操作日志 - 增强版：自动从数据库补全昵称"""
+    # 确保表存在
+    global _log_table_initialized
+    if not _log_table_initialized:
+        init_log_table()
+        _log_table_initialized = True
+
+    # 1. 获取昵称
+    if nickname is None:
+        nickname = session.get('nickname')
+        # 如果 session 中没有，尝试从数据库根据当前 IP 或 device_id 查询
+        if not nickname:
+            req_ip = get_client_ip()
+            req_device = session.get('device_id')
+            today = datetime.now().strftime('%Y-%m-%d')
+            conn = get_db()
+            cur = conn.cursor()
+            # 优先用 device_id 查询当天授权记录
+            if req_device:
+                cur.execute('''
+                    SELECT nickname FROM access_whitelist
+                    WHERE device_id=? AND date=? AND authorized=1
+                    ORDER BY id DESC LIMIT 1
+                ''', (req_device, today))
+                row = cur.fetchone()
+                if row:
+                    nickname = row[0]
+            # 若未找到，再按 IP 查询
+            if not nickname:
+                cur.execute('''
+                    SELECT nickname FROM access_whitelist
+                    WHERE ip=? AND date=? AND authorized=1
+                    ORDER BY id DESC LIMIT 1
+                ''', (req_ip, today))
+                row = cur.fetchone()
+                if row:
+                    nickname = row[0]
+            conn.close()
+        if not nickname:
+            nickname = 'unknown'
+
+    # 2. 获取 IP
+    if ip is None:
+        ip = get_client_ip()
+    if device_id is None:
+        device_id = session.get('device_id', '')
+
+    # 3. 序列化 detail
+    if detail is None:
+        detail = {}
+    try:
+        detail_str = json.dumps(detail, ensure_ascii=False)
+    except:
+        detail_str = str(detail)
+
+    # 4. 写入数据库
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO operation_log (user_nickname, user_ip, device_id, operation_type, detail, timestamp) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (nickname, ip, device_id, operation_type, detail_str, int(time.time()))
+    )
+    conn.commit()
+    conn.close()
 
 # ========== 代理请求统一函数 ==========
 
@@ -308,12 +405,11 @@ def reports_list():
     if not reports_dir.exists():
         reports_dir.mkdir(parents=True, exist_ok=True)
 
-    # 收集所有文件，按basename分组
     groups = {}
     for f in reports_dir.iterdir():
         if f.suffix.lower() not in ('.html', '.png', '.jpg', '.jpeg'):
             continue
-        basename = f.stem  # 不含扩展名
+        basename = f.stem
         if basename not in groups:
             groups[basename] = {'html': None, 'image': None, 'mtime': None}
         ext = f.suffix.lower()
@@ -404,6 +500,16 @@ def summary_manage():
         current_window_no=get_current_window_no()
     )
 
+# ========== 操作日志页面 ==========
+@yard_bp.route('/logs')
+def logs_page():
+    if not session.get('authorized') or session.get('role') != 'admin':
+        abort(403)
+    return render_template('logs.html',
+        nav_window=get_current_window_no(),
+        current_window_no=get_current_window_no()
+    )
+
 # ========== API 代理路由 ==========
 @yard_bp.route('/api/stats')
 def api_stats():
@@ -416,48 +522,77 @@ def api_windows():
 @yard_bp.route('/api/post/<int:link_id>/reorder', methods=['POST'])
 def api_reorder_post(link_id):
     data = request.get_json() or {}
+    target_link_id = data.get('target_link_id')
+    log_operation('swap_order', {'link_id': link_id, 'target_link_id': target_link_id})
     return proxy_request('POST', f'/api/post/{link_id}/reorder', data)
 
 @yard_bp.route('/api/post/<int:link_id>/move-window', methods=['POST'])
 def api_move_window(link_id):
     data = request.get_json() or {}
+    target_window = data.get('target_window_no')
+    log_operation('move_window', {'link_id': link_id, 'target_window': target_window})
     return proxy_request('POST', f'/api/post/{link_id}/move-window', data)
 
 @yard_bp.route('/api/post/<int:link_id>/comment', methods=['POST'])
 def api_update_comment(link_id):
     data = request.get_json() or {}
+    new_comment = data.get('comment', '').strip()
+
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT comment FROM llm_analyses WHERE link_id = ?", (link_id,))
+    row = cur.fetchone()
+    old_comment = row[0] if row else ''
+    conn.close()
+
+    log_operation('edit_comment', {
+        'link_id': link_id,
+        'old_comment': old_comment,
+        'new_comment': new_comment
+    })
+
     return proxy_request('POST', f'/api/post/{link_id}/comment', data)
 
 @yard_bp.route('/api/post/<int:link_id>/analyze', methods=['POST'])
 def api_analyze_post(link_id):
+    log_operation('generate_comment', {'link_id': link_id})
     return proxy_request('POST', f'/api/post/{link_id}/analyze', timeout=120)
 
 @yard_bp.route('/api/fetch-feed', methods=['POST'])
 def api_fetch_feed():
+    log_operation('fetch_feed', {'window': get_current_window_no()})
     return proxy_request('POST', '/api/fetch-feed')
 
 @yard_bp.route('/api/fetch-at', methods=['POST'])
 def api_fetch_at():
     data = request.get_json() or {}
+    log_operation('fetch_at', {'window': get_current_window_no()})
     return proxy_request('POST', '/api/fetch-at', data)
 
 @yard_bp.route('/api/generate-report', methods=['POST'])
 def api_generate_report():
     data = request.get_json() or {}
+    window_no = data.get('window_no', get_current_window_no())
+    log_operation('generate_report', {'window_no': window_no})
     return proxy_request('POST', '/api/generate-report', data)
 
 @yard_bp.route('/api/reset-order', methods=['POST'])
 def api_reset_order():
     data = request.get_json() or {}
+    window_no = data.get('window_no')
+    log_operation('reset_order', {'window_no': window_no})
     return proxy_request('POST', '/api/reset-order', data)
 
 @yard_bp.route('/api/post/<int:link_id>/delete-analysis', methods=['POST'])
 def api_delete_analysis(link_id):
+    log_operation('delete_analysis', {'link_id': link_id})
     return proxy_request('POST', f'/api/post/{link_id}/delete-analysis')
 
 @yard_bp.route('/api/analyze-window', methods=['POST'])
 def api_analyze_window():
     data = request.get_json() or {}
+    window_no = data.get('window_no', get_current_window_no())
+    log_operation('analyze_window', {'window_no': window_no})
     return proxy_request('POST', '/api/analyze-window', data)
 
 # ========== 总评相关 API ==========
@@ -487,42 +622,95 @@ def api_get_summary():
 def api_update_summary():
     data = request.get_json() or {}
     window_no = data.get('window_no') or get_current_window_no()
-    comment = data.get('comment', '').strip()
+    new_comment = data.get('comment', '').strip()
+
     window_start, _ = get_window_by_no(window_no)
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("SELECT COUNT(*) FROM llm_analyses WHERE daily_no = 'SUMMARY' AND window_start = ?", (window_start,))
-    exists = cur.fetchone()[0] > 0
-    if exists:
-        cur.execute("""
-            UPDATE llm_analyses SET comment = ?, analyzed_at = ?
-            WHERE daily_no = 'SUMMARY' AND window_start = ?
-        """, (comment, datetime.now(timezone.utc).isoformat(), window_start))
-    else:
-        cur.execute("""
-            INSERT INTO llm_analyses (window_start, daily_no, link_id, title, comment, analyzed_at, model_used)
-            VALUES (?, 'SUMMARY', 0, 'AI总评', ?, ?, 'manual')
-        """, (window_start, comment, datetime.now(timezone.utc).isoformat()))
-    conn.commit()
+    cur.execute("SELECT comment FROM llm_analyses WHERE daily_no='SUMMARY' AND window_start=?", (window_start,))
+    row = cur.fetchone()
+    old_comment = row[0] if row else ''
     conn.close()
-    return jsonify({'success': True, 'message': '总评已更新'})
+
+    log_operation('update_summary', {
+        'window_no': window_no,
+        'old_comment': old_comment,
+        'new_comment': new_comment
+    })
+
+    return proxy_request('POST', '/api/summary/update', data)
 
 @yard_bp.route('/api/summary/generate', methods=['POST'])
 def api_generate_summary():
     data = request.get_json() or {}
+    window_no = data.get('window_no', get_current_window_no())
+    log_operation('generate_summary', {'window_no': window_no})
     return proxy_request('POST', '/api/summary/generate', data)
 
-# ========== 新增：任务状态查询代理 ==========
-@yard_bp.route('/api/task/<task_id>', methods=['GET'])
-def api_task_status(task_id):
-    return proxy_request('GET', f'/api/task/{task_id}')
+# ========== 操作日志查询 API ==========
+@yard_bp.route('/api/logs')
+def api_logs():
+    if not session.get('authorized') or session.get('role') != 'admin':
+        return jsonify({'error': 'Unauthorized'}), 403
 
-# ================================================================
+    date_str = request.args.get('date')
+    page = request.args.get('page', 1, type=int)
+    per_page = 20
+
+    if date_str:
+        try:
+            local_dt = datetime.strptime(date_str, '%Y-%m-%d')
+            start = int(local_dt.replace(tzinfo=timezone(timedelta(hours=8))).timestamp())
+            end = int((local_dt + timedelta(days=1)).replace(tzinfo=timezone(timedelta(hours=8))).timestamp())
+        except:
+            start, end = 0, int(time.time()) + 86400
+    else:
+        today = datetime.now().astimezone(timezone(timedelta(hours=8))).date()
+        start = int(datetime(today.year, today.month, today.day, tzinfo=timezone(timedelta(hours=8))).timestamp())
+        end = start + 86400
+
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM operation_log WHERE timestamp >= ? AND timestamp < ?", (start, end))
+    total = cur.fetchone()[0]
+
+    offset = (page - 1) * per_page
+    cur.execute(
+        "SELECT id, user_nickname, user_ip, device_id, operation_type, detail, timestamp "
+        "FROM operation_log WHERE timestamp >= ? AND timestamp < ? "
+        "ORDER BY timestamp DESC LIMIT ? OFFSET ?",
+        (start, end, per_page, offset)
+    )
+    rows = cur.fetchall()
+    conn.close()
+
+    items = []
+    for row in rows:
+        try:
+            detail = json.loads(row[5]) if row[5] else {}
+        except:
+            detail = row[5]
+        items.append({
+            'id': row[0],
+            'nickname': row[1],
+            'ip': row[2],
+            'device_id': row[3],
+            'operation_type': row[4],
+            'detail': detail,
+            'timestamp': row[6]
+        })
+
+    return jsonify({
+        'items': items,
+        'total': total,
+        'page': page,
+        'per_page': per_page,
+        'total_pages': (total + per_page - 1) // per_page
+    })
+
 # ========== 白名单与封禁管理（仅管理员） ==========
-# ================================================================
 
 def parse_duration(duration_str):
-    """将 '1h', '24h', '30m' 等转为 timedelta，默认 1 小时"""
     duration_str = duration_str.lower().strip()
     if duration_str.endswith('h'):
         try:
@@ -540,7 +728,6 @@ def parse_duration(duration_str):
 
 @yard_bp.route('/whitelist')
 def whitelist():
-    """白名单管理页面，仅管理员可访问"""
     if not session.get('authorized') or session.get('role') != 'admin':
         abort(403)
 
@@ -556,7 +743,6 @@ def whitelist():
     ''', (today, five_min_ago))
     online_count = cur.fetchone()[0]
 
-    # 今日白名单 - 新增 nickname, device_id, user_identifier 等全部字段
     cur.execute('''
         SELECT id, ip, first_access, last_access, user_agent, path,
                user_identifier, device_id, nickname
@@ -584,10 +770,8 @@ def whitelist():
         now=datetime.now()
     )
 
-# ========== 新增：更新单条记录的标识符 ==========
 @yard_bp.route('/whitelist/update-identifier', methods=['POST'])
 def update_identifier():
-    """更新某条记录的 user_identifier，若留空则自动生成新 UID"""
     if not session.get('authorized') or session.get('role') != 'admin':
         return jsonify({'error': 'Unauthorized'}), 403
 
@@ -613,10 +797,8 @@ def update_identifier():
     else:
         return jsonify({'success': False, 'error': '记录不存在'}), 404
 
-# ========== 新增：批量合并到同一个标识符 ==========
 @yard_bp.route('/whitelist/batch-merge', methods=['POST'])
 def batch_merge():
-    """将多条记录合并到同一个 user_identifier"""
     if not session.get('authorized') or session.get('role') != 'admin':
         return jsonify({'error': 'Unauthorized'}), 403
 
@@ -639,7 +821,6 @@ def batch_merge():
 
     return jsonify({'success': True, 'merged': affected})
 
-# ========== 原有封禁管理 ==========
 @yard_bp.route('/whitelist/delete/<int:id>', methods=['POST'])
 def whitelist_delete(id):
     if not session.get('authorized') or session.get('role') != 'admin':
@@ -647,11 +828,20 @@ def whitelist_delete(id):
 
     conn = get_db()
     cur = conn.cursor()
+    cur.execute("SELECT ip FROM ip_blocklist WHERE id = ?", (id,))
+    row = cur.fetchone()
+    ip = row[0] if row else None
+    conn.close()
+
+    conn = get_db()
+    cur = conn.cursor()
     cur.execute('DELETE FROM ip_blocklist WHERE id = ?', (id,))
     conn.commit()
     affected = cur.rowcount
     conn.close()
+
     if affected:
+        log_operation('unblock_ip', {'ip': ip})
         return jsonify({'success': True, 'message': '已解封'})
     else:
         return jsonify({'success': False, 'error': '记录不存在'}), 404
@@ -691,23 +881,25 @@ def whitelist_block():
         ''', (ip, blocked_until.isoformat()))
     conn.commit()
     conn.close()
+
+    log_operation('block_ip', {'ip': ip, 'duration': duration_str})
+
     return jsonify({'success': True, 'message': f'IP {ip} 已封禁至 {blocked_until.strftime("%Y-%m-%d %H:%M")}'})
 
-# ========== 强制所有人重新登录（仅管理员） ==========
 @yard_bp.route('/whitelist/force-logout', methods=['POST'])
 def force_logout():
-    """将今日所有白名单记录标记为未授权，强制所有人重新登录"""
     if not session.get('authorized') or session.get('role') != 'admin':
         return jsonify({'error': 'Unauthorized'}), 403
 
     today = datetime.now().strftime('%Y-%m-%d')
     conn = get_db()
     cur = conn.cursor()
-    # 将今天所有授权记录标记为未授权（authorized=0）
     cur.execute('UPDATE access_whitelist SET authorized = 0 WHERE date = ? AND authorized = 1', (today,))
     affected = cur.rowcount
     conn.commit()
     conn.close()
+
+    log_operation('force_logout', {'today': today})
 
     return jsonify({'success': True, 'message': f'已强制 {affected} 条授权记录重新登录'})
 

@@ -1,0 +1,126 @@
+{% extends "base.html" %}
+
+{% block title %}操作日志{% endblock %}
+{% block page_title %}操作日志{% endblock %}
+
+{% block content %}
+<div class="filter-bar">
+    <div class="filter-group">
+        <label>日期</label>
+        <input type="date" class="filter-input" id="logDate" value="{{ today }}" style="min-width:160px;">
+    </div>
+    <button class="btn btn-primary btn-sm" onclick="loadLogs(1)">查询</button>
+    <span style="margin-left:auto;font-size:13px;color:var(--kimi-color-text-tertiary);">共 <span id="totalCount">0</span> 条记录</span>
+</div>
+
+<div class="table-wrapper">
+    <table class="data-table" id="logTable">
+        <thead>
+            <tr>
+                <th style="width:170px;">时间 (北京时间)</th>
+                <th style="width:120px;">用户</th>
+                <th style="width:110px;">操作类型</th>
+                <th>详情</th>
+            </tr>
+        </thead>
+        <tbody id="logBody">
+            <tr><td colspan="5" style="text-align:center;padding:40px;color:var(--kimi-color-text-tertiary);">加载中...</td></tr>
+        </tbody>
+    </table>
+</div>
+
+<!-- 分页 -->
+<div class="pagination" id="pagination"></div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+let currentPage = 1;
+
+function loadLogs(page) {
+    currentPage = page;
+    const date = document.getElementById('logDate').value;
+    if (!date) {
+        showToast('请选择日期', 'error');
+        return;
+    }
+    const tbody = document.getElementById('logBody');
+    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:40px;">加载中...</td></tr>';
+
+    fetch(`/yard/admin/api/logs?date=${date}&page=${page}`)
+        .then(res => res.json())
+        .then(data => {
+            if (!data.items) {
+                tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:40px;color:var(--kimi-color-text-tertiary);">无记录</td></tr>';
+                return;
+            }
+            document.getElementById('totalCount').textContent = data.total;
+            let html = '';
+            data.items.forEach(item => {
+                const ts = item.timestamp;
+                const dateObj = new Date(ts * 1000);
+                const bjTime = dateObj.toLocaleString('zh-CN', {timeZone: 'Asia/Shanghai', hour12: false});
+                let detailText = '';
+                if (typeof item.detail === 'object') {
+                    detailText = JSON.stringify(item.detail, null, 2);
+                } else {
+                    detailText = item.detail || '';
+                }
+                // 美化操作类型
+                const opMap = {
+                    'login': '登录',
+                    'fetch_feed': '拉取Feed',
+                    'fetch_at': '拉取@消息',
+                    'analyze_window': 'AI分析窗口',
+                    'generate_report': '生成晚报',
+                    'reset_order': '重置顺序',
+                    'edit_comment': '编辑AI评论',
+                    'generate_comment': '生成AI评论',
+                    'delete_analysis': '删除AI评论',
+                    'swap_order': '交换顺序',
+                    'move_window': '移动窗口',
+                    'update_summary': '更新总评',
+                    'generate_summary': '生成总评',
+                    'block_ip': '封禁IP',
+                    'unblock_ip': '解封IP',
+                    'force_logout': '强制登出'
+                };
+                const opLabel = opMap[item.operation_type] || item.operation_type;
+                html += `<tr>
+                    <td>${bjTime}</td>
+                    <td>${item.nickname || '未知'}</td>
+                    <td><span class="status-badge status-success">${opLabel}</span></td>
+                    <td style="font-size:13px;max-width:400px;word-break:break-all;">${detailText}</td>
+                </tr>`;
+            });
+            tbody.innerHTML = html;
+            // 分页
+            const totalPages = data.total_pages || 1;
+            const pagination = document.getElementById('pagination');
+            let pgHtml = '';
+            if (currentPage > 1) {
+                pgHtml += `<a href="javascript:loadLogs(${currentPage - 1})" class="page-btn">&larr;</a>`;
+            }
+            pgHtml += `<span class="page-info">${currentPage} / ${totalPages}</span>`;
+            if (currentPage < totalPages) {
+                pgHtml += `<a href="javascript:loadLogs(${currentPage + 1})" class="page-btn">&rarr;</a>`;
+            }
+            pagination.innerHTML = pgHtml;
+        })
+        .catch(err => {
+            tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:40px;color:red;">加载失败</td></tr>';
+            console.error(err);
+        });
+}
+
+// 页面加载时默认今天
+document.addEventListener('DOMContentLoaded', function() {
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = String(now.getMonth()+1).padStart(2,'0');
+    const day = String(now.getDate()).padStart(2,'0');
+    document.getElementById('logDate').value = `${year}-${month}-${day}`;
+    loadLogs(1);
+});
+</script>
+{% endblock %}

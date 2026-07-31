@@ -40,6 +40,10 @@
                 <span class="nav-icon">&#129302;</span>
                 <span class="nav-text">总评管理</span>
             </a>
+			<a href="{{ url_for('yard_admin.logs_page') }}" class="nav-item {% if request.endpoint == 'yard_admin.logs_page' %}active{% endif %}">
+   				<span class="nav-icon">&#128202;</span>
+    			<span class="nav-text">管理日志</span>
+			</a>
             <!-- 白名单链接（仅管理员可见） -->
             {% if session.get('role') == 'admin' %}
             <a href="{{ url_for('yard_admin.whitelist') }}" class="nav-item {% if request.endpoint == 'yard_admin.whitelist' %}active{% endif %}">

@@ -4,6 +4,7 @@ import os
 from datetime import datetime, timedelta
 import sqlite3
 import secrets
+import time  # [新增] 用于日志时间戳
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 app = Flask(__name__)
@@ -86,6 +87,48 @@ def init_db():
         new_uid = f"UID-{secrets.token_hex(4).upper()}"
         conn.execute("UPDATE access_whitelist SET user_identifier = ? WHERE id = ?", (new_uid, row_id))
 
+    # [新增] 创建操作日志表（确保与 yard_admin 一致）
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS operation_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_nickname TEXT,
+            user_ip TEXT,
+            device_id TEXT,
+            operation_type TEXT,
+            detail TEXT,
+            timestamp INTEGER
+        )
+    ''')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_op_timestamp ON operation_log(timestamp DESC)')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_op_user ON operation_log(user_nickname)')
+
+    conn.commit()
+    conn.close()
+
+# ========== [新增] 操作日志记录函数（与 yard_admin 保持一致） ==========
+def log_operation(operation_type, detail=None, nickname=None, ip=None, device_id=None):
+    """记录操作日志（用于主认证服务）"""
+    if nickname is None:
+        nickname = session.get('nickname', 'unknown')
+    if ip is None:
+        ip = get_client_ip()
+    if device_id is None:
+        device_id = session.get('device_id', '')
+    if detail is None:
+        detail = {}
+
+    try:
+        detail_str = json.dumps(detail, ensure_ascii=False)
+    except:
+        detail_str = str(detail)
+
+    conn = get_db_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO operation_log (user_nickname, user_ip, device_id, operation_type, detail, timestamp) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (nickname, ip, device_id, operation_type, detail_str, int(time.time()))
+    )
     conn.commit()
     conn.close()
 
@@ -150,7 +193,6 @@ def is_ip_authorized(ip):
     today = datetime.now().strftime('%Y-%m-%d')
     conn = get_db_conn()
     cur = conn.cursor()
-    # 只查 authorized=1 的最新记录（用于兼容旧逻辑）
     cur.execute('SELECT 1 FROM access_whitelist WHERE ip=? AND date=? AND authorized=1 ORDER BY id DESC LIMIT 1', (ip, today))
     row = cur.fetchone()
     conn.close()
@@ -172,7 +214,6 @@ def authorize_ip(ip, user_agent, path, device_id=None, nickname=None):
         ''', (device_id, today))
         row = cur.fetchone()
         if row:
-            # 更新时强制设置 authorized = 1，并重置其他字段
             cur.execute('''
                 UPDATE access_whitelist
                 SET last_access=CURRENT_TIMESTAMP,
@@ -197,7 +238,6 @@ def authorize_ip(ip, user_agent, path, device_id=None, nickname=None):
     row = cur.fetchone()
 
     if row:
-        # 更新时强制设置 authorized = 1，并补全 device_id / nickname
         cur.execute('''
             UPDATE access_whitelist
             SET last_access=CURRENT_TIMESTAMP,
@@ -586,6 +626,15 @@ def auth():
     session['authorized'] = True
     session['role'] = role
     session['device_id'] = device_id
+    session['nickname'] = nickname  # [新增] 保存昵称，供日志使用
+
+    # [新增] 记录登录操作
+    log_operation('login', {
+        'role': role,
+        'device_id': device_id,
+        'ip': ip,
+        'nickname': nickname
+    }, nickname=nickname, ip=ip, device_id=device_id)
 
     return redirect(next_url)
 
@@ -649,6 +698,7 @@ def check_access():
             # 有昵称且 authorized=1 → 恢复 session
             session['authorized'] = True
             session['role'] = 'user'
+            session['nickname'] = row[0]  # [新增] 恢复昵称
             if row[1]:
                 session['device_id'] = row[1]
             authorize_ip(ip, request.headers.get('User-Agent', ''), request.path, session.get('device_id'), None)
