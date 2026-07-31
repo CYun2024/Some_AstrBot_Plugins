@@ -116,17 +116,27 @@
 <body>
     <div class="login-box">
         <h2>🔐 访问验证</h2>
-        <div class="subtitle">请输入密码以继续访问</div>
+        <div class="subtitle">请输入您的昵称和密码以继续访问</div>
 
         {% if error %}
         <div class="error">{{ error }}</div>
         {% endif %}
 
         <form method="POST" action="/auth">
+            <!-- 隐藏设备指纹 -->
+            <input type="hidden" name="device_id" id="device_id">
+
+            <!-- 新增：昵称输入（在密码上方） -->
             <div class="form-group">
-                <label for="password">密码</label>
-                <input type="password" id="password" name="password" placeholder="请输入密码" required autofocus>
+                <label for="nickname">👤 昵称</label>
+                <input type="text" id="nickname" name="nickname" placeholder="请输入您的昵称（如：韶梦梦喵）" required autofocus>
             </div>
+
+            <div class="form-group">
+                <label for="password">🔑 密码</label>
+                <input type="password" id="password" name="password" placeholder="请输入密码" required>
+            </div>
+
             <input type="hidden" name="next" value="{{ next_url }}">
             <button type="submit">确认</button>
         </form>
@@ -135,5 +145,17 @@
             heiboxyard · 每日首次访问需验证
         </div>
     </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            // 生成或读取持久化设备 ID
+            let deviceId = localStorage.getItem('heiboxyard_device_id');
+            if (!deviceId) {
+                deviceId = 'dev-' + crypto.randomUUID();
+                localStorage.setItem('heiboxyard_device_id', deviceId);
+            }
+            document.getElementById('device_id').value = deviceId;
+        });
+    </script>
 </body>
 </html>

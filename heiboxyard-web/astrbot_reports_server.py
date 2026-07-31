@@ -3,7 +3,8 @@ from flask import Flask, send_file, jsonify, request, session, redirect, render_
 import os
 from datetime import datetime, timedelta
 import sqlite3
-from werkzeug.middleware.proxy_fix import ProxyFix   # 新增
+import secrets
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 app = Flask(__name__)
 
@@ -18,8 +19,6 @@ app.config['ACCESS_PASSWORD'] = ACCESS_PASSWORD
 app.config['ADMIN_PASSWORD'] = ADMIN_PASSWORD
 app.config['HEIBOXYARD_DB_PATH'] = DB_PATH
 
-# 应用 ProxyFix 中间件，使 Flask 识别代理转发的 Host/Proto
-# x_for=1, x_proto=1, x_host=1 表示信任 X-Forwarded-For, X-Forwarded-Proto, X-Forwarded-Host
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
 
 # ========== 原有目录配置 ==========
@@ -49,7 +48,7 @@ def init_db():
         )
     ''')
     conn.execute('CREATE INDEX IF NOT EXISTS idx_ip_date ON access_whitelist(ip, date)')
-    
+
     # IP 封禁表
     conn.execute('''
         CREATE TABLE IF NOT EXISTS ip_blocklist (
@@ -62,18 +61,40 @@ def init_db():
         )
     ''')
     conn.execute('CREATE INDEX IF NOT EXISTS idx_blocked_ip ON ip_blocklist(ip)')
+
+    # 列迁移
+    cur = conn.cursor()
+    cur.execute("PRAGMA table_info(access_whitelist)")
+    columns = [col[1] for col in cur.fetchall()]
+
+    if 'user_identifier' not in columns:
+        conn.execute('ALTER TABLE access_whitelist ADD COLUMN user_identifier TEXT')
+        print("✅ 已添加 user_identifier 列")
+
+    if 'device_id' not in columns:
+        conn.execute('ALTER TABLE access_whitelist ADD COLUMN device_id TEXT')
+        print("✅ 已添加 device_id 列")
+
+    if 'nickname' not in columns:
+        conn.execute('ALTER TABLE access_whitelist ADD COLUMN nickname TEXT')
+        print("✅ 已添加 nickname 列")
+
+    # 为历史数据补全随机 UID
+    cur.execute("SELECT id FROM access_whitelist WHERE user_identifier IS NULL")
+    rows = cur.fetchall()
+    for (row_id,) in rows:
+        new_uid = f"UID-{secrets.token_hex(4).upper()}"
+        conn.execute("UPDATE access_whitelist SET user_identifier = ? WHERE id = ?", (new_uid, row_id))
+
     conn.commit()
     conn.close()
 
 def get_client_ip():
-    # 优先从 X-Forwarded-For 获取真实 IP（可能有多层代理）
     forwarded = request.headers.get('X-Forwarded-For')
     if forwarded:
-        # 取第一个 IP（最原始客户端）
         ip = forwarded.split(',')[0].strip()
     else:
         ip = request.remote_addr
-    # 如果获取到的是内部 IP（127.0.0.1 或 10.0.0.x），但 XFF 可能为空，则尝试从 X-Real-IP 获取
     if ip in ('127.0.0.1', '::1') or ip.startswith('10.') or ip.startswith('192.168.'):
         real_ip = request.headers.get('X-Real-IP')
         if real_ip:
@@ -91,7 +112,6 @@ def is_ip_blocked(ip):
         if blocked_until > datetime.now():
             return True
         else:
-            # 过期则清除记录
             conn = get_db_conn()
             conn.execute('DELETE FROM ip_blocklist WHERE ip=?', (ip,))
             conn.commit()
@@ -130,38 +150,79 @@ def is_ip_authorized(ip):
     today = datetime.now().strftime('%Y-%m-%d')
     conn = get_db_conn()
     cur = conn.cursor()
-    cur.execute('SELECT 1 FROM access_whitelist WHERE ip=? AND date=? AND authorized=1', (ip, today))
+    # 只查 authorized=1 的最新记录（用于兼容旧逻辑）
+    cur.execute('SELECT 1 FROM access_whitelist WHERE ip=? AND date=? AND authorized=1 ORDER BY id DESC LIMIT 1', (ip, today))
     row = cur.fetchone()
     conn.close()
     return row is not None
 
-def authorize_ip(ip, user_agent, path):
+# ========== 核心函数：授权 + 写入昵称 / device_id（修复版） ==========
+def authorize_ip(ip, user_agent, path, device_id=None, nickname=None):
     today = datetime.now().strftime('%Y-%m-%d')
-    print(f"[DEBUG] authorize_ip called: ip={ip}, today={today}, path={path}")
+    print(f"[DEBUG] authorize_ip: ip={ip}, device_id={device_id}, nickname={nickname}")
     conn = get_db_conn()
     cur = conn.cursor()
-    # 先检查该IP今天是否有授权记录
-    cur.execute('SELECT id, last_access FROM access_whitelist WHERE ip=? AND date=? AND authorized=1', (ip, today))
+
+    # 1. 优先按 device_id 查找（不限制 authorized 状态，找到就更新）
+    if device_id:
+        cur.execute('''
+            SELECT id, user_identifier, nickname
+            FROM access_whitelist
+            WHERE device_id=? AND date=?
+        ''', (device_id, today))
+        row = cur.fetchone()
+        if row:
+            # 更新时强制设置 authorized = 1，并重置其他字段
+            cur.execute('''
+                UPDATE access_whitelist
+                SET last_access=CURRENT_TIMESTAMP,
+                    ip=?,
+                    user_agent=?,
+                    path=?,
+                    nickname=COALESCE(?, nickname),
+                    authorized = 1
+                WHERE id=?
+            ''', (ip, user_agent, path, nickname, row[0]))
+            print(f"[DEBUG] Updated by device_id {device_id}, set authorized=1")
+            conn.commit()
+            conn.close()
+            return
+
+    # 2. 按 IP 查找（不限制 authorized 状态）
+    cur.execute('''
+        SELECT id, user_identifier, nickname
+        FROM access_whitelist
+        WHERE ip=? AND date=?
+    ''', (ip, today))
     row = cur.fetchone()
+
     if row:
-        # 更新
+        # 更新时强制设置 authorized = 1，并补全 device_id / nickname
         cur.execute('''
-            UPDATE access_whitelist SET last_access=CURRENT_TIMESTAMP, user_agent=?, path=?
-            WHERE ip=? AND date=? AND authorized=1
-        ''', (user_agent, path, ip, today))
-        print(f"[DEBUG] Updated last_access for IP {ip}, old last_access={row[1]}")
+            UPDATE access_whitelist
+            SET last_access=CURRENT_TIMESTAMP,
+                user_agent=?,
+                path=?,
+                device_id=COALESCE(?, device_id),
+                nickname=COALESCE(?, nickname),
+                authorized = 1
+            WHERE id=?
+        ''', (user_agent, path, device_id, nickname, row[0]))
+        print(f"[DEBUG] Updated by IP {ip}, set authorized=1")
     else:
-        # 插入
+        # 3. 完全不存在 → 插入新记录（默认 authorized=1）
+        new_uid = f"UID-{secrets.token_hex(4).upper()}"
         cur.execute('''
-            INSERT INTO access_whitelist (ip, date, user_agent, path)
-            VALUES (?, ?, ?, ?)
-        ''', (ip, today, user_agent, path))
-        print(f"[DEBUG] Inserted new record for IP {ip}")
+            INSERT INTO access_whitelist
+                (ip, date, user_agent, path, user_identifier, device_id, nickname)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (ip, today, user_agent, path, new_uid, device_id, nickname))
+        print(f"[DEBUG] Inserted new record for IP {ip}, UID={new_uid}")
+
     conn.commit()
     conn.close()
-    print(f"[DEBUG] authorize_ip completed for IP {ip}")
 
-# ========== 文件大小/时间辅助（原有） ==========
+# ========== 文件大小/时间辅助（原有，未变） ==========
 def get_file_size(path):
     size = os.path.getsize(path)
     for unit in ['B', 'KB', 'MB', 'GB']:
@@ -216,7 +277,7 @@ def build_index_page(title, subtitle, icon, css, items, total_count, total_size,
         nav_html = '<div style="text-align: center; margin-bottom: 30px;"><a href="' + other_link + '" style="display: inline-block; padding: 12px 24px; background: linear-gradient(135deg, var(--primary), var(--secondary)); color: white; text-decoration: none; border-radius: 25px; font-size: 1em; transition: all 0.3s ease; box-shadow: 0 4px 15px var(--shadow);" onmouseover="this.style.transform=\'scale(1.05)\'" onmouseout="this.style.transform=\'scale(1)\'">' + other_desc + ' &rarr;</a></div>'
     return '<!DOCTYPE html>\n<html lang="zh-CN">\n<head>\n    <meta charset="UTF-8">\n    <meta name="viewport" content="width=device-width, initial-scale=1.0">\n    <title>' + icon + ' ' + title + ' ' + icon + '</title>\n    <style>' + css + '</style>\n</head>\n<body>\n    <div class="container">\n        <div class="header">\n            <h1>' + icon + ' ' + title + ' ' + icon + '</h1>\n            <p class="subtitle">' + subtitle + '</p>\n        </div>\n        ' + nav_html + '\n        <div class="stats">\n            <div class="stat-item">\n                <div class="stat-number">' + str(total_count) + '</div>\n                <div class="stat-label">&#128209; 报告总数</div>\n            </div>\n            <div class="stat-item">\n                <div class="stat-number">' + total_size + '</div>\n                <div class="stat-label">&#128190; 占用空间</div>\n            </div>\n            <div class="stat-item">\n                <div class="stat-number">' + datetime.now().strftime("%m-%d") + '</div>\n                <div class="stat-label">&#128197; 今日日期</div>\n            </div>\n        </div>\n        <ul class="report-list">\n            ' + items_html + '\n        </ul>\n        <div class="footer">\n            <p>Made with <span class="heart">&#9829;</span> for QQ Group Analysis</p>\n            <p style="margin-top: 5px; font-size: 0.8em;">AstrBot Plugin | 二次元风格主题</p>\n        </div>\n    </div>\n</body>\n</html>'
 
-# ========== CSS（原有） ==========
+# ========== CSS（原有，未变） ==========
 ANIME_CSS = """
 :root {
     --primary: #ff6b9d;
@@ -426,7 +487,6 @@ h1 {
 """
 
 MOBILE_FIX_CSS = '''<style id="mobile-auto-fix">''' + '''
-/* === 移动端紧急修复 === */
 @media (max-width: 768px) {
     html { font-size: 14px !important; }
     body { padding: 8px !important; }
@@ -483,40 +543,29 @@ MOBILE_FIX_CSS = '''<style id="mobile-auto-fix">''' + '''
 }
 </style>'''
 
-# ========== 认证路由（统一登录） ==========
+# ========== 认证路由 ==========
 @app.route('/auth', methods=['POST'])
 def auth():
     password = request.form.get('password', '').strip()
     next_url = request.form.get('next', '/')
+    device_id = request.form.get('device_id', '').strip() or None
+    nickname = request.form.get('nickname', '').strip()
     ip = get_client_ip()
 
-    # 检查 IP 是否已被封禁
+    # 1. 昵称不能为空
+    if not nickname:
+        return render_template('login.html', error='昵称不能为空，请填写您的昵称', next_url=next_url), 400
+
+    # 2. 检查 IP 是否被封禁
     if is_ip_blocked(ip):
         return render_template('login.html', error='您的 IP 已被临时封禁，请稍后再试', next_url=next_url), 403
 
+    # 3. 验证密码
     if password == app.config['ACCESS_PASSWORD']:
-        # 普通用户
-        authorize_ip(ip, request.headers.get('User-Agent', ''), request.referrer or '/')
-        session['authorized'] = True
-        session['role'] = 'user'
-        # 清除该 IP 的失败记录
-        conn = get_db_conn()
-        conn.execute('DELETE FROM ip_blocklist WHERE ip=?', (ip,))
-        conn.commit()
-        conn.close()
-        return redirect(next_url)
+        role = 'user'
     elif password == app.config['ADMIN_PASSWORD']:
-        # 管理员
-        authorize_ip(ip, request.headers.get('User-Agent', ''), request.referrer or '/')
-        session['authorized'] = True
-        session['role'] = 'admin'
-        conn = get_db_conn()
-        conn.execute('DELETE FROM ip_blocklist WHERE ip=?', (ip,))
-        conn.commit()
-        conn.close()
-        return redirect(next_url)
+        role = 'admin'
     else:
-        # 密码错误
         record_failed_attempt(ip)
         if is_ip_blocked(ip):
             error = '密码错误次数过多，IP 已被封禁 1 小时'
@@ -524,47 +573,95 @@ def auth():
             error = '密码错误，请重试'
         return render_template('login.html', error=error, next_url=next_url)
 
-# ========== 全局请求拦截（认证检查 + 封禁检查） ==========
+    # 4. 密码正确 → 写入/更新白名单（强制 authorized=1）
+    authorize_ip(ip, request.headers.get('User-Agent', ''), request.referrer or '/', device_id, nickname)
+
+    # 5. 清除该 IP 的失败记录
+    conn = get_db_conn()
+    conn.execute('DELETE FROM ip_blocklist WHERE ip=?', (ip,))
+    conn.commit()
+    conn.close()
+
+    # 6. 设置 session
+    session['authorized'] = True
+    session['role'] = role
+    session['device_id'] = device_id
+
+    return redirect(next_url)
+
+# ========== 全局请求拦截（认证 + 昵称校验 + 数据库授权校验） ==========
 @app.before_request
 def check_access():
-    # 放行静态资源
+    # 放行静态资源和认证接口
     if request.path.startswith('/static/') or request.path == '/favicon.ico':
         return
-    # 放行认证路由
     if request.path == '/auth':
         return
+
     ip = get_client_ip()
+    today = datetime.now().strftime('%Y-%m-%d')
     print(f"[DEBUG] check_access: path={request.path}, ip={ip}, session.authorized={session.get('authorized')}")
 
-    # 检查 IP 是否被封禁
+    # 1. IP 封禁检查
     if is_ip_blocked(ip):
         print(f"[DEBUG] IP {ip} is blocked")
         if request.path.startswith('/yard/admin/api/'):
             return jsonify({'error': 'IP blocked'}), 403
-        if session.get('authorized'):
-            session.clear()
-            return render_template('login.html', error='您的 IP 已被封禁，请稍后再试', next_url=request.url), 403
-        else:
-            return render_template('login.html', error='您的 IP 已被封禁，请稍后再试', next_url=request.url), 403
+        session.clear()
+        return render_template('login.html', error='您的 IP 已被封禁，请稍后再试', next_url=request.url), 403
 
-    # 检查是否已授权（session）
+    device_id = session.get('device_id')
+    db_authorized = False
+
+    # 2. 如果 session 已授权，必须强制校验数据库中 authorized 是否为 1（取最新记录）
     if session.get('authorized'):
-        print(f"[DEBUG] Session authorized, updating last_access for IP {ip}")
-        authorize_ip(ip, request.headers.get('User-Agent', ''), request.path)
+        conn = get_db_conn()
+        cur = conn.cursor()
+        if device_id:
+            cur.execute('SELECT authorized FROM access_whitelist WHERE device_id=? AND date=? ORDER BY id DESC LIMIT 1', (device_id, today))
+            row = cur.fetchone()
+            if row and row[0] == 1:
+                db_authorized = True
+        if not db_authorized:
+            cur.execute('SELECT authorized FROM access_whitelist WHERE ip=? AND date=? ORDER BY id DESC LIMIT 1', (ip, today))
+            row = cur.fetchone()
+            if row and row[0] == 1:
+                db_authorized = True
+        conn.close()
+
+        if not db_authorized:
+            print(f"[DEBUG] Database authorized=0 for device_id={device_id} or ip={ip}, forcing re-login")
+            session.clear()
+            return render_template('login.html', error='管理员已要求重新登录，请重新验证', next_url=request.url), 401
+
+        # 校验通过：更新白名单记录（刷新 last_access / IP / UA）
+        authorize_ip(ip, request.headers.get('User-Agent', ''), request.path, device_id, None)
         return None
 
-    # 检查 IP 是否在白名单中
+    # 3. 未登录（session 无效）：检查 IP 是否在白名单中（兼容旧逻辑）
     if is_ip_authorized(ip):
-        print(f"[DEBUG] IP {ip} is in whitelist, setting session and updating last_access")
-        session['authorized'] = True
-        session['role'] = 'user'
-        authorize_ip(ip, request.headers.get('User-Agent', ''), request.path)
-        return None
+        conn = get_db_conn()
+        cur = conn.cursor()
+        cur.execute('SELECT nickname, device_id FROM access_whitelist WHERE ip=? AND date=? AND authorized=1 ORDER BY id DESC LIMIT 1', (ip, today))
+        row = cur.fetchone()
+        conn.close()
+        if row and row[0]:
+            # 有昵称且 authorized=1 → 恢复 session
+            session['authorized'] = True
+            session['role'] = 'user'
+            if row[1]:
+                session['device_id'] = row[1]
+            authorize_ip(ip, request.headers.get('User-Agent', ''), request.path, session.get('device_id'), None)
+            return None
+        else:
+            # 没有昵称或 authorized=0 → 跳登录页
+            return render_template('login.html', error='请设置您的昵称以便继续访问', next_url=request.url), 401
 
-    # 未授权，跳转登录
+    # 4. 完全未授权 → 跳转登录
     print(f"[DEBUG] Unauthorized, redirect to login")
     return render_template('login.html', next_url=request.url), 401
-# ========== 原有路由 ==========
+
+# ========== 原有路由（group / yard / etc. 保持不变） ==========
 @app.route('/')
 def index():
     return '''<!DOCTYPE html>

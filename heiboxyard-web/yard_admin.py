@@ -8,6 +8,7 @@ heiboxyard Web 管理端 — Flask Blueprint
 import json
 import sqlite3
 import os
+import secrets
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -320,23 +321,19 @@ def reports_list():
             groups[basename]['html'] = f
         else:
             groups[basename]['image'] = f
-        # 记录最新修改时间
         if groups[basename]['mtime'] is None or f.stat().st_mtime > groups[basename]['mtime']:
             groups[basename]['mtime'] = f.stat().st_mtime
 
-    # 构建报告列表，按修改时间降序
     report_items = []
     for basename, info in groups.items():
         if info['html'] is None and info['image'] is None:
             continue
-        # 确定类型标签
         if info['html'] and info['image']:
             type_label = '网页+图片'
         elif info['html']:
             type_label = '网页'
         else:
             type_label = '图片'
-        # 获取大小（优先取HTML，否则取图片）
         size_bytes = 0
         if info['html']:
             size_bytes += info['html'].stat().st_size
@@ -362,7 +359,6 @@ def reports_list():
             'has_image': bool(info['image'])
         })
 
-    # 按修改时间降序
     report_items.sort(key=lambda x: x['mtime'], reverse=True)
 
     return render_template('reports.html',
@@ -376,7 +372,7 @@ def reports_list():
 def summary_manage():
     window_no = request.args.get('window', get_current_window_no())
     window_start, _ = get_window_by_no(window_no)
-    
+
     conn = get_db()
     cur = conn.cursor()
     cur.execute("""
@@ -386,11 +382,11 @@ def summary_manage():
     """, (window_start,))
     row = cur.fetchone()
     conn.close()
-    
+
     summary = None
     if row:
         summary = {'comment': row[0], 'model': row[1], 'analyzed_at': row[2]}
-    
+
     conn = get_db()
     cur = conn.cursor()
     cur.execute("SELECT DISTINCT date_str FROM posts ORDER BY date_str DESC")
@@ -399,7 +395,7 @@ def summary_manage():
     if window_no not in all_windows:
         all_windows.append(window_no)
         all_windows.sort(reverse=True)
-    
+
     return render_template('summary.html',
         window_no=window_no,
         summary=summary,
@@ -409,8 +405,6 @@ def summary_manage():
     )
 
 # ========== API 代理路由 ==========
-# 注意：所有 /api/* 路由都代理到插件 HTTP API
-
 @yard_bp.route('/api/stats')
 def api_stats():
     return proxy_request('GET', '/api/stats')
@@ -524,7 +518,7 @@ def api_task_status(task_id):
     return proxy_request('GET', f'/api/task/{task_id}')
 
 # ================================================================
-# ========== 以下为新增：白名单与封禁管理（仅管理员） ==========
+# ========== 白名单与封禁管理（仅管理员） ==========
 # ================================================================
 
 def parse_duration(duration_str):
@@ -542,20 +536,18 @@ def parse_duration(duration_str):
             return timedelta(minutes=minutes)
         except:
             pass
-    # 默认 1 小时
     return timedelta(hours=1)
 
 @yard_bp.route('/whitelist')
 def whitelist():
     """白名单管理页面，仅管理员可访问"""
     if not session.get('authorized') or session.get('role') != 'admin':
-        abort(403)  # 返回 403 Forbidden
+        abort(403)
 
     today = datetime.now().strftime('%Y-%m-%d')
     conn = get_db()
     cur = conn.cursor()
 
-    # 在线人数：最近5分钟活跃
     five_min_ago = (datetime.now() - timedelta(minutes=5)).strftime('%Y-%m-%d %H:%M:%S')
     cur.execute('''
         SELECT COUNT(DISTINCT ip) as online
@@ -564,16 +556,16 @@ def whitelist():
     ''', (today, five_min_ago))
     online_count = cur.fetchone()[0]
 
-    # 今日白名单
+    # 今日白名单 - 新增 nickname, device_id, user_identifier 等全部字段
     cur.execute('''
-        SELECT id, ip, first_access, last_access, user_agent, path
+        SELECT id, ip, first_access, last_access, user_agent, path,
+               user_identifier, device_id, nickname
         FROM access_whitelist
         WHERE date = ? AND authorized = 1
         ORDER BY first_access DESC
     ''', (today,))
     whitelist_entries = [dict(row) for row in cur.fetchall()]
 
-    # 当前封禁列表（blocked_until > now）
     now = datetime.now().isoformat()
     cur.execute('''
         SELECT id, ip, failed_attempts, last_fail_time, blocked_until, note
@@ -592,9 +584,64 @@ def whitelist():
         now=datetime.now()
     )
 
+# ========== 新增：更新单条记录的标识符 ==========
+@yard_bp.route('/whitelist/update-identifier', methods=['POST'])
+def update_identifier():
+    """更新某条记录的 user_identifier，若留空则自动生成新 UID"""
+    if not session.get('authorized') or session.get('role') != 'admin':
+        return jsonify({'error': 'Unauthorized'}), 403
+
+    data = request.get_json() or {}
+    record_id = data.get('id')
+    new_identifier = data.get('identifier', '').strip()
+
+    if not record_id:
+        return jsonify({'success': False, 'error': '缺少记录 ID'}), 400
+
+    if not new_identifier:
+        new_identifier = f"UID-{secrets.token_hex(4).upper()}"
+
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute('UPDATE access_whitelist SET user_identifier = ? WHERE id = ?', (new_identifier, record_id))
+    affected = cur.rowcount
+    conn.commit()
+    conn.close()
+
+    if affected:
+        return jsonify({'success': True, 'identifier': new_identifier})
+    else:
+        return jsonify({'success': False, 'error': '记录不存在'}), 404
+
+# ========== 新增：批量合并到同一个标识符 ==========
+@yard_bp.route('/whitelist/batch-merge', methods=['POST'])
+def batch_merge():
+    """将多条记录合并到同一个 user_identifier"""
+    if not session.get('authorized') or session.get('role') != 'admin':
+        return jsonify({'error': 'Unauthorized'}), 403
+
+    data = request.get_json() or {}
+    ids = data.get('ids', [])
+    target_uid = data.get('target_identifier', '').strip()
+
+    if not ids:
+        return jsonify({'success': False, 'error': '请选择至少一条记录'}), 400
+    if not target_uid:
+        return jsonify({'success': False, 'error': '请输入目标标识符'}), 400
+
+    conn = get_db()
+    cur = conn.cursor()
+    placeholders = ','.join('?' * len(ids))
+    cur.execute(f'UPDATE access_whitelist SET user_identifier = ? WHERE id IN ({placeholders})', [target_uid] + ids)
+    affected = cur.rowcount
+    conn.commit()
+    conn.close()
+
+    return jsonify({'success': True, 'merged': affected})
+
+# ========== 原有封禁管理 ==========
 @yard_bp.route('/whitelist/delete/<int:id>', methods=['POST'])
 def whitelist_delete(id):
-    """解封指定封禁记录（仅管理员）"""
     if not session.get('authorized') or session.get('role') != 'admin':
         return jsonify({'error': 'Unauthorized'}), 403
 
@@ -611,7 +658,6 @@ def whitelist_delete(id):
 
 @yard_bp.route('/whitelist/block', methods=['POST'])
 def whitelist_block():
-    """手动封禁 IP（仅管理员）"""
     if not session.get('authorized') or session.get('role') != 'admin':
         return jsonify({'error': 'Unauthorized'}), 403
 
@@ -621,7 +667,6 @@ def whitelist_block():
     if not ip:
         return jsonify({'success': False, 'error': 'IP 不能为空'}), 400
 
-    # 验证 IP 格式（简单）
     import re
     if not re.match(r'^(\d{1,3}\.){3}\d{1,3}$', ip):
         return jsonify({'success': False, 'error': '无效的 IP 格式'}), 400
@@ -631,7 +676,6 @@ def whitelist_block():
 
     conn = get_db()
     cur = conn.cursor()
-    # 如果该 IP 已存在，则更新封禁时间，否则插入
     cur.execute('SELECT id FROM ip_blocklist WHERE ip = ?', (ip,))
     row = cur.fetchone()
     if row:
@@ -649,11 +693,28 @@ def whitelist_block():
     conn.close()
     return jsonify({'success': True, 'message': f'IP {ip} 已封禁至 {blocked_until.strftime("%Y-%m-%d %H:%M")}'})
 
+# ========== 强制所有人重新登录（仅管理员） ==========
+@yard_bp.route('/whitelist/force-logout', methods=['POST'])
+def force_logout():
+    """将今日所有白名单记录标记为未授权，强制所有人重新登录"""
+    if not session.get('authorized') or session.get('role') != 'admin':
+        return jsonify({'error': 'Unauthorized'}), 403
+
+    today = datetime.now().strftime('%Y-%m-%d')
+    conn = get_db()
+    cur = conn.cursor()
+    # 将今天所有授权记录标记为未授权（authorized=0）
+    cur.execute('UPDATE access_whitelist SET authorized = 0 WHERE date = ? AND authorized = 1', (today,))
+    affected = cur.rowcount
+    conn.commit()
+    conn.close()
+
+    return jsonify({'success': True, 'message': f'已强制 {affected} 条授权记录重新登录'})
+
 @yard_bp.route('/api/online')
 def api_online():
     conn = get_db()
     cur = conn.cursor()
-    # 直接用 SQLite 时间函数，避免格式问题
     cur.execute('''
         SELECT COUNT(DISTINCT ip) as online
         FROM access_whitelist
@@ -665,22 +726,17 @@ def api_online():
 
 @yard_bp.route('/download/<filename>')
 def download_report(filename):
-    """提供文件下载（强制下载，不预览）"""
     from pathlib import Path
     reports_dir = Path(get_reports_dir())
     safe_path = reports_dir / filename
-    # 安全检查：防止路径遍历攻击
     try:
-        # 确保文件在 reports_dir 内（Python 3.9+）
         if not safe_path.resolve().is_relative_to(reports_dir.resolve()):
             abort(403)
     except AttributeError:
-        # Python 3.8 及以下兼容写法
         try:
             safe_path.resolve().relative_to(reports_dir.resolve())
         except ValueError:
             abort(403)
     if not safe_path.exists() or not safe_path.is_file():
         abort(404)
-    # 强制下载
     return send_file(safe_path, as_attachment=True, download_name=filename)
