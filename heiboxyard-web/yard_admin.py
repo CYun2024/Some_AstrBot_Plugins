@@ -13,7 +13,7 @@ from pathlib import Path
 
 from flask import (
     Blueprint, render_template, request, jsonify,
-    current_app, abort, flash, redirect, url_for, session
+    current_app, abort, flash, redirect, url_for, session, send_file
 )
 
 # 导入 requests 用于代理 API
@@ -307,27 +307,66 @@ def reports_list():
     if not reports_dir.exists():
         reports_dir.mkdir(parents=True, exist_ok=True)
 
-    report_files = []
-    for f in sorted(reports_dir.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True):
-        if f.suffix.lower() in ('.html', '.png', '.jpg', '.jpeg'):
-            stat = f.stat()
-            size = stat.st_size
-            if size < 1024:
-                size_str = f"{size} B"
-            elif size < 1024 * 1024:
-                size_str = f"{size / 1024:.1f} KB"
-            else:
-                size_str = f"{size / (1024 * 1024):.1f} MB"
+    # 收集所有文件，按basename分组
+    groups = {}
+    for f in reports_dir.iterdir():
+        if f.suffix.lower() not in ('.html', '.png', '.jpg', '.jpeg'):
+            continue
+        basename = f.stem  # 不含扩展名
+        if basename not in groups:
+            groups[basename] = {'html': None, 'image': None, 'mtime': None}
+        ext = f.suffix.lower()
+        if ext == '.html':
+            groups[basename]['html'] = f
+        else:
+            groups[basename]['image'] = f
+        # 记录最新修改时间
+        if groups[basename]['mtime'] is None or f.stat().st_mtime > groups[basename]['mtime']:
+            groups[basename]['mtime'] = f.stat().st_mtime
 
-            report_files.append({
-                'name': f.name,
-                'size': size_str,
-                'mtime': datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
-                'type': 'html' if f.suffix.lower() == '.html' else 'image',
-                'path': str(f)
-            })
+    # 构建报告列表，按修改时间降序
+    report_items = []
+    for basename, info in groups.items():
+        if info['html'] is None and info['image'] is None:
+            continue
+        # 确定类型标签
+        if info['html'] and info['image']:
+            type_label = '网页+图片'
+        elif info['html']:
+            type_label = '网页'
+        else:
+            type_label = '图片'
+        # 获取大小（优先取HTML，否则取图片）
+        size_bytes = 0
+        if info['html']:
+            size_bytes += info['html'].stat().st_size
+        if info['image']:
+            size_bytes += info['image'].stat().st_size
+        if size_bytes < 1024:
+            size_str = f"{size_bytes} B"
+        elif size_bytes < 1024 * 1024:
+            size_str = f"{size_bytes / 1024:.1f} KB"
+        else:
+            size_str = f"{size_bytes / (1024 * 1024):.1f} MB"
+
+        mtime_str = datetime.fromtimestamp(info['mtime']).strftime("%Y-%m-%d %H:%M:%S")
+
+        report_items.append({
+            'basename': basename,
+            'html_name': info['html'].name if info['html'] else None,
+            'image_name': info['image'].name if info['image'] else None,
+            'size': size_str,
+            'mtime': mtime_str,
+            'type': type_label,
+            'has_html': bool(info['html']),
+            'has_image': bool(info['image'])
+        })
+
+    # 按修改时间降序
+    report_items.sort(key=lambda x: x['mtime'], reverse=True)
+
     return render_template('reports.html',
-        reports=report_files,
+        reports=report_items,
         nav_window=get_current_window_no(),
         current_window_no=get_current_window_no()
     )
@@ -623,3 +662,25 @@ def api_online():
     count = cur.fetchone()[0]
     conn.close()
     return jsonify({'online': count})
+
+@yard_bp.route('/download/<filename>')
+def download_report(filename):
+    """提供文件下载（强制下载，不预览）"""
+    from pathlib import Path
+    reports_dir = Path(get_reports_dir())
+    safe_path = reports_dir / filename
+    # 安全检查：防止路径遍历攻击
+    try:
+        # 确保文件在 reports_dir 内（Python 3.9+）
+        if not safe_path.resolve().is_relative_to(reports_dir.resolve()):
+            abort(403)
+    except AttributeError:
+        # Python 3.8 及以下兼容写法
+        try:
+            safe_path.resolve().relative_to(reports_dir.resolve())
+        except ValueError:
+            abort(403)
+    if not safe_path.exists() or not safe_path.is_file():
+        abort(404)
+    # 强制下载
+    return send_file(safe_path, as_attachment=True, download_name=filename)

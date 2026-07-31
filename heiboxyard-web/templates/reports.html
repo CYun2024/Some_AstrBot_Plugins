@@ -20,20 +20,30 @@
         {% for r in reports %}
         <div class="report-item">
             <div class="report-info">
-                {% if r.type == 'html' %}
                 <span class="report-icon">&#128202;</span>
-                {% else %}
-                <span class="report-icon">&#127748;</span>
-                {% endif %}
-                <span class="report-name">{{ r.name }}</span>
+                <span class="report-name">{{ r.basename }}</span>
                 <span class="report-meta">{{ r.mtime }}</span>
                 <span class="report-meta">{{ r.size }}</span>
+                <span class="report-meta">{{ r.type }}</span>
             </div>
             <div class="report-actions">
-                {% if r.type == 'html' %}
-                <a href="/yard/view/{{ r.name }}" target="_blank" class="btn btn-ghost btn-sm">预览</a>
+                <!-- 图片查看（左） -->
+                {% if r.has_image %}
+                <a href="/yard/image/{{ r.image_name }}" target="_blank" class="btn btn-ghost btn-sm">图片查看</a>
                 {% else %}
-                <a href="/yard/image/{{ r.name }}" target="_blank" class="btn btn-ghost btn-sm">查看</a>
+                <span class="btn btn-ghost btn-sm disabled" style="opacity:0.4; cursor:not-allowed;">图片查看</span>
+                {% endif %}
+                <!-- 网页查看（右） -->
+                {% if r.has_html %}
+                <a href="/yard/view/{{ r.html_name }}" target="_blank" class="btn btn-ghost btn-sm">网页查看</a>
+                {% else %}
+                <span class="btn btn-ghost btn-sm disabled" style="opacity:0.4; cursor:not-allowed;">网页查看</span>
+                {% endif %}
+                <!-- 下载：如果两者都有，下载HTML？或提供两个下载？用户只要求一个下载按钮，我们可下载HTML，如果缺则下载图片 -->
+                {% if r.has_html %}
+                <a href="{{ url_for('yard_admin.download_report', filename=r.html_name) }}" class="btn btn-primary btn-sm">下载</a>
+                {% elif r.has_image %}
+                <a href="{{ url_for('yard_admin.download_report', filename=r.image_name) }}" class="btn btn-primary btn-sm">下载</a>
                 {% endif %}
             </div>
         </div>
