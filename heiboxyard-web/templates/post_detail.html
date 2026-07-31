@@ -13,9 +13,9 @@
     </div>
     <h1 class="post-detail-title">{{ post.title or '(无标题)' }}</h1>
     <div class="post-detail-meta">
-        <span class="meta-item">&#128100; @{{ post.username or '匿名' }}</span>
-        <span class="meta-item">&#128336; {{ ts_to_bj_str(post.create_at) }}</span>
-        <span class="meta-item">&#128279; ID: {{ post.link_id }}</span>
+        <span class="meta-item">@{{ post.username or '匿名' }}</span>
+        <span class="meta-item">{{ ts_to_bj_str(post.create_at) }}</span>
+        <span class="meta-item">ID: {{ post.link_id }}</span>
     </div>
     {% if post.topics %}
     <div class="post-topics">
@@ -31,7 +31,7 @@
     <div class="detail-main">
         <!-- 内容 -->
         <div class="content-card">
-            <h3 class="card-title">&#128196; 帖子内容</h3>
+            <h3 class="card-title">帖子内容</h3>
             <div class="post-content-text">
                 {{ post.content or '(无内容)' }}
             </div>
@@ -40,7 +40,7 @@
         <!-- 图片 -->
         {% if post.image_paths %}
         <div class="content-card">
-            <h3 class="card-title">&#128247; 图片 ({{ post.image_paths|length }}张)</h3>
+            <h3 class="card-title">图片 ({{ post.image_paths|length }}张)</h3>
             <div class="image-grid">
                 {% for img in post.image_paths %}
                 <div class="image-item">
@@ -55,7 +55,7 @@
         <!-- 热评 -->
         {% if comments %}
         <div class="content-card">
-            <h3 class="card-title">&#128172; 热评 ({{ comments|length }}条)</h3>
+            <h3 class="card-title">热评 ({{ comments|length }}条)</h3>
             <div class="comments-list">
                 {% for c in comments %}
                 <div class="comment-item">
@@ -65,7 +65,7 @@
                         {% if c.time_str %}
                         <span class="comment-time">{{ c.time_str }}</span>
                         {% endif %}
-                        <span class="comment-up">&#10084; {{ c.up or 0 }}</span>
+                        <span class="comment-up"><span class="heart-icon">♥</span> {{ c.up or 0 }}</span>
                     </div>
                     <div class="comment-text">{{ c.text or '(无内容)' }}</div>
                     {% if c.images %}
@@ -86,7 +86,7 @@
     <div class="detail-sidebar">
         <!-- AI 评论 -->
         <div class="sidebar-card">
-            <h3 class="sidebar-title">&#129302; AI 评论</h3>
+            <h3 class="sidebar-title"> AI 评论</h3>
             {% if post.ai_comment %}
             <div class="ai-comment-box" id="aiCommentBox">
                 <p class="ai-comment-text">{{ post.ai_comment }}</p>
@@ -104,14 +104,14 @@
             {% endif %}
             <div class="sidebar-actions">
                 <button class="btn btn-primary btn-sm btn-block" onclick="editComment({{ post.link_id }})">
-                    &#9998; 编辑评论
+                    编辑评论
                 </button>
                 <button class="btn btn-secondary btn-sm btn-block" onclick="analyzePost({{ post.link_id }})">
-                    &#129302; 生成 AI 评论
+                    生成 AI 评论
                 </button>
                 {% if post.ai_comment %}
                 <button class="btn btn-danger btn-sm btn-block" onclick="deleteAnalysis({{ post.link_id }})">
-                    &#128465; 删除评论
+                    删除评论
                 </button>
                 {% endif %}
             </div>
@@ -119,7 +119,7 @@
 
         <!-- 调整顺序 -->
         <div class="sidebar-card">
-            <h3 class="sidebar-title">&#8646; 调整顺序</h3>
+            <h3 class="sidebar-title">调整顺序</h3>
             <p class="sidebar-hint">与同窗口其他帖子交换编号</p>
             {% if same_window_posts %}
             <div class="swap-list">
@@ -138,8 +138,8 @@
 
         <!-- 调整窗口 -->
         <div class="sidebar-card">
-            <h3 class="sidebar-title">&#128260; 调整窗口</h3>
-            <p class="sidebar-hint">将帖子移动到其他窗口 (存在间歇性触发bug，如果无法移动请调整顺序后移动)</p>
+            <h3 class="sidebar-title">调整窗口</h3>
+            <p class="sidebar-hint">将帖子移动到其他窗口 <span style="color: #FF8C00;">(存在间歇性触发bug，如果无法移动请调整顺序后移动)</span></p>
             <select class="filter-select" id="targetWindow" style="width: 100%; margin-bottom: 8px;">
                 {% for w in all_windows %}
                 {% if w != post.date_str %}
@@ -149,6 +149,15 @@
             </select>
             <button class="btn btn-primary btn-sm btn-block" onclick="moveWindow({{ post.link_id }})">
                 确认移动
+            </button>
+        </div>
+
+        <!-- 重新拉取帖子 -->
+        <div class="sidebar-card">
+            <h3 class="sidebar-title">重新拉取帖子</h3>
+            <p class="sidebar-hint">重新拉取帖子的所有内容（包括图片与评论）</p>
+            <button class="btn btn-secondary btn-sm btn-block" onclick="refreshPost({{ post.link_id }})" style="margin-top: 8px;">
+                             ⟳ 重新拉取帖子
             </button>
         </div>
     </div>
@@ -289,6 +298,28 @@ async function moveWindow(linkId) {
         }
     } catch (e) {
         showToast('请求失败: ' + e.message, 'error');
+    } finally {
+        hideLoading();
+    }
+}
+
+async function refreshPost(linkId) {
+    if (!confirm('确定要从源重新拉取此帖子的最新内容和评论吗？')) return;
+    showLoading('正在拉取帖子...');
+    try {
+        const res = await fetch(`/yard/admin/api/post/${linkId}/refresh`, {
+            method: 'POST'
+        });
+        const data = await res.json();
+        if (data.success) {
+            showToast(data.message || '刷新成功', 'success');
+            // 刷新页面以显示更新后的数据
+            setTimeout(() => location.reload(), 1000);
+        } else {
+            showToast(data.error || '刷新失败', 'error');
+        }
+    } catch (e) {
+        showToast('请求异常: ' + e.message, 'error');
     } finally {
         hideLoading();
     }

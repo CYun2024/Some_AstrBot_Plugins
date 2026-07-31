@@ -1070,6 +1070,13 @@ body {
     margin-left: 12px;
 }
 
+/* 爱心图标 */
+.heart-icon {
+    color: #ef4444;
+    margin-right: 4px;
+    font-size: 14px;
+}
+
 /* 响应式：小屏幕下调整 */
 @media (max-width: 640px) {
     .report-item {

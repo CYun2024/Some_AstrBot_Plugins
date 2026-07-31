@@ -7,7 +7,6 @@
 <div class="section">
     <div class="section-header">
         <h2 class="section-title">
-            <span class="section-icon">&#128240;</span>
             已生成的晚报
         </h2>
         <button class="btn btn-primary btn-sm" onclick="showToast('这个按钮还没开发', 'info')">
@@ -20,7 +19,6 @@
         {% for r in reports %}
         <div class="report-item">
             <div class="report-info">
-                <span class="report-icon">&#128202;</span>
                 <span class="report-name">{{ r.basename }}</span>
                 <span class="report-meta">{{ r.mtime }}</span>
                 <span class="report-meta">{{ r.size }}</span>

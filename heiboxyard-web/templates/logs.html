@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 
 {% block title %}操作日志{% endblock %}
-{% block page_title %}操作日志{% endblock %}
+{% block page_title %}操作日志与留言板{% endblock %}
 
 {% block extra_css %}
 <style>
@@ -117,7 +117,7 @@
     line-height: 1.55;
 }
 
-/* 帖子引用：去掉虚线，纯文字链接，可点击跳转 */
+/* 帖子引用 */
 .post-ref {
     display: inline;
     color: var(--kimi-chart-1, #3b82f6);
@@ -285,27 +285,179 @@
     word-break: break-all;
     white-space: pre-wrap;
 }
+
+/* ========== 两栏布局 ========== */
+.logs-layout {
+    display: flex;
+    gap: var(--space-5);
+    align-items: flex-start;
+}
+.logs-main {
+    flex: 2;
+    min-width: 0;
+}
+.logs-sidebar {
+    flex: 1;
+    min-width: 260px;
+    position: sticky;
+    top: calc(var(--top-bar-height) + var(--space-5));
+    align-self: start;
+}
+
+/* ========== 留言板 ========== */
+.message-board {
+    background: var(--kimi-color-surface-raised, #fff);
+    border: 1px solid var(--kimi-color-border, #e5e5e5);
+    border-radius: var(--radius-xl);
+    padding: var(--space-4);
+}
+.message-board-title {
+    font-size: 16px;
+    font-weight: 500;
+    margin-bottom: var(--space-3);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.message-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    max-height: calc(100vh - 300px);
+    min-height: 150px;
+    overflow-y: auto;
+    margin-bottom: var(--space-3);
+    padding-right: 4px;
+}
+.message-item {
+    padding: var(--space-2) var(--space-3);
+    background: var(--kimi-color-surface-muted, #f8f8f8);
+    border-radius: var(--radius-md);
+    border-left: 3px solid var(--kimi-chart-1, #3b82f6);
+}
+.message-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 2px;
+}
+.message-nick {
+    font-weight: 600;
+    font-size: 14px;
+    color: var(--kimi-color-text-primary);
+}
+.message-time {
+    font-size: 12px;
+    color: var(--kimi-color-text-tertiary, #999);
+}
+.message-content {
+    font-size: 14px;
+    color: var(--kimi-color-text-secondary, #444);
+    word-break: break-word;
+    white-space: pre-wrap;
+}
+.message-delete {
+    background: none;
+    border: none;
+    color: var(--kimi-color-danger, #ef4444);
+    cursor: pointer;
+    font-size: 13px;
+    padding: 0 4px;
+    border-radius: 4px;
+}
+.message-delete:hover {
+    background: color-mix(in srgb, var(--kimi-color-danger, #ef4444) 12%, transparent);
+}
+.message-form {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    border-top: 1px solid var(--kimi-color-border, #e5e5e5);
+    padding-top: var(--space-3);
+}
+.message-form textarea {
+    width: 100%;
+    padding: var(--space-2) var(--space-3);
+    border: 1px solid var(--kimi-color-border, #e5e5e5);
+    border-radius: var(--radius-md);
+    font-size: 14px;
+    resize: vertical;
+    min-height: 60px;
+    font-family: inherit;
+    background: var(--kimi-color-surface, #fafafa);
+}
+.message-form textarea:focus {
+    outline: none;
+    border-color: var(--kimi-color-text-primary, #1a1a1a);
+}
+.message-form .btn-row {
+    display: flex;
+    justify-content: flex-end;
+    gap: var(--space-2);
+}
+.message-empty {
+    text-align: center;
+    padding: var(--space-4);
+    color: var(--kimi-color-text-tertiary, #999);
+    font-size: 14px;
+}
+
+@media (max-width: 768px) {
+    .logs-layout {
+        flex-direction: column;
+    }
+    .logs-sidebar {
+        position: static;
+        width: 100%;
+    }
+    /* 新增移动端留言板高度适配 */
+    .message-list {
+        max-height: 300px;
+    }
+}
 </style>
 {% endblock %}
 
 {% block content %}
-<div class="log-filter-bar">
-    <div class="filter-group">
-        <label style="font-size:13px;color:var(--kimi-color-text-tertiary);">日期</label>
-        <input type="date" class="filter-input" id="logDate" style="min-width:140px;">
+<div class="logs-layout">
+    <!-- ===== 左侧：日志时间线 ===== -->
+    <div class="logs-main">
+        <div class="log-filter-bar">
+            <div class="filter-group">
+                <label style="font-size:13px;color:var(--kimi-color-text-tertiary);">日期</label>
+                <input type="date" class="filter-input" id="logDate" style="min-width:140px;">
+            </div>
+            <button class="btn btn-primary btn-sm" onclick="loadLogs(1)">查询</button>
+            <span style="margin-left:auto;font-size:13px;color:var(--kimi-color-text-tertiary);">
+                共 <span id="totalCount" style="font-weight:600;color:var(--kimi-color-text-primary);">0</span> 条记录
+            </span>
+        </div>
+
+        <div class="timeline-wrap" id="timelineWrap">
+            <div class="timeline-empty">请选择日期并点击查询</div>
+        </div>
+
+        <div class="timeline-pagination" id="pagination"></div>
     </div>
-    <button class="btn btn-primary btn-sm" onclick="loadLogs(1)">查询</button>
-    <span style="margin-left:auto;font-size:13px;color:var(--kimi-color-text-tertiary);">
-        共 <span id="totalCount" style="font-weight:600;color:var(--kimi-color-text-primary);">0</span> 条记录
-    </span>
+
+    <!-- ===== 右侧：留言板 ===== -->
+    <div class="logs-sidebar">
+        <div class="message-board">
+            <div class="message-board-title">留言板</div>
+            <div class="message-list" id="messageList">
+                <div class="message-empty">加载中...</div>
+            </div>
+            <div class="message-form">
+                <textarea id="messageInput" placeholder="说点什么…" rows="2"></textarea>
+                <div class="btn-row">
+                    <button class="btn btn-primary btn-sm" id="messageSubmit">发送</button>
+                </div>
+            </div>
+        </div>
+    </div>
 </div>
 
-<div class="timeline-wrap" id="timelineWrap">
-    <div class="timeline-empty">请选择日期并点击查询</div>
-</div>
-
-<div class="timeline-pagination" id="pagination"></div>
-
+<!-- 原有的 tooltip -->
 <div class="log-tooltip" id="globalTooltip">
     <div class="log-tooltip-title" id="tooltipTitle"></div>
     <div class="log-tooltip-content" id="tooltipContent"></div>
@@ -314,6 +466,10 @@
 
 {% block extra_js %}
 <script>
+// 注入用户角色（用于控制删除按钮显示）
+const userRole = '{{ session.get("role") }}';
+
+// ========== 原有日志逻辑 ==========
 let currentPage = 1;
 
 const opMap = {
@@ -347,20 +503,17 @@ function formatTime(ts) {
     return d.toLocaleTimeString('zh-CN', { hour12: false, timeZone: 'Asia/Shanghai' });
 }
 
-/* 帖子引用：可点击跳转到详情页 */
 function renderPostRef(post) {
-    // 增加对 link_id 有效性的判断，只要没拿到有效的数字 ID 就不生成链接
     if (!post || post.link_id == null || post.link_id === 0) {
         return '<span class="post-ref missing">未知帖子</span>';
     }
     const title = post.title || '(无标题)';
     const tipTitle = `编号: #${post.daily_no}　作者: @${post.username}`;
     const tipContent = post.content_preview || '无内容预览';
-    const linkId = post.link_id; // 此时一定有效
+    const linkId = post.link_id;
     return `<a href="/yard/admin/post/${linkId}" class="post-ref" data-tip-title="${escapeHtml(tipTitle)}" data-tip-content="${escapeHtml(tipContent)}">${escapeHtml(title)}</a>`;
 }
 
-/* 评论对比组件 */
 function renderCommentCompare(oldText, newText, isDelete) {
     const oldDisplay = oldText 
         ? escapeHtml(oldText) 
@@ -414,7 +567,6 @@ function renderItem(item) {
     const op = item.operation_type;
     const detail = (typeof item.detail === 'object' && item.detail !== null) ? item.detail : {};
 
-    // 判断是否是失败操作
     const isFailed = op.endsWith('_failed');
     const baseOp = isFailed ? op.replace('_failed', '') : op;
     let cfg = opMap[baseOp] || { label: baseOp, class: 'op-default' };
@@ -424,7 +576,6 @@ function renderItem(item) {
 
     let body = '';
 
-    // ========== 失败操作统一处理 ==========
     if (isFailed) {
         cfg = { ...cfg, label: cfg.label + '失败', class: 'op-delete' };
         const err = detail.error || '未知错误';
@@ -483,7 +634,6 @@ function renderItem(item) {
         }
         body += `<div class="fail-error"><span>❌</span><span>${escapeHtml(err)}</span></div>`;
     } 
-    // ========== 正常操作 ==========
     else {
         switch(op) {
             case 'swap_order':
@@ -597,7 +747,6 @@ function loadLogs(page) {
         });
 }
 
-/* ========== Tooltip ========== */
 function bindTooltips() {
     const tip = document.getElementById('globalTooltip');
     const titleEl = document.getElementById('tooltipTitle');
@@ -632,10 +781,108 @@ function positionTooltip(target) {
     tip.style.left = left + 'px';
 }
 
+// ========== 留言板逻辑 ==========
+function loadMessages() {
+    fetch('/yard/admin/api/messages')
+        .then(r => r.json())
+        .then(messages => {
+            const container = document.getElementById('messageList');
+            if (!messages || messages.length === 0) {
+                container.innerHTML = '<div class="message-empty">还没有留言，来说两句吧</div>';
+                return;
+            }
+            let html = '';
+            messages.forEach(msg => {
+                const time = new Date(msg.timestamp * 1000).toLocaleString('zh-CN', { hour12: false });
+                const deleteBtn = (userRole === 'admin') 
+                    ? `<button class="message-delete" onclick="deleteMessage(${msg.id})">✕</button>`
+                    : '';
+                html += `
+                    <div class="message-item">
+                        <div class="message-header">
+                            <span class="message-nick">${escapeHtml(msg.nickname)}</span>
+                            <span class="message-time">${escapeHtml(time)}</span>
+                            ${deleteBtn}
+                        </div>
+                        <div class="message-content">${escapeHtml(msg.content)}</div>
+                    </div>
+                `;
+            });
+            container.innerHTML = html;
+            // 滚动到底部（最新留言）
+            container.scrollTop = container.scrollHeight;
+        })
+        .catch(err => {
+            document.getElementById('messageList').innerHTML = '<div class="message-empty">加载留言失败</div>';
+            console.error(err);
+        });
+}
+
+function submitMessage() {
+    const input = document.getElementById('messageInput');
+    const content = input.value.trim();
+    if (!content) {
+        showToast('内容不能为空', 'error');
+        return;
+    }
+    fetch('/yard/admin/api/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content })
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.success) {
+            input.value = '';
+            showToast('留言发送成功', 'success');
+            loadMessages();
+        } else {
+            showToast(data.error || '发送失败', 'error');
+        }
+    })
+    .catch(err => {
+        showToast('网络错误', 'error');
+        console.error(err);
+    });
+}
+
+function deleteMessage(id) {
+    if (!confirm('确定要删除这条留言吗？')) return;
+    fetch(`/yard/admin/api/messages/${id}`, { method: 'DELETE' })
+        .then(r => r.json())
+        .then(data => {
+            if (data.success) {
+                showToast('已删除', 'success');
+                loadMessages();
+            } else {
+                showToast(data.error || '删除失败', 'error');
+            }
+        })
+        .catch(err => {
+            showToast('网络错误', 'error');
+            console.error(err);
+        });
+}
+
+// ========== 页面初始化 ==========
 document.addEventListener('DOMContentLoaded', () => {
+    // 日志日期默认今天
     const n = new Date();
     document.getElementById('logDate').value = `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}-${String(n.getDate()).padStart(2,'0')}`;
     loadLogs(1);
+
+    // 留言板
+    loadMessages();
+    document.getElementById('messageSubmit').addEventListener('click', submitMessage);
+    document.getElementById('messageInput').addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            submitMessage();
+        }
+    });
+
+    // 定时刷新留言（每30秒）
+    setInterval(loadMessages, 30000);
 });
 </script>
 {% endblock %}

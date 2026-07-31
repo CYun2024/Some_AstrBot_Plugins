@@ -16,12 +16,12 @@
         </select>
     </div>
     <div class="filter-group" style="margin-left:auto;">
-        <button class="btn btn-primary btn-sm" onclick="generateSummary()">&#129302; 重新生成总评</button>
+        <button class="btn btn-primary btn-sm" onclick="generateSummary()">重新生成总评</button>
     </div>
 </div>
 
 <div class="content-card">
-    <h3 class="card-title">&#128220; 今日总评</h3>
+    <h3 class="card-title">今日总评</h3>
     {% if summary and summary.comment %}
     <div class="ai-comment-box" id="summaryBox">
         <p class="ai-comment-text">{{ summary.comment }}</p>
@@ -33,12 +33,12 @@
         </div>
     </div>
     <div class="sidebar-actions" style="flex-direction:row; gap:10px; margin-top:12px;">
-        <button class="btn btn-primary btn-sm" onclick="editSummary()">&#9998; 编辑总评</button>
+        <button class="btn btn-primary btn-sm" onclick="editSummary()">编辑总评</button>
     </div>
     {% else %}
     <div class="ai-comment-empty">
         <p class="text-muted">该窗口暂无总评</p>
-        <button class="btn btn-primary btn-sm" onclick="generateSummary()" style="margin-top:12px;">&#129302; 立即生成</button>
+        <button class="btn btn-primary btn-sm" onclick="generateSummary()" style="margin-top:12px;">立即生成</button>
     </div>
     {% endif %}
 </div>

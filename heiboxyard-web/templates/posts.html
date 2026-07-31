@@ -44,10 +44,10 @@
     <span class="batch-info">共 {{ total }} 条帖子</span>
     <div class="batch-actions">
         <button class="btn btn-secondary btn-sm" onclick="resetOrder('{{ window_no }}')">
-            <span>&#128260;</span> 重置顺序
+            重置顺序
         </button>
         <button class="btn btn-primary btn-sm" onclick="generateReport('{{ window_no }}')">
-            <span>&#128240;</span> 生成晚报
+            生成晚报
         </button>
     </div>
 </div>
@@ -81,14 +81,14 @@
                 <td>@{{ post.username or '匿名' }}</td>
                 <td>
                     {% if post.image_count > 0 %}
-                    <span class="image-tag">&#128247; {{ post.image_count }}张</span>
+                    <span class="image-tag">{{ post.image_count }}张</span>
                     {% else %}
                     <span class="text-muted">无</span>
                     {% endif %}
                 </td>
                 <td>
                     {% if post.top_comment_count > 0 %}
-                    <span class="comment-tag">&#128172; {{ post.top_comment_count }}</span>
+                    <span class="comment-tag">{{ post.top_comment_count }}</span>
                     {% else %}
                     <span class="text-muted">0</span>
                     {% endif %}
@@ -124,7 +124,6 @@
 
 {% else %}
 <div class="empty-state">
-    <div class="empty-icon">&#128269;</div>
     <p>没有找到匹配的帖子</p>
 </div>
 {% endif %}

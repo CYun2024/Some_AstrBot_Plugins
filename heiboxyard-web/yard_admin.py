@@ -12,6 +12,8 @@ import secrets
 import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+import sys
+import subprocess
 
 from flask import (
     Blueprint, render_template, request, jsonify,
@@ -84,6 +86,21 @@ def parse_daily_no(daily_no_str):
 
 def format_daily_no(window_no, seq_no):
     return f"{window_no}-{seq_no:02d}"
+
+def ensure_message_board_table():
+    """确保留言板表存在"""
+    conn = get_db()
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS message_board (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nickname TEXT NOT NULL,
+            content TEXT NOT NULL,
+            ip TEXT,
+            timestamp INTEGER NOT NULL
+        )
+    ''')
+    conn.commit()
+    conn.close()
 
 # ========== 操作日志 ==========
 _log_table_initialized = False
@@ -484,8 +501,10 @@ def summary_manage():
 
 @yard_bp.route('/logs')
 def logs_page():
-    if not session.get('authorized') or session.get('role') != 'admin':
-        abort(403)
+    # 移除管理员检查，仅需登录（全局 before_request 已确保）
+    if not session.get('authorized'):
+        abort(401)
+    ensure_message_board_table()
     return render_template('logs.html',
         nav_window=get_current_window_no(),
         current_window_no=get_current_window_no()
@@ -740,8 +759,8 @@ def api_generate_summary():
 # ========== 操作日志查询 ==========
 @yard_bp.route('/api/logs')
 def api_logs():
-    if not session.get('authorized') or session.get('role') != 'admin':
-        return jsonify({'error': 'Unauthorized'}), 403
+    if not session.get('authorized'):
+        return jsonify({'error': 'Unauthorized'}), 401
 
     date_str = request.args.get('date')
     page = request.args.get('page', 1, type=int)
@@ -1063,3 +1082,149 @@ def download_report(filename):
     if not safe_path.exists() or not safe_path.is_file():
         abort(404)
     return send_file(safe_path, as_attachment=True, download_name=filename)
+
+# ========== 留言板 API ==========
+@yard_bp.route('/api/messages', methods=['GET'])
+def api_get_messages():
+    conn = get_db()
+    cur = conn.cursor()
+    # 改为 ASC 正序，最新的在最下面
+    cur.execute('SELECT id, nickname, content, timestamp FROM message_board ORDER BY timestamp ASC LIMIT 100')
+    rows = cur.fetchall()
+    conn.close()
+    return jsonify([dict(row) for row in rows])
+
+@yard_bp.route('/api/messages', methods=['POST'])
+def api_add_message():
+    if not session.get('authorized'):
+        return jsonify({'error': 'Unauthorized'}), 401
+    data = request.get_json() or {}
+    content = data.get('content', '').strip()
+    if not content:
+        return jsonify({'error': '内容不能为空'}), 400
+    nickname = session.get('nickname') or '匿名'
+    ip = get_client_ip()
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute('INSERT INTO message_board (nickname, content, ip, timestamp) VALUES (?, ?, ?, ?)',
+                (nickname, content, ip, int(time.time())))
+    conn.commit()
+    message_id = cur.lastrowid
+    conn.close()
+    return jsonify({'success': True, 'id': message_id})
+
+@yard_bp.route('/api/messages/<int:message_id>', methods=['DELETE'])
+def api_delete_message(message_id):
+    if not session.get('authorized') or session.get('role') != 'admin':
+        return jsonify({'error': 'Unauthorized'}), 403
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute('DELETE FROM message_board WHERE id = ?', (message_id,))
+    affected = cur.rowcount
+    conn.commit()
+    conn.close()
+    if affected:
+        return jsonify({'success': True})
+    else:
+        return jsonify({'error': '留言不存在'}), 404
+
+@yard_bp.route('/api/post/<int:link_id>/refresh', methods=['POST'])
+def api_refresh_post(link_id):
+    """重新拉取帖子详情并更新内容与评论"""
+    import json
+    import sqlite3
+    from pathlib import Path
+
+    # 获取小黑盒程序路径（可配置环境变量或使用默认）
+    program_path = current_app.config.get('HEIBOXYARD_PROGRAM_PATH',
+                                          '/home/admin/qqbot/astrbot_data/plugins/heiboxyard/heibox-comment-bot-master')
+    script_path = Path(program_path) / 'src' / 'link.py'
+    if not script_path.exists():
+        script_path = Path(program_path) / 'link.py'
+    if not script_path.exists():
+        return jsonify({'success': False, 'error': '小黑盒程序未找到，请检查配置'}), 500
+
+    try:
+        cmd = [sys.executable, str(script_path), '--link-id', str(link_id)]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, cwd=str(Path(program_path)))
+        if result.returncode != 0:
+            return jsonify({'success': False, 'error': f'拉取失败: {result.stderr[:200]}'}), 500
+        detail = json.loads(result.stdout)
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+    # 解析内容
+    content_raw = detail.get('content', '')
+    try:
+        blocks = json.loads(content_raw) if content_raw else []
+        text_parts = []
+        image_urls = []
+        for block in blocks:
+            if block.get('type') in ('text', 'html'):
+                text_parts.append(block.get('text', ''))
+            elif block.get('type') == 'img':
+                image_urls.append(block.get('url'))
+        content_text = '\n'.join(text_parts).strip()
+        # 注意：图片下载较为耗时，此处只更新内容元数据，不重新下载图片
+    except:
+        content_text = content_raw
+
+    # 更新数据库
+    db_path = current_app.config.get('HEIBOXYARD_DB_PATH',
+                                     '/home/admin/qqbot/astrbot_data/plugin_data/heiboxyard/posts.db')
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    try:
+        # 更新帖子基本信息
+        topics = detail.get('topics', [])
+        topics_str = json.dumps([t.get('name') for t in topics if isinstance(t, dict)], ensure_ascii=False)
+        top_comments = detail.get('top_comments', [])
+
+        cur.execute("""
+            UPDATE posts
+            SET title = ?, username = ?, avatar = ?, topics = ?,
+                content = ?, top_comment_count = ?
+            WHERE link_id = ?
+        """, (
+            detail.get('title', ''),
+            detail.get('username', ''),
+            detail.get('avatar', ''),
+            topics_str,
+            content_text,
+            len(top_comments),
+            link_id
+        ))
+
+        # 替换评论
+        cur.execute("DELETE FROM post_comments WHERE link_id = ?", (link_id,))
+        for comment in top_comments:
+            rank = comment.get('rank')
+            if rank and 1 <= rank <= 3:
+                images = comment.get('images', [])
+                images_str = json.dumps(images, ensure_ascii=False) if images else None
+                cur.execute("""
+                    INSERT INTO post_comments
+                    (link_id, comment_id, rank, username, user_id, avatar,
+                     text, up, has_image, images, comment_time)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    link_id,
+                    comment.get('comment_id', 0),
+                    rank,
+                    comment.get('username', ''),
+                    str(comment.get('user_id', '')),
+                    comment.get('avatar', ''),
+                    comment.get('text', ''),
+                    comment.get('up', 0),
+                    1 if comment.get('has_image') else 0,
+                    images_str,
+                    comment.get('create_at')
+                ))
+
+        conn.commit()
+        return jsonify({'success': True, 'message': '帖子已刷新'})
+    except Exception as e:
+        conn.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+    finally:
+        conn.close()
