@@ -775,11 +775,12 @@ def api_logs():
     conn.close()
 
     items = []
+    link_ids = set()
     for row in rows:
         try:
             detail = json.loads(row[5]) if row[5] else {}
         except:
-            detail = row[5]
+            detail = row[5] if row[5] else {}
         items.append({
             'id': row[0],
             'nickname': row[1],
@@ -789,6 +790,50 @@ def api_logs():
             'detail': detail,
             'timestamp': row[6]
         })
+        # 收集需要查询的 link_id（兼容字符串和整数）
+        if isinstance(detail, dict):
+            if 'link_id' in detail:
+                try:
+                    link_ids.add(int(detail['link_id']))
+                except (ValueError, TypeError):
+                    pass
+            if 'target_link_id' in detail:
+                try:
+                    link_ids.add(int(detail['target_link_id']))
+                except (ValueError, TypeError):
+                    pass
+
+    # 查询帖子标题、作者、内容预览
+    post_map = {}
+    if link_ids:
+        conn = get_db()
+        cur = conn.cursor()
+        placeholders = ','.join('?' * len(link_ids))
+        cur.execute(f"""
+            SELECT link_id, daily_no, title, username, content 
+            FROM posts WHERE link_id IN ({placeholders})
+        """, tuple(link_ids))
+        for row in cur.fetchall():
+            content_preview = row[4] or ''
+            if len(content_preview) > 120:
+                content_preview = content_preview[:120] + '...'
+            post_map[row[0]] = {
+                'link_id': row[0],
+                'daily_no': row[1] or '--',
+                'title': row[2] or '(无标题)',
+                'username': row[3] or '匿名',
+                'content_preview': content_preview
+            }
+        conn.close()
+
+    # 合并帖子信息到对应日志项
+    for item in items:
+        d = item.get('detail', {})
+        if isinstance(d, dict):
+            if 'link_id' in d and d['link_id'] in post_map:
+                item['post'] = post_map[d['link_id']]
+            if 'target_link_id' in d and d['target_link_id'] in post_map:
+                item['target_post'] = post_map[d['target_link_id']]
 
     return jsonify({
         'items': items,

@@ -3,123 +3,638 @@
 {% block title %}操作日志{% endblock %}
 {% block page_title %}操作日志{% endblock %}
 
+{% block extra_css %}
+<style>
+/* ========== 时间线整体 ========== */
+.timeline-wrap {
+    position: relative;
+    padding-left: 28px;
+    margin-top: 4px;
+}
+.timeline-wrap::before {
+    content: '';
+    position: absolute;
+    left: 6px;
+    top: 8px;
+    bottom: 24px;
+    width: 2px;
+    background: var(--kimi-color-border, #e5e5e5);
+    border-radius: 1px;
+}
+
+.timeline-item {
+    position: relative;
+    margin-bottom: 14px;
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+}
+.timeline-dot {
+    position: absolute;
+    left: -26px;
+    top: 10px;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--kimi-color-surface-raised, #fff);
+    border: 2px solid var(--kimi-color-border, #d0d0d0);
+    z-index: 2;
+    transition: all 0.2s ease;
+}
+.timeline-item:hover .timeline-dot {
+    border-color: var(--kimi-color-text-primary, #1a1a1a);
+    background: var(--kimi-color-text-primary, #1a1a1a);
+    transform: scale(1.25);
+}
+
+.timeline-time {
+    font-size: 12px;
+    color: var(--kimi-color-text-tertiary, #999);
+    min-width: 58px;
+    text-align: right;
+    padding-top: 6px;
+    font-variant-numeric: tabular-nums;
+    flex-shrink: 0;
+}
+
+.timeline-card {
+    flex: 1;
+    background: var(--kimi-color-surface-raised, #fff);
+    border: 1px solid var(--kimi-color-border, #e5e5e5);
+    border-radius: var(--radius-xl, 12px);
+    padding: 10px 14px;
+    transition: all 0.2s ease;
+    min-width: 0;
+}
+.timeline-item:hover .timeline-card {
+    border-color: #d4d4d4;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.04);
+}
+
+.timeline-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 4px;
+    flex-wrap: wrap;
+}
+
+/* 用户徽章 */
+.user-badge {
+    display: inline-flex;
+    align-items: center;
+    background: var(--kimi-color-surface-muted, #f0f0f0);
+    color: var(--kimi-color-text-secondary, #666);
+    font-size: 13px;
+    font-weight: 500;
+    padding: 3px 10px;
+    border-radius: 100px;
+}
+
+/* 操作类型徽章 */
+.op-badge {
+    display: inline-flex;
+    align-items: center;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 6px;
+    letter-spacing: 0.3px;
+}
+.op-login       { background: #e0f2fe; color: #0369a1; }
+.op-fetch       { background: #dcfce7; color: #15803d; }
+.op-analyze     { background: #f3e8ff; color: #7c3aed; }
+.op-generate    { background: #fee2e2; color: #dc2626; }
+.op-edit        { background: #ffedd5; color: #c2410c; }
+.op-adjust      { background: #e0f2fe; color: #0369a1; }
+.op-delete      { background: #f3f4f6; color: #6b7280; }
+.op-admin       { background: #fee2e2; color: #991b1b; }
+.op-default     { background: var(--kimi-color-surface-muted, #f0f0f0); color: var(--kimi-color-text-secondary, #666); }
+
+.timeline-body {
+    font-size: 14px;
+    color: var(--kimi-color-text-primary, #1a1a1a);
+    line-height: 1.55;
+}
+
+/* 帖子引用：去掉虚线，纯文字链接，可点击跳转 */
+.post-ref {
+    display: inline;
+    color: var(--kimi-chart-1, #3b82f6);
+    font-weight: 500;
+    cursor: pointer;
+    text-decoration: none;
+    transition: all 0.15s ease;
+}
+.post-ref:hover {
+    color: var(--kimi-chart-2, #ef4444);
+}
+.post-ref.missing {
+    color: var(--kimi-color-text-tertiary, #999);
+    cursor: default;
+}
+
+.detail-hint {
+    margin-top: 3px;
+    font-size: 12px;
+    color: var(--kimi-color-text-tertiary, #999);
+}
+
+/* 失败提示 */
+.fail-error {
+    margin-top: 4px;
+    font-size: 12px;
+    color: var(--kimi-color-danger, #dc2626);
+    display: flex;
+    align-items: flex-start;
+    gap: 4px;
+}
+
+.timeline-empty {
+    text-align: center;
+    padding: 60px 20px 40px;
+    color: var(--kimi-color-text-tertiary, #999);
+    font-size: 14px;
+}
+
+.log-filter-bar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 16px;
+    flex-wrap: wrap;
+}
+
+.timeline-pagination {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    margin-top: 16px;
+    padding-bottom: 20px;
+}
+
+/* ========== 展开/对比 ========== */
+.expand-btn {
+    margin-top: 6px;
+    font-size: 12px;
+    color: var(--kimi-chart-1, #3b82f6);
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-family: inherit;
+}
+.expand-btn:hover { text-decoration: underline; }
+.expand-btn svg { transition: transform 0.2s ease; }
+.expand-btn.open svg { transform: rotate(180deg); }
+
+.comment-compare {
+    margin-top: 10px;
+    display: none;
+}
+.comment-compare.expanded { display: block; }
+
+.compare-row {
+    display: flex;
+    gap: 8px;
+    align-items: stretch;
+}
+.compare-box {
+    flex: 1;
+    min-width: 0;
+    border-radius: var(--radius-md, 8px);
+    padding: 10px 12px;
+    font-size: 13px;
+    line-height: 1.5;
+}
+.compare-box.old {
+    background: #f3f4f6;
+    border: 1px solid #e5e7eb;
+    color: #374151;
+}
+.compare-box.new {
+    background: #f0fdf4;
+    border: 1px solid #bbf7d0;
+    color: #166534;
+}
+.compare-box.deleted {
+    background: #fef2f2;
+    border: 1px solid #fecaca;
+    color: #991b1b;
+}
+.compare-label {
+    font-size: 10px;
+    font-weight: 700;
+    margin-bottom: 5px;
+    opacity: 0.6;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+}
+.compare-text {
+    word-break: break-all;
+    white-space: pre-wrap;
+}
+.compare-arrow {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--kimi-color-text-tertiary, #999);
+    font-size: 16px;
+    flex-shrink: 0;
+    padding: 0 2px;
+}
+
+@media (max-width: 640px) {
+    .compare-row { flex-direction: column; gap: 6px; }
+    .compare-arrow { transform: rotate(90deg); padding: 2px 0; }
+}
+
+/* ========== Tooltip ========== */
+.log-tooltip {
+    position: fixed;
+    background: var(--kimi-color-surface-raised, #fff);
+    border: 1px solid var(--kimi-color-border, #e5e5e5);
+    border-radius: var(--radius-lg, 10px);
+    padding: 12px 16px;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.12);
+    z-index: 1000;
+    visibility: hidden;
+    opacity: 0;
+    transition: opacity 0.15s ease;
+    max-width: 340px;
+    font-size: 13px;
+    line-height: 1.5;
+    pointer-events: none;
+}
+.log-tooltip.visible {
+    visibility: visible;
+    opacity: 1;
+}
+.log-tooltip-title {
+    font-weight: 600;
+    color: var(--kimi-color-text-primary, #1a1a1a);
+    margin-bottom: 4px;
+    font-size: 13px;
+}
+.log-tooltip-content {
+    color: var(--kimi-color-text-secondary, #666);
+    word-break: break-all;
+    white-space: pre-wrap;
+}
+</style>
+{% endblock %}
+
 {% block content %}
-<div class="filter-bar">
+<div class="log-filter-bar">
     <div class="filter-group">
-        <label>日期</label>
-        <input type="date" class="filter-input" id="logDate" value="{{ today }}" style="min-width:160px;">
+        <label style="font-size:13px;color:var(--kimi-color-text-tertiary);">日期</label>
+        <input type="date" class="filter-input" id="logDate" style="min-width:140px;">
     </div>
     <button class="btn btn-primary btn-sm" onclick="loadLogs(1)">查询</button>
-    <span style="margin-left:auto;font-size:13px;color:var(--kimi-color-text-tertiary);">共 <span id="totalCount">0</span> 条记录</span>
+    <span style="margin-left:auto;font-size:13px;color:var(--kimi-color-text-tertiary);">
+        共 <span id="totalCount" style="font-weight:600;color:var(--kimi-color-text-primary);">0</span> 条记录
+    </span>
 </div>
 
-<div class="table-wrapper">
-    <table class="data-table" id="logTable">
-        <thead>
-            <tr>
-                <th style="width:170px;">时间 (北京时间)</th>
-                <th style="width:120px;">用户</th>
-                <th style="width:110px;">操作类型</th>
-                <th>详情</th>
-            </tr>
-        </thead>
-        <tbody id="logBody">
-            <tr><td colspan="5" style="text-align:center;padding:40px;color:var(--kimi-color-text-tertiary);">加载中...</td></tr>
-        </tbody>
-    </table>
+<div class="timeline-wrap" id="timelineWrap">
+    <div class="timeline-empty">请选择日期并点击查询</div>
 </div>
 
-<!-- 分页 -->
-<div class="pagination" id="pagination"></div>
+<div class="timeline-pagination" id="pagination"></div>
+
+<div class="log-tooltip" id="globalTooltip">
+    <div class="log-tooltip-title" id="tooltipTitle"></div>
+    <div class="log-tooltip-content" id="tooltipContent"></div>
+</div>
 {% endblock %}
 
 {% block extra_js %}
 <script>
 let currentPage = 1;
 
+const opMap = {
+    'login':            { label: '登录',        class: 'op-login' },
+    'fetch_feed':       { label: '拉取Feed',    class: 'op-fetch' },
+    'fetch_at':         { label: '拉取@消息',   class: 'op-fetch' },
+    'analyze_window':   { label: 'AI分析',      class: 'op-analyze' },
+    'generate_report':  { label: '生成晚报',    class: 'op-generate' },
+    'reset_order':      { label: '重置顺序',    class: 'op-adjust' },
+    'edit_comment':     { label: '编辑评论',    class: 'op-edit' },
+    'generate_comment': { label: '生成评论',    class: 'op-analyze' },
+    'delete_analysis':  { label: '删除评论',    class: 'op-delete' },
+    'swap_order':       { label: '交换顺序',    class: 'op-adjust' },
+    'move_window':      { label: '移动窗口',    class: 'op-adjust' },
+    'update_summary':   { label: '更新总评',    class: 'op-edit' },
+    'generate_summary': { label: '生成总评',    class: 'op-analyze' },
+    'block_ip':         { label: '封禁IP',      class: 'op-admin' },
+    'unblock_ip':       { label: '解封IP',      class: 'op-admin' },
+    'force_logout':     { label: '强制登出',    class: 'op-admin' }
+};
+
+function escapeHtml(text) {
+    if (text == null) return '';
+    const div = document.createElement('div');
+    div.textContent = String(text);
+    return div.innerHTML;
+}
+
+function formatTime(ts) {
+    const d = new Date(ts * 1000);
+    return d.toLocaleTimeString('zh-CN', { hour12: false, timeZone: 'Asia/Shanghai' });
+}
+
+/* 帖子引用：可点击跳转到详情页 */
+function renderPostRef(post) {
+    // 增加对 link_id 有效性的判断，只要没拿到有效的数字 ID 就不生成链接
+    if (!post || post.link_id == null || post.link_id === 0) {
+        return '<span class="post-ref missing">未知帖子</span>';
+    }
+    const title = post.title || '(无标题)';
+    const tipTitle = `编号: #${post.daily_no}　作者: @${post.username}`;
+    const tipContent = post.content_preview || '无内容预览';
+    const linkId = post.link_id; // 此时一定有效
+    return `<a href="/yard/admin/post/${linkId}" class="post-ref" data-tip-title="${escapeHtml(tipTitle)}" data-tip-content="${escapeHtml(tipContent)}">${escapeHtml(title)}</a>`;
+}
+
+/* 评论对比组件 */
+function renderCommentCompare(oldText, newText, isDelete) {
+    const oldDisplay = oldText 
+        ? escapeHtml(oldText) 
+        : '<span style="opacity:0.5;font-style:italic;">（无原评论）</span>';
+    const newDisplay = isDelete 
+        ? '<span style="font-weight:600;">评论已删除</span>' 
+        : (newText !== undefined && newText !== null && newText !== '')
+            ? escapeHtml(newText) 
+            : '<span style="opacity:0.5;font-style:italic;">（清空）</span>';
+    const newClass = isDelete ? 'deleted' : 'new';
+    const newLabel = isDelete ? '删除后' : '新评论';
+
+    return `
+    <button class="expand-btn" onclick="toggleCompare(this)">
+        <span>展开对比</span>
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+    </button>
+    <div class="comment-compare">
+        <div class="compare-row">
+            <div class="compare-box old">
+                <div class="compare-label">原评论</div>
+                <div class="compare-text">${oldDisplay}</div>
+            </div>
+            <div class="compare-arrow">→</div>
+            <div class="compare-box ${newClass}">
+                <div class="compare-label">${newLabel}</div>
+                <div class="compare-text">${newDisplay}</div>
+            </div>
+        </div>
+    </div>`;
+}
+
+function toggleCompare(btn) {
+    const compare = btn.nextElementSibling;
+    const span = btn.querySelector('span');
+    const isOpen = compare.classList.contains('expanded');
+    if (isOpen) {
+        compare.classList.remove('expanded');
+        compare.style.display = 'none';
+        span.textContent = '展开对比';
+        btn.classList.remove('open');
+    } else {
+        compare.classList.add('expanded');
+        compare.style.display = 'block';
+        span.textContent = '收起对比';
+        btn.classList.add('open');
+    }
+}
+
+function renderItem(item) {
+    const op = item.operation_type;
+    const detail = (typeof item.detail === 'object' && item.detail !== null) ? item.detail : {};
+
+    // 判断是否是失败操作
+    const isFailed = op.endsWith('_failed');
+    const baseOp = isFailed ? op.replace('_failed', '') : op;
+    let cfg = opMap[baseOp] || { label: baseOp, class: 'op-default' };
+
+    const user = item.nickname || '未知用户';
+    const time = formatTime(item.timestamp);
+
+    let body = '';
+
+    // ========== 失败操作统一处理 ==========
+    if (isFailed) {
+        cfg = { ...cfg, label: cfg.label + '失败', class: 'op-delete' };
+        const err = detail.error || '未知错误';
+
+        switch(baseOp) {
+            case 'move_window':
+                body = `移动帖子 ${renderPostRef(item.post)} 到窗口 <strong>${escapeHtml(detail.target_window || '--')}</strong> 失败`;
+                break;
+            case 'edit_comment':
+                body = `编辑帖子 ${renderPostRef(item.post)} 的评论失败`;
+                break;
+            case 'generate_comment':
+                body = `生成帖子 ${renderPostRef(item.post)} 的评论失败`;
+                break;
+            case 'delete_analysis':
+                body = `删除帖子 ${renderPostRef(item.post)} 的评论失败`;
+                break;
+            case 'swap_order':
+                body = `交换帖子顺序失败`;
+                if (item.post && item.target_post) {
+                    body = `交换帖子 ${renderPostRef(item.post)} 和 ${renderPostRef(item.target_post)} 失败`;
+                }
+                break;
+            case 'reset_order':
+                body = `重置窗口 <strong>${escapeHtml(detail.window_no || '--')}</strong> 顺序失败`;
+                break;
+            case 'fetch_feed':
+                body = `拉取 Feed 失败`;
+                break;
+            case 'fetch_at':
+                body = `拉取 @消息 失败`;
+                break;
+            case 'analyze_window':
+                body = `AI 分析窗口 <strong>${escapeHtml(detail.window_no || '--')}</strong> 失败`;
+                break;
+            case 'generate_report':
+                body = `生成晚报 <strong>${escapeHtml(detail.window_no || '--')}</strong> 失败`;
+                break;
+            case 'update_summary':
+                body = `更新总评失败`;
+                break;
+            case 'generate_summary':
+                body = `生成总评失败`;
+                break;
+            case 'block_ip':
+                body = `封禁 IP <strong>${escapeHtml(detail.ip || '--')}</strong> 失败`;
+                break;
+            case 'unblock_ip':
+                body = `解封 IP <strong>${escapeHtml(detail.ip || '--')}</strong> 失败`;
+                break;
+            case 'force_logout':
+                body = `强制登出失败`;
+                break;
+            default:
+                body = `执行操作 <strong>${escapeHtml(cfg.label)}</strong> 失败`;
+        }
+        body += `<div class="fail-error"><span>❌</span><span>${escapeHtml(err)}</span></div>`;
+    } 
+    // ========== 正常操作 ==========
+    else {
+        switch(op) {
+            case 'swap_order':
+                body = `交换了帖子 ${renderPostRef(item.post)} 和 ${renderPostRef(item.target_post)}`;
+                if (detail.old_daily_no && detail.target_old_daily_no) {
+                    body += `<div class="detail-hint">原编号: #${escapeHtml(detail.old_daily_no)} ↔ #${escapeHtml(detail.target_old_daily_no)}</div>`;
+                }
+                break;
+            case 'move_window':
+                body = `将帖子 ${renderPostRef(item.post)} 从窗口 <strong>${escapeHtml(detail.old_window || '--')}</strong> 移动到 <strong>${escapeHtml(detail.new_window || '--')}</strong>`;
+                if (detail.old_daily_no) {
+                    body += `<div class="detail-hint">原编号: #${escapeHtml(detail.old_daily_no)}</div>`;
+                }
+                break;
+            case 'edit_comment':
+                body = `编辑了帖子 ${renderPostRef(item.post)} 的 AI 评论`;
+                body += renderCommentCompare(detail.old_comment, detail.new_comment, false);
+                break;
+            case 'generate_comment':
+                body = `为帖子 ${renderPostRef(item.post)} 生成了 AI 评论`;
+                break;
+            case 'delete_analysis':
+                body = `删除了帖子 ${renderPostRef(item.post)} 的 AI 评论`;
+                body += renderCommentCompare(detail.old_comment, null, true);
+                break;
+            case 'reset_order':
+                body = `重置了窗口 <strong>${escapeHtml(detail.window_no || '--')}</strong> 的帖子顺序`;
+                break;
+            case 'fetch_feed':
+                body = `拉取了 Feed 新帖子`;
+                break;
+            case 'fetch_at':
+                body = `拉取了 @消息`;
+                break;
+            case 'analyze_window':
+                body = `对窗口 <strong>${escapeHtml(detail.window_no || '--')}</strong> 执行了 AI 分析`;
+                break;
+            case 'generate_report':
+                body = `生成了窗口 <strong>${escapeHtml(detail.window_no || '--')}</strong> 的晚报`;
+                break;
+            case 'update_summary':
+                body = `更新了窗口 <strong>${escapeHtml(detail.window_no || '--')}</strong> 的总评`;
+                break;
+            case 'generate_summary':
+                body = `重新生成了窗口 <strong>${escapeHtml(detail.window_no || '--')}</strong> 的总评`;
+                break;
+            case 'block_ip':
+                body = `封禁了 IP <strong>${escapeHtml(detail.ip || '--')}</strong>，时长 ${escapeHtml(detail.duration || '--')}`;
+                break;
+            case 'unblock_ip':
+                body = `解封了 IP <strong>${escapeHtml(detail.ip || '--')}</strong>`;
+                break;
+            case 'force_logout':
+                body = `强制所有人重新登录`;
+                break;
+            case 'login':
+                body = `登录系统 <span style="color:var(--kimi-color-text-tertiary);font-size:12px;">(${escapeHtml(detail.role || 'user')})</span>`;
+                break;
+            default:
+                body = `执行了操作: ${escapeHtml(op)}`;
+                if (item.detail && typeof item.detail === 'object') {
+                    body += `<div class="detail-hint">${escapeHtml(JSON.stringify(item.detail))}</div>`;
+                }
+        }
+    }
+
+    return `
+    <div class="timeline-item">
+        <div class="timeline-dot"></div>
+        <div class="timeline-time">${time}</div>
+        <div class="timeline-card">
+            <div class="timeline-header">
+                <span class="user-badge">${escapeHtml(user)}</span>
+                <span class="op-badge ${cfg.class}">${cfg.label}</span>
+            </div>
+            <div class="timeline-body">${body}</div>
+        </div>
+    </div>`;
+}
+
 function loadLogs(page) {
     currentPage = page;
     const date = document.getElementById('logDate').value;
-    if (!date) {
-        showToast('请选择日期', 'error');
-        return;
-    }
-    const tbody = document.getElementById('logBody');
-    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:40px;">加载中...</td></tr>';
+    if (!date) { showToast('请选择日期', 'error'); return; }
+
+    const wrap = document.getElementById('timelineWrap');
+    wrap.innerHTML = '<div class="timeline-empty">加载中...</div>';
 
     fetch(`/yard/admin/api/logs?date=${date}&page=${page}`)
-        .then(res => res.json())
+        .then(r => r.json())
         .then(data => {
-            if (!data.items) {
-                tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:40px;color:var(--kimi-color-text-tertiary);">无记录</td></tr>';
+            document.getElementById('totalCount').textContent = data.total || 0;
+            if (!data.items || data.items.length === 0) {
+                wrap.innerHTML = '<div class="timeline-empty">该日期暂无操作记录</div>';
+                document.getElementById('pagination').innerHTML = '';
                 return;
             }
-            document.getElementById('totalCount').textContent = data.total;
-            let html = '';
-            data.items.forEach(item => {
-                const ts = item.timestamp;
-                const dateObj = new Date(ts * 1000);
-                const bjTime = dateObj.toLocaleString('zh-CN', {timeZone: 'Asia/Shanghai', hour12: false});
-                let detailText = '';
-                if (typeof item.detail === 'object') {
-                    detailText = JSON.stringify(item.detail, null, 2);
-                } else {
-                    detailText = item.detail || '';
-                }
-                // 美化操作类型
-                const opMap = {
-                    'login': '登录',
-                    'fetch_feed': '拉取Feed',
-                    'fetch_at': '拉取@消息',
-                    'analyze_window': 'AI分析窗口',
-                    'generate_report': '生成晚报',
-                    'reset_order': '重置顺序',
-                    'edit_comment': '编辑AI评论',
-                    'generate_comment': '生成AI评论',
-                    'delete_analysis': '删除AI评论',
-                    'swap_order': '交换顺序',
-                    'move_window': '移动窗口',
-                    'update_summary': '更新总评',
-                    'generate_summary': '生成总评',
-                    'block_ip': '封禁IP',
-                    'unblock_ip': '解封IP',
-                    'force_logout': '强制登出'
-                };
-                const opLabel = opMap[item.operation_type] || item.operation_type;
-                html += `<tr>
-                    <td>${bjTime}</td>
-                    <td>${item.nickname || '未知'}</td>
-                    <td><span class="status-badge status-success">${opLabel}</span></td>
-                    <td style="font-size:13px;max-width:400px;word-break:break-all;">${detailText}</td>
-                </tr>`;
-            });
-            tbody.innerHTML = html;
-            // 分页
+            wrap.innerHTML = data.items.map(renderItem).join('');
+            bindTooltips();
+
             const totalPages = data.total_pages || 1;
-            const pagination = document.getElementById('pagination');
-            let pgHtml = '';
-            if (currentPage > 1) {
-                pgHtml += `<a href="javascript:loadLogs(${currentPage - 1})" class="page-btn">&larr;</a>`;
-            }
-            pgHtml += `<span class="page-info">${currentPage} / ${totalPages}</span>`;
-            if (currentPage < totalPages) {
-                pgHtml += `<a href="javascript:loadLogs(${currentPage + 1})" class="page-btn">&rarr;</a>`;
-            }
-            pagination.innerHTML = pgHtml;
+            let pg = '';
+            if (currentPage > 1) pg += `<button class="btn btn-ghost btn-sm" onclick="loadLogs(${currentPage-1})">上一页</button>`;
+            pg += `<span style="font-size:13px;color:var(--kimi-color-text-secondary);">${currentPage} / ${totalPages}</span>`;
+            if (currentPage < totalPages) pg += `<button class="btn btn-ghost btn-sm" onclick="loadLogs(${currentPage+1})">下一页</button>`;
+            document.getElementById('pagination').innerHTML = pg;
         })
         .catch(err => {
-            tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:40px;color:red;">加载失败</td></tr>';
+            wrap.innerHTML = '<div class="timeline-empty" style="color:var(--kimi-color-danger,#dc2626);">加载失败，请检查网络</div>';
             console.error(err);
         });
 }
 
-// 页面加载时默认今天
-document.addEventListener('DOMContentLoaded', function() {
-    const now = new Date();
-    const year = now.getFullYear();
-    const month = String(now.getMonth()+1).padStart(2,'0');
-    const day = String(now.getDate()).padStart(2,'0');
-    document.getElementById('logDate').value = `${year}-${month}-${day}`;
+/* ========== Tooltip ========== */
+function bindTooltips() {
+    const tip = document.getElementById('globalTooltip');
+    const titleEl = document.getElementById('tooltipTitle');
+    const contentEl = document.getElementById('tooltipContent');
+
+    document.querySelectorAll('.post-ref[data-tip-title]').forEach(el => {
+        el.addEventListener('mouseenter', () => {
+            titleEl.textContent = el.getAttribute('data-tip-title');
+            contentEl.textContent = el.getAttribute('data-tip-content');
+            tip.classList.add('visible');
+            positionTooltip(el);
+        });
+        el.addEventListener('mouseleave', () => tip.classList.remove('visible'));
+        el.addEventListener('mousemove', () => positionTooltip(el));
+    });
+}
+
+function positionTooltip(target) {
+    const tip = document.getElementById('globalTooltip');
+    const rect = target.getBoundingClientRect();
+    let top = rect.bottom + 10;
+    let left = rect.left;
+
+    const w = tip.offsetWidth || 320;
+    const h = tip.offsetHeight || 80;
+
+    if (left + w > window.innerWidth - 16) left = window.innerWidth - w - 16;
+    if (top + h > window.innerHeight - 16) top = rect.top - h - 10;
+    if (left < 16) left = 16;
+
+    tip.style.top = top + 'px';
+    tip.style.left = left + 'px';
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    const n = new Date();
+    document.getElementById('logDate').value = `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}-${String(n.getDate()).padStart(2,'0')}`;
     loadLogs(1);
 });
 </script>
