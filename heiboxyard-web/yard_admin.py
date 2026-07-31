@@ -18,7 +18,6 @@ from flask import (
     current_app, abort, flash, redirect, url_for, session, send_file
 )
 
-# 导入 requests 用于代理 API
 try:
     import requests
 except ImportError:
@@ -30,7 +29,6 @@ DEFAULT_DB_PATH = "/home/admin/qqbot/astrbot_data/plugin_data/heiboxyard/posts.d
 DEFAULT_REPORTS_DIR = "/home/admin/qqbot/astrbot_data/plugin_data/heiboxyard/reports"
 PLUGIN_API_BASE = os.environ.get('HEIBOXYARD_API_URL', 'http://127.0.0.1:5001')
 
-# 创建 Blueprint
 yard_bp = Blueprint(
     'yard_admin',
     __name__,
@@ -87,11 +85,10 @@ def parse_daily_no(daily_no_str):
 def format_daily_no(window_no, seq_no):
     return f"{window_no}-{seq_no:02d}"
 
-# ========== 操作日志相关 ==========
+# ========== 操作日志 ==========
 _log_table_initialized = False
 
 def init_log_table():
-    """创建操作日志表（如果不存在）"""
     conn = get_db()
     conn.execute('''
         CREATE TABLE IF NOT EXISTS operation_log (
@@ -110,31 +107,25 @@ def init_log_table():
     conn.close()
 
 def get_client_ip():
-    """从请求头获取真实 IP"""
     forwarded = request.headers.get('X-Forwarded-For')
     if forwarded:
         return forwarded.split(',')[0].strip()
     return request.remote_addr
 
 def log_operation(operation_type, detail=None, nickname=None, ip=None, device_id=None):
-    """记录操作日志 - 增强版：自动从数据库补全昵称"""
-    # 确保表存在
     global _log_table_initialized
     if not _log_table_initialized:
         init_log_table()
         _log_table_initialized = True
 
-    # 1. 获取昵称
     if nickname is None:
         nickname = session.get('nickname')
-        # 如果 session 中没有，尝试从数据库根据当前 IP 或 device_id 查询
         if not nickname:
             req_ip = get_client_ip()
             req_device = session.get('device_id')
             today = datetime.now().strftime('%Y-%m-%d')
             conn = get_db()
             cur = conn.cursor()
-            # 优先用 device_id 查询当天授权记录
             if req_device:
                 cur.execute('''
                     SELECT nickname FROM access_whitelist
@@ -144,7 +135,6 @@ def log_operation(operation_type, detail=None, nickname=None, ip=None, device_id
                 row = cur.fetchone()
                 if row:
                     nickname = row[0]
-            # 若未找到，再按 IP 查询
             if not nickname:
                 cur.execute('''
                     SELECT nickname FROM access_whitelist
@@ -158,13 +148,11 @@ def log_operation(operation_type, detail=None, nickname=None, ip=None, device_id
         if not nickname:
             nickname = 'unknown'
 
-    # 2. 获取 IP
     if ip is None:
         ip = get_client_ip()
     if device_id is None:
         device_id = session.get('device_id', '')
 
-    # 3. 序列化 detail
     if detail is None:
         detail = {}
     try:
@@ -172,7 +160,6 @@ def log_operation(operation_type, detail=None, nickname=None, ip=None, device_id
     except:
         detail_str = str(detail)
 
-    # 4. 写入数据库
     conn = get_db()
     cur = conn.cursor()
     cur.execute(
@@ -183,10 +170,8 @@ def log_operation(operation_type, detail=None, nickname=None, ip=None, device_id
     conn.commit()
     conn.close()
 
-# ========== 代理请求统一函数 ==========
-
+# ========== 代理请求 ==========
 def proxy_request(method, endpoint, data=None, timeout=30):
-    """统一的代理请求函数"""
     if requests is None:
         return jsonify({'success': False, 'error': 'requests 库未安装'}), 500
     url = f"{PLUGIN_API_BASE}{endpoint}"
@@ -200,22 +185,20 @@ def proxy_request(method, endpoint, data=None, timeout=30):
         else:
             return jsonify({'success': False, 'error': '不支持的请求方法'}), 400
         try:
-            return jsonify(resp.json()), resp.status_code
+            return resp.json(), resp.status_code
         except:
-            return jsonify({'success': False, 'error': f'插件 API 返回了非 JSON 响应: {resp.text[:200]}'}), 500
+            return {'success': False, 'error': f'插件 API 返回非 JSON: {resp.text[:200]}'}, 500
     except requests.exceptions.ConnectionError:
-        return jsonify({'success': False, 'error': '无法连接到插件 API，请确保插件已启动'}), 500
+        return {'success': False, 'error': '无法连接到插件 API，请确保插件已启动'}, 500
     except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
+        return {'success': False, 'error': str(e)}, 500
 
 # ========== 页面路由 ==========
-
 @yard_bp.route('/')
 def dashboard():
     conn = get_db()
     cur = conn.cursor()
     current_window_no = get_current_window_no()
-    window_start, window_end = get_window_by_no(current_window_no)
     cur.execute("SELECT COUNT(*) FROM posts WHERE date_str = ?", (current_window_no,))
     today_count = cur.fetchone()[0]
     cur.execute("SELECT COUNT(*) FROM posts")
@@ -463,7 +446,6 @@ def reports_list():
         current_window_no=get_current_window_no()
     )
 
-# ========== 总评管理页面 ==========
 @yard_bp.route('/summary')
 def summary_manage():
     window_no = request.args.get('window', get_current_window_no())
@@ -500,7 +482,6 @@ def summary_manage():
         current_window_no=get_current_window_no()
     )
 
-# ========== 操作日志页面 ==========
 @yard_bp.route('/logs')
 def logs_page():
     if not session.get('authorized') or session.get('role') != 'admin':
@@ -510,28 +491,77 @@ def logs_page():
         current_window_no=get_current_window_no()
     )
 
-# ========== API 代理路由 ==========
+# ========== API 代理路由（增强日志） ==========
 @yard_bp.route('/api/stats')
 def api_stats():
-    return proxy_request('GET', '/api/stats')
+    return jsonify(proxy_request('GET', '/api/stats')[0]), 200
 
 @yard_bp.route('/api/windows')
 def api_windows():
-    return proxy_request('GET', '/api/windows')
+    return jsonify(proxy_request('GET', '/api/windows')[0]), 200
 
 @yard_bp.route('/api/post/<int:link_id>/reorder', methods=['POST'])
 def api_reorder_post(link_id):
     data = request.get_json() or {}
     target_link_id = data.get('target_link_id')
-    log_operation('swap_order', {'link_id': link_id, 'target_link_id': target_link_id})
-    return proxy_request('POST', f'/api/post/{link_id}/reorder', data)
+    
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT daily_no FROM posts WHERE link_id = ?", (link_id,))
+    row = cur.fetchone()
+    old_no = row[0] if row else None
+    cur.execute("SELECT daily_no FROM posts WHERE link_id = ?", (target_link_id,))
+    row = cur.fetchone()
+    target_old_no = row[0] if row else None
+    conn.close()
+
+    log_operation('swap_order', {
+        'link_id': link_id,
+        'old_daily_no': old_no,
+        'target_link_id': target_link_id,
+        'target_old_daily_no': target_old_no
+    })
+
+    resp, status = proxy_request('POST', f'/api/post/{link_id}/reorder', data)
+    if not resp.get('success', False):
+        log_operation('swap_order_failed', {'link_id': link_id, 'target_link_id': target_link_id, 'error': resp.get('error')})
+    return jsonify(resp), status
 
 @yard_bp.route('/api/post/<int:link_id>/move-window', methods=['POST'])
 def api_move_window(link_id):
     data = request.get_json() or {}
     target_window = data.get('target_window_no')
-    log_operation('move_window', {'link_id': link_id, 'target_window': target_window})
-    return proxy_request('POST', f'/api/post/{link_id}/move-window', data)
+    
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT date_str, daily_no FROM posts WHERE link_id = ?", (link_id,))
+    row = cur.fetchone()
+    old_window = row[0] if row else None
+    old_daily_no = row[1] if row else None
+    
+    cur.execute("SELECT COUNT(*) FROM posts WHERE date_str = ?", (target_window,))
+    target_count = cur.fetchone()[0]
+    conn.close()
+
+    log_operation('move_window', {
+        'link_id': link_id,
+        'old_window': old_window,
+        'old_daily_no': old_daily_no,
+        'new_window': target_window,
+        'target_count': target_count
+    })
+
+    resp, status = proxy_request('POST', f'/api/post/{link_id}/move-window', data)
+    if not resp.get('success', False):
+        # 补充错误信息
+        if not resp.get('error'):
+            resp['error'] = '移动失败，请检查目标窗口是否存在或帖子是否已被移动。'
+        log_operation('move_window_failed', {
+            'link_id': link_id,
+            'target_window': target_window,
+            'error': resp.get('error')
+        })
+    return jsonify(resp), status
 
 @yard_bp.route('/api/post/<int:link_id>/comment', methods=['POST'])
 def api_update_comment(link_id):
@@ -540,62 +570,116 @@ def api_update_comment(link_id):
 
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("SELECT comment FROM llm_analyses WHERE link_id = ?", (link_id,))
+    cur.execute("SELECT comment, model_used, analyzed_at FROM llm_analyses WHERE link_id = ?", (link_id,))
     row = cur.fetchone()
     old_comment = row[0] if row else ''
+    old_model = row[1] if row else None
+    old_analyzed_at = row[2] if row else None
     conn.close()
 
     log_operation('edit_comment', {
         'link_id': link_id,
         'old_comment': old_comment,
-        'new_comment': new_comment
+        'new_comment': new_comment,
+        'old_model': old_model,
+        'old_analyzed_at': old_analyzed_at
     })
 
-    return proxy_request('POST', f'/api/post/{link_id}/comment', data)
+    resp, status = proxy_request('POST', f'/api/post/{link_id}/comment', data)
+    if not resp.get('success', False):
+        log_operation('edit_comment_failed', {'link_id': link_id, 'error': resp.get('error')})
+    return jsonify(resp), status
 
 @yard_bp.route('/api/post/<int:link_id>/analyze', methods=['POST'])
 def api_analyze_post(link_id):
     log_operation('generate_comment', {'link_id': link_id})
-    return proxy_request('POST', f'/api/post/{link_id}/analyze', timeout=120)
+    resp, status = proxy_request('POST', f'/api/post/{link_id}/analyze', timeout=120)
+    if not resp.get('success', False):
+        log_operation('generate_comment_failed', {'link_id': link_id, 'error': resp.get('error')})
+    return jsonify(resp), status
 
 @yard_bp.route('/api/fetch-feed', methods=['POST'])
 def api_fetch_feed():
     log_operation('fetch_feed', {'window': get_current_window_no()})
-    return proxy_request('POST', '/api/fetch-feed')
+    resp, status = proxy_request('POST', '/api/fetch-feed')
+    if not resp.get('success', False):
+        log_operation('fetch_feed_failed', {'error': resp.get('error')})
+    return jsonify(resp), status
 
 @yard_bp.route('/api/fetch-at', methods=['POST'])
 def api_fetch_at():
-    data = request.get_json() or {}
     log_operation('fetch_at', {'window': get_current_window_no()})
-    return proxy_request('POST', '/api/fetch-at', data)
+    resp, status = proxy_request('POST', '/api/fetch-at')
+    if not resp.get('success', False):
+        log_operation('fetch_at_failed', {'error': resp.get('error')})
+    return jsonify(resp), status
 
 @yard_bp.route('/api/generate-report', methods=['POST'])
 def api_generate_report():
     data = request.get_json() or {}
     window_no = data.get('window_no', get_current_window_no())
     log_operation('generate_report', {'window_no': window_no})
-    return proxy_request('POST', '/api/generate-report', data)
+    resp, status = proxy_request('POST', '/api/generate-report', data)
+    if not resp.get('success', False):
+        log_operation('generate_report_failed', {'window_no': window_no, 'error': resp.get('error')})
+    return jsonify(resp), status
 
 @yard_bp.route('/api/reset-order', methods=['POST'])
 def api_reset_order():
     data = request.get_json() or {}
     window_no = data.get('window_no')
-    log_operation('reset_order', {'window_no': window_no})
-    return proxy_request('POST', '/api/reset-order', data)
+    
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT link_id, daily_no FROM posts WHERE date_str = ? ORDER BY daily_no", (window_no,))
+    rows = cur.fetchall()
+    old_order = [{'link_id': row[0], 'daily_no': row[1]} for row in rows]
+    conn.close()
+
+    log_operation('reset_order', {
+        'window_no': window_no,
+        'old_order': old_order
+    })
+
+    resp, status = proxy_request('POST', '/api/reset-order', data)
+    if not resp.get('success', False):
+        log_operation('reset_order_failed', {'window_no': window_no, 'error': resp.get('error')})
+    return jsonify(resp), status
 
 @yard_bp.route('/api/post/<int:link_id>/delete-analysis', methods=['POST'])
 def api_delete_analysis(link_id):
-    log_operation('delete_analysis', {'link_id': link_id})
-    return proxy_request('POST', f'/api/post/{link_id}/delete-analysis')
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT comment, model_used, analyzed_at FROM llm_analyses WHERE link_id = ?", (link_id,))
+    row = cur.fetchone()
+    old_comment = row[0] if row else None
+    old_model = row[1] if row else None
+    old_analyzed_at = row[2] if row else None
+    conn.close()
+
+    log_operation('delete_analysis', {
+        'link_id': link_id,
+        'old_comment': old_comment,
+        'old_model': old_model,
+        'old_analyzed_at': old_analyzed_at
+    })
+
+    resp, status = proxy_request('POST', f'/api/post/{link_id}/delete-analysis')
+    if not resp.get('success', False):
+        log_operation('delete_analysis_failed', {'link_id': link_id, 'error': resp.get('error')})
+    return jsonify(resp), status
 
 @yard_bp.route('/api/analyze-window', methods=['POST'])
 def api_analyze_window():
     data = request.get_json() or {}
     window_no = data.get('window_no', get_current_window_no())
     log_operation('analyze_window', {'window_no': window_no})
-    return proxy_request('POST', '/api/analyze-window', data)
+    resp, status = proxy_request('POST', '/api/analyze-window', data)
+    if not resp.get('success', False):
+        log_operation('analyze_window_failed', {'window_no': window_no, 'error': resp.get('error')})
+    return jsonify(resp), status
 
-# ========== 总评相关 API ==========
+# ========== 总评 API ==========
 @yard_bp.route('/api/summary', methods=['GET'])
 def api_get_summary():
     window_no = request.args.get('window_no') or get_current_window_no()
@@ -638,16 +722,22 @@ def api_update_summary():
         'new_comment': new_comment
     })
 
-    return proxy_request('POST', '/api/summary/update', data)
+    resp, status = proxy_request('POST', '/api/summary/update', data)
+    if not resp.get('success', False):
+        log_operation('update_summary_failed', {'window_no': window_no, 'error': resp.get('error')})
+    return jsonify(resp), status
 
 @yard_bp.route('/api/summary/generate', methods=['POST'])
 def api_generate_summary():
     data = request.get_json() or {}
     window_no = data.get('window_no', get_current_window_no())
     log_operation('generate_summary', {'window_no': window_no})
-    return proxy_request('POST', '/api/summary/generate', data)
+    resp, status = proxy_request('POST', '/api/summary/generate', data)
+    if not resp.get('success', False):
+        log_operation('generate_summary_failed', {'window_no': window_no, 'error': resp.get('error')})
+    return jsonify(resp), status
 
-# ========== 操作日志查询 API ==========
+# ========== 操作日志查询 ==========
 @yard_bp.route('/api/logs')
 def api_logs():
     if not session.get('authorized') or session.get('role') != 'admin':
@@ -708,8 +798,7 @@ def api_logs():
         'total_pages': (total + per_page - 1) // per_page
     })
 
-# ========== 白名单与封禁管理（仅管理员） ==========
-
+# ========== 白名单与封禁管理 ==========
 def parse_duration(duration_str):
     duration_str = duration_str.lower().strip()
     if duration_str.endswith('h'):
@@ -883,7 +972,6 @@ def whitelist_block():
     conn.close()
 
     log_operation('block_ip', {'ip': ip, 'duration': duration_str})
-
     return jsonify({'success': True, 'message': f'IP {ip} 已封禁至 {blocked_until.strftime("%Y-%m-%d %H:%M")}'})
 
 @yard_bp.route('/whitelist/force-logout', methods=['POST'])
@@ -900,7 +988,6 @@ def force_logout():
     conn.close()
 
     log_operation('force_logout', {'today': today})
-
     return jsonify({'success': True, 'message': f'已强制 {affected} 条授权记录重新登录'})
 
 @yard_bp.route('/api/online')
@@ -918,7 +1005,6 @@ def api_online():
 
 @yard_bp.route('/download/<filename>')
 def download_report(filename):
-    from pathlib import Path
     reports_dir = Path(get_reports_dir())
     safe_path = reports_dir / filename
     try:
