@@ -488,7 +488,8 @@ const opMap = {
     'generate_summary': { label: '生成总评',    class: 'op-analyze' },
     'block_ip':         { label: '封禁IP',      class: 'op-admin' },
     'unblock_ip':       { label: '解封IP',      class: 'op-admin' },
-    'force_logout':     { label: '强制登出',    class: 'op-admin' }
+    'force_logout':     { label: '强制登出',    class: 'op-admin' },
+    'refresh_post':     { label: '重新拉取',    class: 'op-fetch' }
 };
 
 function escapeHtml(text) {
@@ -629,6 +630,9 @@ function renderItem(item) {
             case 'force_logout':
                 body = `强制登出失败`;
                 break;
+            case 'refresh_post':
+                body = `重新拉取帖子 ${renderPostRef(item.post)} 失败`;
+                break;
             default:
                 body = `执行操作 <strong>${escapeHtml(cfg.label)}</strong> 失败`;
         }
@@ -691,6 +695,9 @@ function renderItem(item) {
                 break;
             case 'login':
                 body = `登录系统 <span style="color:var(--kimi-color-text-tertiary);font-size:12px;">(${escapeHtml(detail.role || 'user')})</span>`;
+                break;
+            case 'refresh_post':
+                body = `重新拉取了帖子 ${renderPostRef(item.post)}`;
                 break;
             default:
                 body = `执行了操作: ${escapeHtml(op)}`;

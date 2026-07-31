@@ -1131,100 +1131,102 @@ def api_delete_message(message_id):
 @yard_bp.route('/api/post/<int:link_id>/refresh', methods=['POST'])
 def api_refresh_post(link_id):
     """重新拉取帖子详情并更新内容与评论"""
-    import json
-    import sqlite3
-    from pathlib import Path
-
-    # 获取小黑盒程序路径（可配置环境变量或使用默认）
-    program_path = current_app.config.get('HEIBOXYARD_PROGRAM_PATH',
-                                          '/home/admin/qqbot/astrbot_data/plugins/heiboxyard/heibox-comment-bot-master')
-    script_path = Path(program_path) / 'src' / 'link.py'
-    if not script_path.exists():
-        script_path = Path(program_path) / 'link.py'
-    if not script_path.exists():
-        return jsonify({'success': False, 'error': '小黑盒程序未找到，请检查配置'}), 500
+    # 记录操作开始
+    log_operation('refresh_post', {'link_id': link_id})
 
     try:
+        # 获取小黑盒程序路径
+        program_path = current_app.config.get('HEIBOXYARD_PROGRAM_PATH',
+                                              '/home/admin/qqbot/astrbot_data/plugins/heiboxyard/heibox-comment-bot-master')
+        script_path = Path(program_path) / 'src' / 'link.py'
+        if not script_path.exists():
+            script_path = Path(program_path) / 'link.py'
+        if not script_path.exists():
+            raise Exception('小黑盒程序未找到，请检查配置')
+
+        # 调用子进程拉取数据
         cmd = [sys.executable, str(script_path), '--link-id', str(link_id)]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, cwd=str(Path(program_path)))
         if result.returncode != 0:
-            return jsonify({'success': False, 'error': f'拉取失败: {result.stderr[:200]}'}), 500
+            raise Exception(f'拉取失败: {result.stderr[:200]}')
         detail = json.loads(result.stdout)
+
+        # 解析内容
+        content_raw = detail.get('content', '')
+        try:
+            blocks = json.loads(content_raw) if content_raw else []
+            text_parts = []
+            image_urls = []
+            for block in blocks:
+                if block.get('type') in ('text', 'html'):
+                    text_parts.append(block.get('text', ''))
+                elif block.get('type') == 'img':
+                    image_urls.append(block.get('url'))
+            content_text = '\n'.join(text_parts).strip()
+        except:
+            content_text = content_raw
+
+        # 更新数据库
+        db_path = current_app.config.get('HEIBOXYARD_DB_PATH',
+                                         '/home/admin/qqbot/astrbot_data/plugin_data/heiboxyard/posts.db')
+        conn = sqlite3.connect(db_path)
+        cur = conn.cursor()
+        try:
+            topics = detail.get('topics', [])
+            topics_str = json.dumps([t.get('name') for t in topics if isinstance(t, dict)], ensure_ascii=False)
+            top_comments = detail.get('top_comments', [])
+
+            cur.execute("""
+                UPDATE posts
+                SET title = ?, username = ?, avatar = ?, topics = ?,
+                    content = ?, top_comment_count = ?
+                WHERE link_id = ?
+            """, (
+                detail.get('title', ''),
+                detail.get('username', ''),
+                detail.get('avatar', ''),
+                topics_str,
+                content_text,
+                len(top_comments),
+                link_id
+            ))
+
+            # 替换评论
+            cur.execute("DELETE FROM post_comments WHERE link_id = ?", (link_id,))
+            for comment in top_comments:
+                rank = comment.get('rank')
+                if rank and 1 <= rank <= 3:
+                    images = comment.get('images', [])
+                    images_str = json.dumps(images, ensure_ascii=False) if images else None
+                    cur.execute("""
+                        INSERT INTO post_comments
+                        (link_id, comment_id, rank, username, user_id, avatar,
+                         text, up, has_image, images, comment_time)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        link_id,
+                        comment.get('comment_id', 0),
+                        rank,
+                        comment.get('username', ''),
+                        str(comment.get('user_id', '')),
+                        comment.get('avatar', ''),
+                        comment.get('text', ''),
+                        comment.get('up', 0),
+                        1 if comment.get('has_image') else 0,
+                        images_str,
+                        comment.get('create_at')
+                    ))
+
+            conn.commit()
+            return jsonify({'success': True, 'message': '帖子已刷新'})
+
+        except Exception as db_error:
+            conn.rollback()
+            raise db_error  # 重新抛出，由外层统一捕获
+        finally:
+            conn.close()
+
     except Exception as e:
+        # 记录失败日志
+        log_operation('refresh_post_failed', {'link_id': link_id, 'error': str(e)})
         return jsonify({'success': False, 'error': str(e)}), 500
-
-    # 解析内容
-    content_raw = detail.get('content', '')
-    try:
-        blocks = json.loads(content_raw) if content_raw else []
-        text_parts = []
-        image_urls = []
-        for block in blocks:
-            if block.get('type') in ('text', 'html'):
-                text_parts.append(block.get('text', ''))
-            elif block.get('type') == 'img':
-                image_urls.append(block.get('url'))
-        content_text = '\n'.join(text_parts).strip()
-        # 注意：图片下载较为耗时，此处只更新内容元数据，不重新下载图片
-    except:
-        content_text = content_raw
-
-    # 更新数据库
-    db_path = current_app.config.get('HEIBOXYARD_DB_PATH',
-                                     '/home/admin/qqbot/astrbot_data/plugin_data/heiboxyard/posts.db')
-    conn = sqlite3.connect(db_path)
-    cur = conn.cursor()
-    try:
-        # 更新帖子基本信息
-        topics = detail.get('topics', [])
-        topics_str = json.dumps([t.get('name') for t in topics if isinstance(t, dict)], ensure_ascii=False)
-        top_comments = detail.get('top_comments', [])
-
-        cur.execute("""
-            UPDATE posts
-            SET title = ?, username = ?, avatar = ?, topics = ?,
-                content = ?, top_comment_count = ?
-            WHERE link_id = ?
-        """, (
-            detail.get('title', ''),
-            detail.get('username', ''),
-            detail.get('avatar', ''),
-            topics_str,
-            content_text,
-            len(top_comments),
-            link_id
-        ))
-
-        # 替换评论
-        cur.execute("DELETE FROM post_comments WHERE link_id = ?", (link_id,))
-        for comment in top_comments:
-            rank = comment.get('rank')
-            if rank and 1 <= rank <= 3:
-                images = comment.get('images', [])
-                images_str = json.dumps(images, ensure_ascii=False) if images else None
-                cur.execute("""
-                    INSERT INTO post_comments
-                    (link_id, comment_id, rank, username, user_id, avatar,
-                     text, up, has_image, images, comment_time)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    link_id,
-                    comment.get('comment_id', 0),
-                    rank,
-                    comment.get('username', ''),
-                    str(comment.get('user_id', '')),
-                    comment.get('avatar', ''),
-                    comment.get('text', ''),
-                    comment.get('up', 0),
-                    1 if comment.get('has_image') else 0,
-                    images_str,
-                    comment.get('create_at')
-                ))
-
-        conn.commit()
-        return jsonify({'success': True, 'message': '帖子已刷新'})
-    except Exception as e:
-        conn.rollback()
-        return jsonify({'success': False, 'error': str(e)}), 500
-    finally:
-        conn.close()
