@@ -650,11 +650,16 @@ def check_access():
     if request.path == '/auth':
         return
 
+    # ── 关键改动：只有 /yard/admin 路径需要认证 ──
+    if not request.path.startswith('/yard/admin'):
+        return  # 完全公开，不执行任何认证/封禁检查
+
+    # 以下是管理端专用认证逻辑
     ip = get_client_ip()
     today = datetime.now().strftime('%Y-%m-%d')
     print(f"[DEBUG] check_access: path={request.path}, ip={ip}, session.authorized={session.get('authorized')}")
 
-    # 1. IP 封禁检查
+    # 1. IP 封禁检查（仅对管理端生效）
     if is_ip_blocked(ip):
         print(f"[DEBUG] IP {ip} is blocked")
         if request.path.startswith('/yard/admin/api/'):
@@ -701,7 +706,7 @@ def check_access():
             # 有昵称且 authorized=1 → 恢复 session
             session['authorized'] = True
             session['role'] = 'user'
-            session['nickname'] = row[0]  # [新增] 恢复昵称
+            session['nickname'] = row[0]
             if row[1]:
                 session['device_id'] = row[1]
             authorize_ip(ip, request.headers.get('User-Agent', ''), request.path, session.get('device_id'), None)

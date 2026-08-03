@@ -43,6 +43,8 @@
 <div class="batch-bar">
     <span class="batch-info">共 {{ total }} 条帖子</span>
     <div class="batch-actions">
+        <!-- ===== 新增 AI 分析按钮 ===== -->
+        <button class="btn btn-primary btn-sm" onclick="analyzeWindow('{{ window_no }}')">AI分析</button>
         <button class="btn btn-secondary btn-sm" onclick="resetOrder('{{ window_no }}')">
             重置顺序
         </button>
@@ -157,11 +159,12 @@ async function resetOrder(windowNo) {
             body: JSON.stringify({window_no: windowNo})
         });
         const data = await res.json();
+        const msg = data.message || data.error || (data.success ? '重置成功' : '重置失败');
         if (data.success) {
-            showToast(data.message, 'success');
+            showToast(msg, 'success');
             setTimeout(() => location.reload(), 800);
         } else {
-            showToast(data.error || '重置失败', 'error');
+            showToast(msg, 'error');
         }
     } catch (e) {
         showToast('请求失败: ' + e.message, 'error');
@@ -179,15 +182,30 @@ async function generateReport(windowNo) {
             body: JSON.stringify({window_no: windowNo})
         });
         const data = await res.json();
-        if (data.success) {
-            showToast('晚报生成任务已启动', 'success');
-        } else {
-            showToast(data.error || '生成失败', 'error');
-        }
+        const msg = data.message || data.error || (data.success ? '晚报生成任务已启动' : '生成失败');
+        showToast(msg, data.success ? 'success' : 'error');
     } catch (e) {
         showToast('请求失败: ' + e.message, 'error');
     } finally {
         hideLoading();
+    }
+}
+async function analyzeWindow(windowNo) {
+    if (!confirm(`确定要对窗口 ${windowNo} 执行 AI 分析吗？\n这将为未分析的帖子生成评论，并生成总评。`)) return;
+    showLoading('正在启动 AI 分析...');
+    try {
+        const res = await fetch('/yard/admin/api/analyze-window', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({window_no: windowNo})
+        });
+        const data = await res.json();
+        hideLoading();
+        const msg = data.message || data.error || (data.success ? 'AI 分析任务已启动' : '启动失败');
+        showToast(msg, data.success ? 'success' : 'error');
+    } catch (e) {
+        hideLoading();
+        showToast('请求失败: ' + e.message, 'error');
     }
 }
 </script>

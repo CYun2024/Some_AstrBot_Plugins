@@ -310,6 +310,9 @@
     border: 1px solid var(--kimi-color-border, #e5e5e5);
     border-radius: var(--radius-xl);
     padding: var(--space-4);
+    display: flex;
+    flex-direction: column;
+    max-height: 600px;
 }
 .message-board-title {
     font-size: 16px;
@@ -318,22 +321,29 @@
     display: flex;
     align-items: center;
     gap: 6px;
+    flex-shrink: 0;
+}
+.message-list-wrap {
+    flex: 1;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    min-height: 150px;
+    position: relative;
 }
 .message-list {
     display: flex;
     flex-direction: column;
     gap: var(--space-3);
-    max-height: calc(100vh - 300px);
-    min-height: 150px;
-    overflow-y: auto;
-    margin-bottom: var(--space-3);
-    padding-right: 4px;
+    padding: var(--space-2) 0;
+    min-height: 100%;
 }
 .message-item {
     padding: var(--space-2) var(--space-3);
     background: var(--kimi-color-surface-muted, #f8f8f8);
     border-radius: var(--radius-md);
     border-left: 3px solid var(--kimi-chart-1, #3b82f6);
+    flex-shrink: 0;
 }
 .message-header {
     display: flex;
@@ -368,12 +378,30 @@
 .message-delete:hover {
     background: color-mix(in srgb, var(--kimi-color-danger, #ef4444) 12%, transparent);
 }
+.message-loading {
+    text-align: center;
+    color: var(--kimi-color-text-tertiary, #999);
+    font-size: 13px;
+    padding: 10px 0;
+    flex-shrink: 0;
+}
+.message-empty {
+    text-align: center;
+    padding: var(--space-4);
+    color: var(--kimi-color-text-tertiary, #999);
+    font-size: 14px;
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
 .message-form {
     display: flex;
     flex-direction: column;
     gap: var(--space-2);
     border-top: 1px solid var(--kimi-color-border, #e5e5e5);
     padding-top: var(--space-3);
+    flex-shrink: 0;
 }
 .message-form textarea {
     width: 100%;
@@ -395,11 +423,20 @@
     justify-content: flex-end;
     gap: var(--space-2);
 }
-.message-empty {
-    text-align: center;
-    padding: var(--space-4);
-    color: var(--kimi-color-text-tertiary, #999);
-    font-size: 14px;
+
+/* 滚动条美化 */
+.message-list-wrap::-webkit-scrollbar {
+    width: 5px;
+}
+.message-list-wrap::-webkit-scrollbar-track {
+    background: transparent;
+}
+.message-list-wrap::-webkit-scrollbar-thumb {
+    background: var(--kimi-color-border, #d0d0d0);
+    border-radius: 10px;
+}
+.message-list-wrap::-webkit-scrollbar-thumb:hover {
+    background: var(--kimi-color-text-tertiary, #999);
 }
 
 @media (max-width: 768px) {
@@ -410,9 +447,8 @@
         position: static;
         width: 100%;
     }
-    /* 新增移动端留言板高度适配 */
-    .message-list {
-        max-height: 300px;
+    .message-board {
+        max-height: 450px;
     }
 }
 </style>
@@ -440,12 +476,16 @@
         <div class="timeline-pagination" id="pagination"></div>
     </div>
 
-    <!-- ===== 右侧：留言板 ===== -->
+    <!-- ===== 右侧：留言板（聊天风格） ===== -->
     <div class="logs-sidebar">
         <div class="message-board">
             <div class="message-board-title">留言板</div>
-            <div class="message-list" id="messageList">
-                <div class="message-empty">加载中...</div>
+            <div class="message-list-wrap" id="messageListWrap">
+                <div class="message-list" id="messageList">
+                    <div class="message-empty">加载中...</div>
+                </div>
+                <!-- 加载提示（滚动到顶部时显示） -->
+                <div class="message-loading" id="messageLoading" style="display:none;"></div>
             </div>
             <div class="message-form">
                 <textarea id="messageInput" placeholder="说点什么…" rows="2"></textarea>
@@ -788,43 +828,187 @@ function positionTooltip(target) {
     tip.style.left = left + 'px';
 }
 
-// ========== 留言板逻辑 ==========
-function loadMessages() {
-    fetch('/yard/admin/api/messages')
-        .then(r => r.json())
-        .then(messages => {
-            const container = document.getElementById('messageList');
-            if (!messages || messages.length === 0) {
-                container.innerHTML = '<div class="message-empty">还没有留言，来说两句吧</div>';
-                return;
-            }
-            let html = '';
-            messages.forEach(msg => {
-                const time = new Date(msg.timestamp * 1000).toLocaleString('zh-CN', { hour12: false });
-                const deleteBtn = (userRole === 'admin') 
-                    ? `<button class="message-delete" onclick="deleteMessage(${msg.id})">✕</button>`
-                    : '';
-                html += `
-                    <div class="message-item">
-                        <div class="message-header">
-                            <span class="message-nick">${escapeHtml(msg.nickname)}</span>
-                            <span class="message-time">${escapeHtml(time)}</span>
-                            ${deleteBtn}
-                        </div>
-                        <div class="message-content">${escapeHtml(msg.content)}</div>
-                    </div>
-                `;
-            });
-            container.innerHTML = html;
-            // 滚动到底部（最新留言）
-            container.scrollTop = container.scrollHeight;
-        })
-        .catch(err => {
-            document.getElementById('messageList').innerHTML = '<div class="message-empty">加载留言失败</div>';
-            console.error(err);
-        });
+// =============================================================
+// ========== 留言板 - 聊天风格（新在上，旧在下，滚动加载） ==========
+// =============================================================
+
+let messageCurrentPage = 1;
+let messageTotalPages = 1;
+let isLoadingMessages = false;
+let allMessages = [];          // 按时间升序（旧→新）存储
+
+const messageListEl = document.getElementById('messageList');
+const messageWrap = document.getElementById('messageListWrap');
+const messageLoadingEl = document.getElementById('messageLoading');
+
+function renderMessages(messages, append = false) {
+    if (!append) {
+        allMessages = [];
+    }
+    // messages 是从后端获取的（按时间降序：最新→最旧）
+    // 反转后为升序（旧→新），然后合并到 allMessages
+    const reversed = [...messages].reverse();
+    if (append) {
+        // 追加更旧的留言：拼接到 allMessages 开头
+        allMessages = [...reversed, ...allMessages];
+    } else {
+        allMessages = reversed;
+    }
+
+    if (allMessages.length === 0) {
+        messageListEl.innerHTML = '<div class="message-empty">还没有留言，来说两句吧</div>';
+        return;
+    }
+
+    let html = '';
+    allMessages.forEach(msg => {
+        const time = new Date(msg.timestamp * 1000).toLocaleString('zh-CN', { hour12: false });
+        const deleteBtn = (userRole === 'admin') 
+            ? `<button class="message-delete" onclick="deleteMessage(${msg.id})">✕</button>`
+            : '';
+        html += `
+            <div class="message-item" data-msg-id="${msg.id}">
+                <div class="message-header">
+                    <span class="message-nick">${escapeHtml(msg.nickname)}</span>
+                    <span class="message-time">${escapeHtml(time)}</span>
+                    ${deleteBtn}
+                </div>
+                <div class="message-content">${escapeHtml(msg.content)}</div>
+            </div>
+        `;
+    });
+    messageListEl.innerHTML = html;
+
+    // 更新加载提示
+    if (messageCurrentPage < messageTotalPages) {
+        messageLoadingEl.style.display = 'block';
+        messageLoadingEl.textContent = '';
+    } else {
+        messageLoadingEl.style.display = 'none';
+    }
 }
 
+async function loadMessages(page, append = false) {
+    if (isLoadingMessages) return;
+    isLoadingMessages = true;
+    messageLoadingEl.textContent = '加载中...';
+
+    try {
+        const res = await fetch(`/yard/admin/api/messages?page=${page}&per_page=9`);
+        const data = await res.json();
+        if (data.messages) {
+            messageTotalPages = data.total_pages || 1;
+            messageCurrentPage = data.page || 1;
+            renderMessages(data.messages, append);
+        } else {
+            // 无数据
+            if (!append) {
+                messageListEl.innerHTML = '<div class="message-empty">还没有留言，来说两句吧</div>';
+                messageLoadingEl.style.display = 'none';
+            }
+        }
+    } catch (err) {
+        console.error('加载留言失败:', err);
+        if (!append) {
+            messageListEl.innerHTML = '<div class="message-empty">加载留言失败，请刷新</div>';
+        }
+    } finally {
+        isLoadingMessages = false;
+        // 如果加载的是更早的留言（append=true），滚动位置保持在原来的顶部（已由滚动监听处理）
+        // 如果加载的是第一页，滚动到底部
+        if (!append) {
+            scrollToBottom();
+        }
+    }
+}
+
+// 滚动到底部
+function scrollToBottom() {
+    setTimeout(() => {
+        messageWrap.scrollTop = messageWrap.scrollHeight;
+    }, 50);
+}
+
+// 滚动到顶部自动加载更早留言（类似聊天软件上滑加载历史）
+messageWrap.addEventListener('scroll', function() {
+    if (isLoadingMessages) return;
+    if (messageCurrentPage >= messageTotalPages) return;
+    if (this.scrollTop === 0) {
+        // 加载更早留言（下一页）
+        const nextPage = messageCurrentPage + 1;
+        loadMessages(nextPage, true);
+        // 加载完成后，滚动位置会保持在顶部附近，因为新插入的内容在顶部
+        // 我们需在加载完成后恢复滚动位置，但由于是异步，需在 renderMessages 后处理
+        // 使用一个变量记住加载前的滚动高度
+        const oldScrollHeight = this.scrollHeight;
+        const oldScrollTop = this.scrollTop;
+        // 但我们要在加载完后保持原来的可视区域，即让加载前的第一条消息可见
+        // 更可靠：在 loadMessages 完成后（append=true 时），计算新插入的高度，调整 scrollTop
+        // 我们可以在 renderMessages 后处理，但为了简单，使用一个标志
+        window.__pendingScrollRestore = true;
+    }
+});
+
+// 修补 loadMessages 以支持滚动恢复
+const originalLoadMessages = loadMessages;
+loadMessages = async function(page, append = false) {
+    if (isLoadingMessages) return;
+    isLoadingMessages = true;
+    messageLoadingEl.textContent = '加载中...';
+
+    try {
+        const res = await fetch(`/yard/admin/api/messages?page=${page}&per_page=9`);
+        const data = await res.json();
+        if (data.messages) {
+            messageTotalPages = data.total_pages || 1;
+            messageCurrentPage = data.page || 1;
+
+            // 记录加载前的第一条消息（用于恢复滚动位置）
+            let firstMsgId = null;
+            if (append && allMessages.length > 0) {
+                firstMsgId = allMessages[0].id;
+            }
+
+            renderMessages(data.messages, append);
+
+            // 如果是追加模式，恢复滚动位置到原来第一条消息的位置
+            if (append && firstMsgId) {
+                const firstEl = messageListEl.querySelector(`[data-msg-id="${firstMsgId}"]`);
+                if (firstEl) {
+                    // 计算需要滚动的距离：使 firstEl 的顶部对齐滚动容器顶部
+                    const containerRect = messageWrap.getBoundingClientRect();
+                    const elRect = firstEl.getBoundingClientRect();
+                    messageWrap.scrollTop = elRect.top - containerRect.top + messageWrap.scrollTop;
+                } else {
+                    // 降级：保持当前滚动位置（但可能因为插入内容而偏移，我们尽量保持原有视口）
+                    // 实际上，我们可以不调整，用户会看到新增的内容在顶部，但会闪一下
+                }
+            } else if (!append) {
+                scrollToBottom();
+            }
+        } else {
+            if (!append) {
+                messageListEl.innerHTML = '<div class="message-empty">还没有留言，来说两句吧</div>';
+                messageLoadingEl.style.display = 'none';
+            }
+        }
+    } catch (err) {
+        console.error('加载留言失败:', err);
+        if (!append) {
+            messageListEl.innerHTML = '<div class="message-empty">加载留言失败，请刷新</div>';
+        }
+    } finally {
+        isLoadingMessages = false;
+        if (messageCurrentPage >= messageTotalPages) {
+            messageLoadingEl.style.display = 'none';
+        } else {
+            messageLoadingEl.style.display = 'block';
+            messageLoadingEl.textContent = '';
+        }
+    }
+};
+
+// 发送留言
 function submitMessage() {
     const input = document.getElementById('messageInput');
     const content = input.value.trim();
@@ -842,7 +1026,10 @@ function submitMessage() {
         if (data.success) {
             input.value = '';
             showToast('留言发送成功', 'success');
-            loadMessages();
+            // 重置到第一页（最新留言）
+            messageCurrentPage = 1;
+            messageTotalPages = 1;
+            loadMessages(1, false);
         } else {
             showToast(data.error || '发送失败', 'error');
         }
@@ -853,6 +1040,7 @@ function submitMessage() {
     });
 }
 
+// 删除留言
 function deleteMessage(id) {
     if (!confirm('确定要删除这条留言吗？')) return;
     fetch(`/yard/admin/api/messages/${id}`, { method: 'DELETE' })
@@ -860,7 +1048,10 @@ function deleteMessage(id) {
         .then(data => {
             if (data.success) {
                 showToast('已删除', 'success');
-                loadMessages();
+                // 重置到第一页
+                messageCurrentPage = 1;
+                messageTotalPages = 1;
+                loadMessages(1, false);
             } else {
                 showToast(data.error || '删除失败', 'error');
             }
@@ -878,8 +1069,10 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('logDate').value = `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}-${String(n.getDate()).padStart(2,'0')}`;
     loadLogs(1);
 
-    // 留言板
-    loadMessages();
+    // 留言板初始加载第一页
+    loadMessages(1, false);
+
+    // 绑定发送事件
     document.getElementById('messageSubmit').addEventListener('click', submitMessage);
     document.getElementById('messageInput').addEventListener('keydown', (e) => {
         if (e.key === 'Enter' && !e.shiftKey) {
@@ -887,9 +1080,6 @@ document.addEventListener('DOMContentLoaded', () => {
             submitMessage();
         }
     });
-
-    // 定时刷新留言（每30秒）
-    setInterval(loadMessages, 30000);
 });
 </script>
 {% endblock %}

@@ -192,8 +192,7 @@ async function editComment(linkId) {
             showToast('输入框未找到', 'error');
             return false;
         }
-        const comment = textarea.value.trim();   // 允许空字符串
-        // 移除空值校验，直接提交
+        const comment = textarea.value.trim();
         showLoading('更新中...');
         try {
             const res = await fetch(`/yard/admin/api/post/${linkId}/comment`, {
@@ -202,12 +201,13 @@ async function editComment(linkId) {
                 body: JSON.stringify({comment})
             });
             const data = await res.json();
+            const msg = data.message || data.error || (data.success ? '评论已更新' : '更新失败');
             if (data.success) {
-                showToast('评论已更新', 'success');
+                showToast(msg, 'success');
                 setTimeout(() => location.reload(), 600);
                 return true;
             } else {
-                showToast(data.error || '更新失败', 'error');
+                showToast(msg, 'error');
                 return false;
             }
         } catch (e) {
@@ -226,7 +226,8 @@ async function analyzePost(linkId) {
     try {
         const res = await fetch(`/yard/admin/api/post/${linkId}/analyze`, {method: 'POST'});
         const data = await res.json();
-        showToast(data.message, data.success ? 'info' : 'error');
+        const msg = data.message || data.error || (data.success ? 'AI 评论生成成功' : '生成失败');
+        showToast(msg, data.success ? 'info' : 'error');
     } catch (e) {
         showToast('请求失败: ' + e.message, 'error');
     } finally {
@@ -240,11 +241,12 @@ async function deleteAnalysis(linkId) {
     try {
         const res = await fetch(`/yard/admin/api/post/${linkId}/delete-analysis`, {method: 'POST'});
         const data = await res.json();
+        const msg = data.message || data.error || (data.success ? '评论已删除' : '删除失败');
         if (data.success) {
-            showToast('评论已删除', 'success');
+            showToast(msg, 'success');
             setTimeout(() => location.reload(), 600);
         } else {
-            showToast(data.error || '删除失败', 'error');
+            showToast(msg, 'error');
         }
     } catch (e) {
         showToast('请求失败: ' + e.message, 'error');
@@ -262,11 +264,12 @@ async function swapOrder(linkId, targetLinkId) {
             body: JSON.stringify({target_link_id: targetLinkId})
         });
         const data = await res.json();
+        const msg = data.message || data.error || (data.success ? '交换顺序成功' : '交换失败');
         if (data.success) {
-            showToast(data.message, 'success');
+            showToast(msg, 'success');
             setTimeout(() => location.reload(), 600);
         } else {
-            showToast(data.error || '交换失败', 'error');
+            showToast(msg, 'error');
         }
     } catch (e) {
         showToast('请求失败: ' + e.message, 'error');
@@ -290,11 +293,12 @@ async function moveWindow(linkId) {
             body: JSON.stringify({target_window_no: targetWindow})
         });
         const data = await res.json();
+        const msg = data.message || data.error || (data.success ? '移动成功' : '移动失败');
         if (data.success) {
-            showToast(data.message, 'success');
+            showToast(msg, 'success');
             setTimeout(() => location.href = '{{ url_for("yard_admin.posts_list") }}', 800);
         } else {
-            showToast(data.error || '移动失败', 'error');
+            showToast(msg, 'error');
         }
     } catch (e) {
         showToast('请求失败: ' + e.message, 'error');
@@ -307,16 +311,14 @@ async function refreshPost(linkId) {
     if (!confirm('确定要从源重新拉取此帖子的最新内容和评论吗？')) return;
     showLoading('正在拉取帖子...');
     try {
-        const res = await fetch(`/yard/admin/api/post/${linkId}/refresh`, {
-            method: 'POST'
-        });
+        const res = await fetch(`/yard/admin/api/post/${linkId}/refresh`, { method: 'POST' });
         const data = await res.json();
+        const msg = data.message || data.error || (data.success ? '刷新成功' : '刷新失败');
         if (data.success) {
-            showToast(data.message || '刷新成功', 'success');
-            // 刷新页面以显示更新后的数据
+            showToast(msg, 'success');
             setTimeout(() => location.reload(), 1000);
         } else {
-            showToast(data.error || '刷新失败', 'error');
+            showToast(msg, 'error');
         }
     } catch (e) {
         showToast('请求异常: ' + e.message, 'error');
@@ -324,7 +326,6 @@ async function refreshPost(linkId) {
         hideLoading();
     }
 }
-
 // ========== 图片查看器 JavaScript ==========
 document.addEventListener('DOMContentLoaded', function() {
     // 获取所有图片项（仅限帖子图片，不包括评论图片）

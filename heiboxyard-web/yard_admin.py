@@ -190,7 +190,7 @@ def log_operation(operation_type, detail=None, nickname=None, ip=None, device_id
 # ========== 代理请求 ==========
 def proxy_request(method, endpoint, data=None, timeout=30):
     if requests is None:
-        return jsonify({'success': False, 'error': 'requests 库未安装'}), 500
+        return {'success': False, 'error': 'requests 库未安装'}, 500
     url = f"{PLUGIN_API_BASE}{endpoint}"
     try:
         if method == 'GET':
@@ -200,7 +200,7 @@ def proxy_request(method, endpoint, data=None, timeout=30):
                 data = {}
             resp = requests.post(url, json=data, timeout=timeout)
         else:
-            return jsonify({'success': False, 'error': '不支持的请求方法'}), 400
+            return {'success': False, 'error': '不支持的请求方法'}, 400
         try:
             return resp.json(), resp.status_code
         except:
@@ -501,7 +501,6 @@ def summary_manage():
 
 @yard_bp.route('/logs')
 def logs_page():
-    # 移除管理员检查，仅需登录（全局 before_request 已确保）
     if not session.get('authorized'):
         abort(401)
     ensure_message_board_table()
@@ -510,14 +509,35 @@ def logs_page():
         current_window_no=get_current_window_no()
     )
 
-# ========== API 代理路由（增强日志） ==========
+# ========== API 路由（全部补全 message 字段） ==========
+
+def _ensure_message(resp, success_msg=None, error_msg=None):
+    """
+    确保 resp 字典中包含 message 字段。
+    success_msg: 成功时的默认消息（若 resp 中无 message）
+    error_msg: 失败时的默认消息（若 resp 中无 message）
+    """
+    if resp.get('success', False):
+        if 'message' not in resp and success_msg:
+            resp['message'] = success_msg
+    else:
+        if 'message' not in resp:
+            # 优先使用 resp 中的 error，其次使用 error_msg，最后使用通用提示
+            resp['message'] = resp.get('error') or error_msg or '操作失败，请查看日志'
+    return resp
+
 @yard_bp.route('/api/stats')
 def api_stats():
-    return jsonify(proxy_request('GET', '/api/stats')[0]), 200
+    resp, status = proxy_request('GET', '/api/stats')
+    # 此 API 一般用于刷新统计，不需要 Toast，但为保险也补
+    resp = _ensure_message(resp, success_msg='获取统计成功')
+    return jsonify(resp), status
 
 @yard_bp.route('/api/windows')
 def api_windows():
-    return jsonify(proxy_request('GET', '/api/windows')[0]), 200
+    resp, status = proxy_request('GET', '/api/windows')
+    resp = _ensure_message(resp, success_msg='获取窗口列表成功')
+    return jsonify(resp), status
 
 @yard_bp.route('/api/post/<int:link_id>/reorder', methods=['POST'])
 def api_reorder_post(link_id):
@@ -542,6 +562,7 @@ def api_reorder_post(link_id):
     })
 
     resp, status = proxy_request('POST', f'/api/post/{link_id}/reorder', data)
+    resp = _ensure_message(resp, success_msg='交换顺序成功', error_msg='交换顺序失败')
     if not resp.get('success', False):
         log_operation('swap_order_failed', {'link_id': link_id, 'target_link_id': target_link_id, 'error': resp.get('error')})
     return jsonify(resp), status
@@ -571,8 +592,8 @@ def api_move_window(link_id):
     })
 
     resp, status = proxy_request('POST', f'/api/post/{link_id}/move-window', data)
+    resp = _ensure_message(resp, success_msg='移动窗口成功', error_msg='移动窗口失败')
     if not resp.get('success', False):
-        # 补充错误信息
         if not resp.get('error'):
             resp['error'] = '移动失败，请检查目标窗口是否存在或帖子是否已被移动。'
         log_operation('move_window_failed', {
@@ -605,6 +626,7 @@ def api_update_comment(link_id):
     })
 
     resp, status = proxy_request('POST', f'/api/post/{link_id}/comment', data)
+    resp = _ensure_message(resp, success_msg='评论已更新', error_msg='更新评论失败')
     if not resp.get('success', False):
         log_operation('edit_comment_failed', {'link_id': link_id, 'error': resp.get('error')})
     return jsonify(resp), status
@@ -613,6 +635,7 @@ def api_update_comment(link_id):
 def api_analyze_post(link_id):
     log_operation('generate_comment', {'link_id': link_id})
     resp, status = proxy_request('POST', f'/api/post/{link_id}/analyze', timeout=120)
+    resp = _ensure_message(resp, success_msg='AI 评论生成成功', error_msg='AI 评论生成失败')
     if not resp.get('success', False):
         log_operation('generate_comment_failed', {'link_id': link_id, 'error': resp.get('error')})
     return jsonify(resp), status
@@ -621,6 +644,7 @@ def api_analyze_post(link_id):
 def api_fetch_feed():
     log_operation('fetch_feed', {'window': get_current_window_no()})
     resp, status = proxy_request('POST', '/api/fetch-feed')
+    resp = _ensure_message(resp, success_msg='拉取 Feed 任务已启动', error_msg='拉取 Feed 失败')
     if not resp.get('success', False):
         log_operation('fetch_feed_failed', {'error': resp.get('error')})
     return jsonify(resp), status
@@ -629,6 +653,7 @@ def api_fetch_feed():
 def api_fetch_at():
     log_operation('fetch_at', {'window': get_current_window_no()})
     resp, status = proxy_request('POST', '/api/fetch-at')
+    resp = _ensure_message(resp, success_msg='拉取 @消息 任务已启动', error_msg='拉取 @消息 失败')
     if not resp.get('success', False):
         log_operation('fetch_at_failed', {'error': resp.get('error')})
     return jsonify(resp), status
@@ -639,6 +664,7 @@ def api_generate_report():
     window_no = data.get('window_no', get_current_window_no())
     log_operation('generate_report', {'window_no': window_no})
     resp, status = proxy_request('POST', '/api/generate-report', data)
+    resp = _ensure_message(resp, success_msg='生成晚报任务已启动', error_msg='生成晚报失败')
     if not resp.get('success', False):
         log_operation('generate_report_failed', {'window_no': window_no, 'error': resp.get('error')})
     return jsonify(resp), status
@@ -661,6 +687,7 @@ def api_reset_order():
     })
 
     resp, status = proxy_request('POST', '/api/reset-order', data)
+    resp = _ensure_message(resp, success_msg='顺序重置成功', error_msg='顺序重置失败')
     if not resp.get('success', False):
         log_operation('reset_order_failed', {'window_no': window_no, 'error': resp.get('error')})
     return jsonify(resp), status
@@ -684,6 +711,7 @@ def api_delete_analysis(link_id):
     })
 
     resp, status = proxy_request('POST', f'/api/post/{link_id}/delete-analysis')
+    resp = _ensure_message(resp, success_msg='评论已删除', error_msg='删除评论失败')
     if not resp.get('success', False):
         log_operation('delete_analysis_failed', {'link_id': link_id, 'error': resp.get('error')})
     return jsonify(resp), status
@@ -694,6 +722,7 @@ def api_analyze_window():
     window_no = data.get('window_no', get_current_window_no())
     log_operation('analyze_window', {'window_no': window_no})
     resp, status = proxy_request('POST', '/api/analyze-window', data)
+    resp = _ensure_message(resp, success_msg='AI 分析任务已启动', error_msg='AI 分析启动失败')
     if not resp.get('success', False):
         log_operation('analyze_window_failed', {'window_no': window_no, 'error': resp.get('error')})
     return jsonify(resp), status
@@ -717,9 +746,10 @@ def api_get_summary():
             'success': True,
             'comment': row[0],
             'model': row[1],
-            'analyzed_at': row[2]
+            'analyzed_at': row[2],
+            'message': '获取总评成功'
         })
-    return jsonify({'success': False, 'comment': None})
+    return jsonify({'success': False, 'comment': None, 'message': '该窗口暂无总评'})
 
 @yard_bp.route('/api/summary/update', methods=['POST'])
 def api_update_summary():
@@ -742,6 +772,7 @@ def api_update_summary():
     })
 
     resp, status = proxy_request('POST', '/api/summary/update', data)
+    resp = _ensure_message(resp, success_msg='总评已更新', error_msg='更新总评失败')
     if not resp.get('success', False):
         log_operation('update_summary_failed', {'window_no': window_no, 'error': resp.get('error')})
     return jsonify(resp), status
@@ -752,6 +783,7 @@ def api_generate_summary():
     window_no = data.get('window_no', get_current_window_no())
     log_operation('generate_summary', {'window_no': window_no})
     resp, status = proxy_request('POST', '/api/summary/generate', data)
+    resp = _ensure_message(resp, success_msg='总评生成任务已启动', error_msg='生成总评失败')
     if not resp.get('success', False):
         log_operation('generate_summary_failed', {'window_no': window_no, 'error': resp.get('error')})
     return jsonify(resp), status
@@ -760,7 +792,7 @@ def api_generate_summary():
 @yard_bp.route('/api/logs')
 def api_logs():
     if not session.get('authorized'):
-        return jsonify({'error': 'Unauthorized'}), 401
+        return jsonify({'error': 'Unauthorized', 'message': '未授权'}), 401
 
     date_str = request.args.get('date')
     page = request.args.get('page', 1, type=int)
@@ -809,7 +841,6 @@ def api_logs():
             'detail': detail,
             'timestamp': row[6]
         })
-        # 收集需要查询的 link_id（兼容字符串和整数）
         if isinstance(detail, dict):
             if 'link_id' in detail:
                 try:
@@ -822,7 +853,6 @@ def api_logs():
                 except (ValueError, TypeError):
                     pass
 
-    # 查询帖子标题、作者、内容预览
     post_map = {}
     if link_ids:
         conn = get_db()
@@ -845,7 +875,6 @@ def api_logs():
             }
         conn.close()
 
-    # 合并帖子信息到对应日志项
     for item in items:
         d = item.get('detail', {})
         if isinstance(d, dict):
@@ -859,7 +888,8 @@ def api_logs():
         'total': total,
         'page': page,
         'per_page': per_page,
-        'total_pages': (total + per_page - 1) // per_page
+        'total_pages': (total + per_page - 1) // per_page,
+        'message': '获取日志成功'
     })
 
 # ========== 白名单与封禁管理 ==========
@@ -926,14 +956,14 @@ def whitelist():
 @yard_bp.route('/whitelist/update-identifier', methods=['POST'])
 def update_identifier():
     if not session.get('authorized') or session.get('role') != 'admin':
-        return jsonify({'error': 'Unauthorized'}), 403
+        return jsonify({'error': 'Unauthorized', 'message': '无权限'}), 403
 
     data = request.get_json() or {}
     record_id = data.get('id')
     new_identifier = data.get('identifier', '').strip()
 
     if not record_id:
-        return jsonify({'success': False, 'error': '缺少记录 ID'}), 400
+        return jsonify({'success': False, 'error': '缺少记录 ID', 'message': '缺少记录 ID'}), 400
 
     if not new_identifier:
         new_identifier = f"UID-{secrets.token_hex(4).upper()}"
@@ -946,23 +976,23 @@ def update_identifier():
     conn.close()
 
     if affected:
-        return jsonify({'success': True, 'identifier': new_identifier})
+        return jsonify({'success': True, 'identifier': new_identifier, 'message': '更新成功'})
     else:
-        return jsonify({'success': False, 'error': '记录不存在'}), 404
+        return jsonify({'success': False, 'error': '记录不存在', 'message': '记录不存在'}), 404
 
 @yard_bp.route('/whitelist/batch-merge', methods=['POST'])
 def batch_merge():
     if not session.get('authorized') or session.get('role') != 'admin':
-        return jsonify({'error': 'Unauthorized'}), 403
+        return jsonify({'error': 'Unauthorized', 'message': '无权限'}), 403
 
     data = request.get_json() or {}
     ids = data.get('ids', [])
     target_uid = data.get('target_identifier', '').strip()
 
     if not ids:
-        return jsonify({'success': False, 'error': '请选择至少一条记录'}), 400
+        return jsonify({'success': False, 'error': '请选择至少一条记录', 'message': '请选择至少一条记录'}), 400
     if not target_uid:
-        return jsonify({'success': False, 'error': '请输入目标标识符'}), 400
+        return jsonify({'success': False, 'error': '请输入目标标识符', 'message': '请输入目标标识符'}), 400
 
     conn = get_db()
     cur = conn.cursor()
@@ -972,12 +1002,12 @@ def batch_merge():
     conn.commit()
     conn.close()
 
-    return jsonify({'success': True, 'merged': affected})
+    return jsonify({'success': True, 'merged': affected, 'message': f'成功合并 {affected} 条记录'})
 
 @yard_bp.route('/whitelist/delete/<int:id>', methods=['POST'])
 def whitelist_delete(id):
     if not session.get('authorized') or session.get('role') != 'admin':
-        return jsonify({'error': 'Unauthorized'}), 403
+        return jsonify({'error': 'Unauthorized', 'message': '无权限'}), 403
 
     conn = get_db()
     cur = conn.cursor()
@@ -997,22 +1027,22 @@ def whitelist_delete(id):
         log_operation('unblock_ip', {'ip': ip})
         return jsonify({'success': True, 'message': '已解封'})
     else:
-        return jsonify({'success': False, 'error': '记录不存在'}), 404
+        return jsonify({'success': False, 'error': '记录不存在', 'message': '记录不存在'}), 404
 
 @yard_bp.route('/whitelist/block', methods=['POST'])
 def whitelist_block():
     if not session.get('authorized') or session.get('role') != 'admin':
-        return jsonify({'error': 'Unauthorized'}), 403
+        return jsonify({'error': 'Unauthorized', 'message': '无权限'}), 403
 
     data = request.get_json() or {}
     ip = data.get('ip', '').strip()
     duration_str = data.get('duration', '1h').strip()
     if not ip:
-        return jsonify({'success': False, 'error': 'IP 不能为空'}), 400
+        return jsonify({'success': False, 'error': 'IP 不能为空', 'message': 'IP 不能为空'}), 400
 
     import re
     if not re.match(r'^(\d{1,3}\.){3}\d{1,3}$', ip):
-        return jsonify({'success': False, 'error': '无效的 IP 格式'}), 400
+        return jsonify({'success': False, 'error': '无效的 IP 格式', 'message': '无效的 IP 格式'}), 400
 
     delta = parse_duration(duration_str)
     blocked_until = datetime.now() + delta
@@ -1041,7 +1071,7 @@ def whitelist_block():
 @yard_bp.route('/whitelist/force-logout', methods=['POST'])
 def force_logout():
     if not session.get('authorized') or session.get('role') != 'admin':
-        return jsonify({'error': 'Unauthorized'}), 403
+        return jsonify({'error': 'Unauthorized', 'message': '无权限'}), 403
 
     today = datetime.now().strftime('%Y-%m-%d')
     conn = get_db()
@@ -1065,7 +1095,7 @@ def api_online():
     ''')
     count = cur.fetchone()[0]
     conn.close()
-    return jsonify({'online': count})
+    return jsonify({'online': count, 'message': '获取在线人数成功'})
 
 @yard_bp.route('/download/<filename>')
 def download_report(filename):
@@ -1086,22 +1116,47 @@ def download_report(filename):
 # ========== 留言板 API ==========
 @yard_bp.route('/api/messages', methods=['GET'])
 def api_get_messages():
+    page = request.args.get('page', 1, type=int)
+    per_page = request.args.get('per_page', 9, type=int)
+    if per_page > 50:
+        per_page = 9
+    offset = (page - 1) * per_page
+
     conn = get_db()
     cur = conn.cursor()
-    # 改为 ASC 正序，最新的在最下面
-    cur.execute('SELECT id, nickname, content, timestamp FROM message_board ORDER BY timestamp ASC LIMIT 100')
+    cur.execute('SELECT COUNT(*) FROM message_board')
+    total = cur.fetchone()[0]
+
+    cur.execute('''
+        SELECT id, nickname, content, timestamp
+        FROM message_board
+        ORDER BY timestamp DESC
+        LIMIT ? OFFSET ?
+    ''', (per_page, offset))
     rows = cur.fetchall()
     conn.close()
-    return jsonify([dict(row) for row in rows])
+
+    messages = [dict(row) for row in rows]
+    for msg in messages:
+        msg['time_str'] = datetime.fromtimestamp(msg['timestamp']).strftime('%Y-%m-%d %H:%M:%S')
+
+    return jsonify({
+        'messages': messages,
+        'total': total,
+        'page': page,
+        'per_page': per_page,
+        'total_pages': (total + per_page - 1) // per_page,
+        'message': '获取留言成功'
+    })
 
 @yard_bp.route('/api/messages', methods=['POST'])
 def api_add_message():
     if not session.get('authorized'):
-        return jsonify({'error': 'Unauthorized'}), 401
+        return jsonify({'error': 'Unauthorized', 'message': '未授权'}), 401
     data = request.get_json() or {}
     content = data.get('content', '').strip()
     if not content:
-        return jsonify({'error': '内容不能为空'}), 400
+        return jsonify({'error': '内容不能为空', 'message': '内容不能为空'}), 400
     nickname = session.get('nickname') or '匿名'
     ip = get_client_ip()
     conn = get_db()
@@ -1111,12 +1166,12 @@ def api_add_message():
     conn.commit()
     message_id = cur.lastrowid
     conn.close()
-    return jsonify({'success': True, 'id': message_id})
+    return jsonify({'success': True, 'id': message_id, 'message': '留言发送成功'})
 
 @yard_bp.route('/api/messages/<int:message_id>', methods=['DELETE'])
 def api_delete_message(message_id):
     if not session.get('authorized') or session.get('role') != 'admin':
-        return jsonify({'error': 'Unauthorized'}), 403
+        return jsonify({'error': 'Unauthorized', 'message': '无权限'}), 403
     conn = get_db()
     cur = conn.cursor()
     cur.execute('DELETE FROM message_board WHERE id = ?', (message_id,))
@@ -1124,18 +1179,17 @@ def api_delete_message(message_id):
     conn.commit()
     conn.close()
     if affected:
-        return jsonify({'success': True})
+        return jsonify({'success': True, 'message': '删除成功'})
     else:
-        return jsonify({'error': '留言不存在'}), 404
+        return jsonify({'error': '留言不存在', 'message': '留言不存在'}), 404
 
+# ========== 重新拉取帖子 ==========
 @yard_bp.route('/api/post/<int:link_id>/refresh', methods=['POST'])
 def api_refresh_post(link_id):
     """重新拉取帖子详情并更新内容与评论"""
-    # 记录操作开始
     log_operation('refresh_post', {'link_id': link_id})
 
     try:
-        # 获取小黑盒程序路径
         program_path = current_app.config.get('HEIBOXYARD_PROGRAM_PATH',
                                               '/home/admin/qqbot/astrbot_data/plugins/heiboxyard/heibox-comment-bot-master')
         script_path = Path(program_path) / 'src' / 'link.py'
@@ -1144,14 +1198,12 @@ def api_refresh_post(link_id):
         if not script_path.exists():
             raise Exception('小黑盒程序未找到，请检查配置')
 
-        # 调用子进程拉取数据
         cmd = [sys.executable, str(script_path), '--link-id', str(link_id)]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, cwd=str(Path(program_path)))
         if result.returncode != 0:
             raise Exception(f'拉取失败: {result.stderr[:200]}')
         detail = json.loads(result.stdout)
 
-        # 解析内容
         content_raw = detail.get('content', '')
         try:
             blocks = json.loads(content_raw) if content_raw else []
@@ -1166,7 +1218,6 @@ def api_refresh_post(link_id):
         except:
             content_text = content_raw
 
-        # 更新数据库
         db_path = current_app.config.get('HEIBOXYARD_DB_PATH',
                                          '/home/admin/qqbot/astrbot_data/plugin_data/heiboxyard/posts.db')
         conn = sqlite3.connect(db_path)
@@ -1191,7 +1242,6 @@ def api_refresh_post(link_id):
                 link_id
             ))
 
-            # 替换评论
             cur.execute("DELETE FROM post_comments WHERE link_id = ?", (link_id,))
             for comment in top_comments:
                 rank = comment.get('rank')
@@ -1222,11 +1272,10 @@ def api_refresh_post(link_id):
 
         except Exception as db_error:
             conn.rollback()
-            raise db_error  # 重新抛出，由外层统一捕获
+            raise db_error
         finally:
             conn.close()
 
     except Exception as e:
-        # 记录失败日志
         log_operation('refresh_post_failed', {'link_id': link_id, 'error': str(e)})
-        return jsonify({'success': False, 'error': str(e)}), 500
+        return jsonify({'success': False, 'error': str(e), 'message': f'刷新失败: {str(e)}'}), 500

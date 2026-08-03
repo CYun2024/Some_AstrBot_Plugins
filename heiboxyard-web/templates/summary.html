@@ -61,12 +61,12 @@ async function generateSummary() {
             body: JSON.stringify({window_no: windowNo})
         });
         const data = await res.json();
+        const msg = data.message || data.error || (data.success ? '总评生成任务已启动' : '生成失败');
         if (data.success) {
-            showToast('总评生成任务已启动，稍后将自动刷新', 'success');
-            // 10秒后刷新
+            showToast(msg, 'success');
             setTimeout(() => location.reload(), 10000);
         } else {
-            showToast('生成失败: ' + (data.error || '未知错误'), 'error');
+            showToast(msg, 'error');
         }
     } catch (e) {
         showToast('请求失败: ' + e.message, 'error');
@@ -80,7 +80,10 @@ async function editSummary() {
     const content = `<textarea class="modal-textarea" id="summaryInput" rows="6" placeholder="输入总评内容...">${currentComment}</textarea>`;
     showModal('编辑总评', content, async () => {
         const textarea = document.getElementById('summaryInput');
-        if (!textarea) { showToast('输入框未找到', 'error'); return false; }
+        if (!textarea) {
+            showToast('输入框未找到', 'error');
+            return false;
+        }
         const comment = textarea.value.trim();
         showLoading('更新中...');
         try {
@@ -90,12 +93,14 @@ async function editSummary() {
                 body: JSON.stringify({window_no: '{{ window_no }}', comment})
             });
             const data = await res.json();
+            // 关键改动：构造消息文本，优先使用 message，其次 error，最后是默认文案
+            const msg = data.message || data.error || (data.success ? '总评已更新' : '更新失败');
             if (data.success) {
-                showToast('总评已更新', 'success');
+                showToast(msg, 'success');
                 setTimeout(() => location.reload(), 600);
                 return true;
             } else {
-                showToast(data.error || '更新失败', 'error');
+                showToast(msg, 'error');
                 return false;
             }
         } catch (e) {
