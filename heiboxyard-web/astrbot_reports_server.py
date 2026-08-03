@@ -7,6 +7,9 @@ import secrets
 import time  # [新增] 用于日志时间戳
 from werkzeug.middleware.proxy_fix import ProxyFix
 
+from mcserver import monitor as mc_monitor
+from flask import Blueprint
+
 app = Flask(__name__)
 
 # ========== 配置读取（从环境变量） ==========
@@ -902,6 +905,32 @@ except ImportError as e:
 
 # ========== 初始化数据库 ==========
 init_db()
+
+# ========== MC-Server ==========
+# 初始化 mcserver 数据库
+mc_monitor.init_db()
+
+# 启动 mcserver 监控线程
+mc_monitor.start_monitor()
+
+mc_bp = Blueprint('mcserver', __name__, template_folder='mcserver/templates')
+
+@mc_bp.route('/')
+def mcserver_index():
+    return render_template('index.html')
+
+@mc_bp.route('/api/latest')
+def mcserver_latest():
+    data = mc_monitor.get_latest_status()
+    return jsonify(data)
+
+@mc_bp.route('/api/daily')
+def mcserver_daily():
+    data = mc_monitor.get_daily_ratios()
+    return jsonify(data)
+
+# 注册蓝图，设置前缀 /mcserver
+app.register_blueprint(mc_bp, url_prefix='/mcserver')
 
 if __name__ == '__main__':
     app.run(host='127.0.0.1', port=5000)
