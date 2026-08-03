@@ -877,38 +877,47 @@ class PostManager:
     # ==================== 帖子处理流程 ====================
 
     async def process_single_post(self, link_id: int, target_window_no: str = None,
-                                   source: str = "feed", at_receive_time: int = None) -> bool:
-        """处理单个帖子"""
+                                   source: str = "feed", at_receive_time: int = None,
+                                   force_move: bool = False) -> bool:
+        """处理单个帖子
+        force_move: 为 True 时强制归入目标窗口（手动模式）；为 False 时仅当帖子不在目标窗口时才处理（定时模式）
+        """
         existing = self.get_existing_post(link_id)
         if existing:
             _, content, image_urls, old_window, old_date_str, old_daily_no, old_source = existing
             if content and image_urls:
+                # 帖子已完整存在
                 if source == "at" and target_window_no:
-                    if old_date_str == target_window_no:
-                        logger.info(f"link_id={link_id} 已完整拉取且在同一窗口({old_date_str})，跳过")
+                    if not force_move and old_date_str == target_window_no:
+                        # 定时任务且帖子已经在当前窗口拉取过，跳过
+                        logger.info(f"link_id={link_id} 已在当前窗口 {target_window_no} 拉取过，跳过")
                         return False
-                    logger.info(f"link_id={link_id} 已存在，@消息触发重新编号到窗口 {target_window_no} (原窗口={old_date_str})")
-                    full_post = self._get_full_post(link_id)
-                    if full_post:
-                        window_start, window_end = get_window_by_no(target_window_no)
-                        new_daily_no = self.get_next_daily_no(target_window_no)
-                        self.save_post(
-                            link_id, new_daily_no, window_start, target_window_no,
-                            full_post["detail"], full_post["content"],
-                            full_post["images"], full_post["topics"], source=source
-                        )
-                        logger.info(f"✅ 帖子重新编号: #{new_daily_no}, link_id={link_id}, 来源={source}")
-                        return True
                     else:
-                        logger.warning(f"link_id={link_id} 重新编号失败，无法读取完整数据")
-                        return False
+                        # 强制移动 或 帖子在其他窗口，执行归入
+                        logger.info(f"link_id={link_id} 归入窗口 {target_window_no} (原窗口={old_date_str})")
+                        full_post = self._get_full_post(link_id)
+                        if full_post:
+                            window_start, window_end = get_window_by_no(target_window_no)
+                            new_daily_no = self.get_next_daily_no(target_window_no)
+                            self.save_post(
+                                link_id, new_daily_no, window_start, target_window_no,
+                                full_post["detail"], full_post["content"],
+                                full_post["images"], full_post["topics"], source=source
+                            )
+                            logger.info(f"✅ 帖子归入: #{new_daily_no}, link_id={link_id}")
+                            return True
+                        else:
+                            logger.warning(f"link_id={link_id} 归入失败，无法读取完整数据")
+                            return False
                 else:
-                    if old_date_str == target_window_no and old_source == source:
-                        logger.info(f"link_id={link_id} 已完整拉取且在同一窗口同一来源，跳过")
-                    else:
-                        logger.info(f"link_id={link_id} 已完整拉取，窗口/来源不同，跳过")
+                    # 非at来源或未指定目标窗口，跳过
+                    logger.info(f"link_id={link_id} 已完整拉取，跳过")
                     return False
-
+            else:
+                # 内容不完整，需要重新拉取
+                logger.info(f"link_id={link_id} 内容不完整，重新拉取")
+    
+        # 拉取详情（新增或内容不完整）
         detail = await self.fetch_link_detail(link_id)
         if not detail:
             logger.warning(f"拉取详情失败 link_id={link_id}，跳过")
@@ -926,7 +935,7 @@ class PostManager:
         if source == "at" and target_window_no:
             window_start, window_end = get_window_by_no(target_window_no)
             window_no = target_window_no
-            logger.info(f"@消息 link_id={link_id} 强制归入窗口 {window_no}")
+            logger.info(f"@消息 link_id={link_id} 归入窗口 {window_no}")
         else:
             window_start, window_end = get_window_for_timestamp(real_create_at)
             window_no = get_date_str_from_ts(window_end)
@@ -942,7 +951,7 @@ class PostManager:
         return True
 
     async def process_posts(self, link_ids: list[int], source: str = "feed",
-                           target_window_no: str = None, at_receive_time: int = None) -> int:
+                           target_window_no: str = None, at_receive_time: int = None,force_move: bool = False) -> int:
         """批量处理帖子列表"""
         if not link_ids:
             return 0
@@ -960,7 +969,8 @@ class PostManager:
         for idx, link_id in enumerate(link_ids):
             success = await self.process_single_post(
                 link_id, target_window_no=target_window_no,
-                source=source, at_receive_time=at_receive_time
+                source=source, at_receive_time=at_receive_time,
+                force_move=force_move
             )
             if success:
                 processed_count += 1

@@ -154,7 +154,7 @@ class AtMessageFetcher:
 
             logger.info(f"@消息拉取到 {len(link_ids)} 个帖子，开始处理...")
             processed = await self.post_manager.process_posts(
-                link_ids, source="at", target_window_no=target_window_no
+                link_ids, source="at", target_window_no=target_window_no,force_move=False
             )
             return processed
 
@@ -186,7 +186,7 @@ class AtMessageFetcher:
 
             logger.info(f"手动 @消息拉取到 {len(link_ids)} 个帖子，开始处理...")
             processed = await self.post_manager.process_posts(
-                link_ids, source="at", target_window_no=target_window_no
+                link_ids, source="at", target_window_no=target_window_no,force_move=True
             )
             return processed
 
