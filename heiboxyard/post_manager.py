@@ -1079,3 +1079,53 @@ class PostManager:
             return False, f"移动失败: {str(e)}"
         finally:
             conn.close()
+
+    # ==================== 传送门相关 ====================
+
+    def get_posts_link_ids_by_window(self, window_no: str) -> list[int]:
+        """获取指定窗口的所有帖子的 link_id（按 daily_no 排序）"""
+        self._ensure_db()
+        conn = sqlite3.connect(self.db_path)
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT link_id FROM posts WHERE date_str = ? ORDER BY daily_no",
+            (window_no,)
+        )
+        rows = cur.fetchall()
+        conn.close()
+        return [row[0] for row in rows]
+
+    async def send_comment(self, link_id: str, text: str, reply_id: int = None) -> Optional[int]:
+        """
+        发送评论到指定帖子
+        :param link_id: 目标帖子ID（可以是十进制数字字符串或十六进制编码字符串）
+        :param text: 评论内容
+        :param reply_id: 回复的评论ID（可选）
+        :return: 成功返回 comment_id，失败返回 None
+        """
+        script_path = self.program_path / "src" / "send_comment.py"
+        if not script_path.exists():
+            script_path = self.program_path / "send_comment.py"
+        if not script_path.exists():
+            logger.error("send_comment.py 不存在")
+            return None
+
+        args = [str(script_path), "--link-id", link_id, "--text", text]
+        if reply_id is not None:
+            args.extend(["--reply-id", str(reply_id)])
+
+        result = await self.run_command(args)
+        if not result["success"]:
+            logger.error(f"发送评论失败，stderr: {result['stderr']}")
+            return None
+
+        try:
+            data = json.loads(result["stdout"])
+            if data.get("ok"):
+                return data.get("comment_id")
+            else:
+                logger.error(f"发送评论失败，msg: {data.get('msg')}")
+                return None
+        except json.JSONDecodeError as e:
+            logger.error(f"解析评论响应失败: {e}, 原始输出: {result['stdout'][:200]}")
+            return None

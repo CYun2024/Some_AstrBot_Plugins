@@ -111,8 +111,8 @@ def _build_analysis_prompt(posts: list[dict]) -> str:
 
         # 内容
         content = p.get('content', '') or '(无内容)'
-        if len(content) > 1500:
-            content = content[:1500] + "...（内容过长已截断）"
+        if len(content) > 300:
+            content = content[:300] + "...（内容过长已截断）"
         lines.append(f"内容:\n{content}")
 
         # 图片描述（最多5张）

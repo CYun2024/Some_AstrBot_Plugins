@@ -723,6 +723,7 @@ class HeiboxYard(Star):
 
             except Exception as e:
                 logger.error("生成晚报失败: " + str(e), exc_info=True)
+
     async def _render_evening_report_image(self, html_content: str) -> Optional[str]:
         try:
             logger.info("开始调用 AstrBot T2I 渲染...")
@@ -736,6 +737,43 @@ class HeiboxYard(Star):
         except Exception as e:
             logger.error("渲染晚报图片失败: " + str(e), exc_info=True)
             return None
+
+	# ==================== 传送门 ======================
+
+    async def _run_portal(self, window_no: str, link_ids: list[int], target_link_id: str):
+        """执行传送门评论任务"""
+        try:
+            # 按4个一组分组
+            groups = [link_ids[i:i+4] for i in range(0, len(link_ids), 4)]
+            total_groups = len(groups)
+            first_comment_id = None
+
+            for idx, group in enumerate(groups):
+                # 构建评论内容
+                lines = []
+                if idx == 0:
+                    lines.append("传送门喵：")
+                for lid in group:
+                    url = f"https://api.xiaoheihe.cn/v3/bbs/app/api/web/share?link_id={lid}"
+                    lines.append(url)
+                text = "\n".join(lines)
+
+                # 发送评论（使用原始target_link_id）
+                reply_id = None if idx == 0 else first_comment_id
+                comment_id = await self.post_manager.send_comment(target_link_id, text, reply_id)
+                if comment_id:
+                    if idx == 0:
+                        first_comment_id = comment_id
+                    logger.info(f"传送门评论组 {idx+1}/{total_groups} 发送成功，comment_id={comment_id}")
+                else:
+                    logger.error(f"传送门评论组 {idx+1}/{total_groups} 发送失败")
+
+                if idx < total_groups - 1:
+                    await asyncio.sleep(30)
+
+            logger.info(f"传送门任务完成，窗口 {window_no}，共 {len(link_ids)} 个帖子")
+        except Exception as e:
+            logger.error(f"传送门任务异常: {e}", exc_info=True)
 
     # ==================== 发送方法 ====================
 
@@ -1435,6 +1473,33 @@ class HeiboxYard(Star):
         yield event.plain_result(f"🔄 正在重置窗口 {window_no} 的帖子顺序...")
         renumbered, result_msg = self.post_manager.reset_daily_order(window_no)
         yield event.plain_result(result_msg)
+
+    @filter.command("传送门")
+    async def cmd_portal(self, event: AstrMessageEvent):
+        """/传送门 <窗口编号> <目标帖子ID>"""
+        msg = event.message_str.strip()
+        parts = msg.split()
+        if len(parts) < 3:
+            yield event.plain_result("❌ 用法: /传送门 <窗口编号> <目标帖子ID>")
+            return
+
+        window_no = parts[1]
+        target_link_id_raw = parts[2]   # 保留原始输入，不做转换
+
+        if not (len(window_no) == 8 and window_no.isdigit()):
+            yield event.plain_result("❌ 窗口编号格式错误，应为YYYYMMDD")
+            return
+
+        # 获取窗口帖子列表（十进制ID）
+        link_ids = self.post_manager.get_posts_link_ids_by_window(window_no)
+        if not link_ids:
+            yield event.plain_result(f"📭 窗口 {window_no} 没有帖子")
+            return
+
+        yield event.plain_result(
+            f"🚪 传送门任务已启动：窗口 {window_no} 共 {len(link_ids)} 个帖子，将发送到帖子 {target_link_id_raw}"
+        )
+        asyncio.create_task(self._run_portal(window_no, link_ids, target_link_id_raw))
 
     # ==================== 生命周期 ====================
 
