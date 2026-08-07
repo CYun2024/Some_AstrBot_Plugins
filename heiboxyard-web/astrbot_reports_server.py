@@ -1,4 +1,7 @@
 # -*- coding: utf-8 -*-
+from gevent import monkey
+monkey.patch_all()
+
 from flask import Flask, send_file, jsonify, request, session, redirect, render_template
 import os
 from datetime import datetime, timedelta
@@ -9,6 +12,8 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 
 from mcserver import monitor as mc_monitor
 from flask import Blueprint
+
+
 
 app = Flask(__name__)
 
@@ -650,9 +655,11 @@ def check_access():
     if request.path == '/auth':
         return
 
+    '''
     # ── 关键改动：只有 /yard/admin 路径需要认证 ──
     if not request.path.startswith('/yard/admin'):
         return  # 完全公开，不执行任何认证/封禁检查
+    '''
 
     # 以下是管理端专用认证逻辑
     ip = get_client_ip()
@@ -720,9 +727,16 @@ def check_access():
     return render_template('login.html', next_url=request.url), 401
 
 # ========== 原有路由（group / yard / etc. 保持不变） ==========
+
 @app.route('/')
 def index():
-    return '''<!DOCTYPE html>
+    time.sleep(3600)
+    return '', 204
+
+#@app.route('/')
+#def index():
+#    return '''<!DOCTYPE html>
+'''
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
@@ -795,6 +809,7 @@ def index():
     </div>
 </body>
 </html>'''
+
 
 # ========== 群聊路由 ==========
 @app.route('/group')

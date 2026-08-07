@@ -139,7 +139,7 @@
         <!-- 调整窗口 -->
         <div class="sidebar-card">
             <h3 class="sidebar-title">调整窗口</h3>
-            <p class="sidebar-hint">将帖子移动到其他窗口 <span style="color: #FF8C00;">(存在间歇性触发bug，如果无法移动请调整顺序后移动)</span></p>
+            <p class="sidebar-hint">将帖子移动到其他窗口 <span style="color: #FF8C00;">(存在间歇性触发bug，如果无法移动请调整顺序或重置窗口顺序后移动)</span></p>
             <select class="filter-select" id="targetWindow" style="width: 100%; margin-bottom: 8px;">
                 {% for w in all_windows %}
                 {% if w != post.date_str %}
